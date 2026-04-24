@@ -42,11 +42,7 @@ func TestScanOnceEmitsBreachAndIsIdempotent(t *testing.T) {
 	}
 
 	writer := app.NewEventWriter()
-	systemTok, err := auth.NewService(pool, writer).CreateToken(ctx, auth.CreateTokenInput{
-		Name:   "worker-integration",
-		Source: domain.SourceSystem,
-		IsRoot: true,
-	})
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-integration")
 	if err != nil {
 		t.Fatalf("create system token: %v", err)
 	}
@@ -158,11 +154,7 @@ func TestScanOnceReBreachesAfterStateRotation(t *testing.T) {
 	}
 
 	writer := app.NewEventWriter()
-	systemTok, err := auth.NewService(pool, writer).CreateToken(ctx, auth.CreateTokenInput{
-		Name:   "worker-rotation",
-		Source: domain.SourceSystem,
-		IsRoot: true,
-	})
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-rotation")
 	if err != nil {
 		t.Fatalf("create system token: %v", err)
 	}
@@ -296,6 +288,25 @@ func countEventsForSubject(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		t.Fatalf("count events subject=%s kind=%s: %v", id, kind, err)
 	}
 	return n
+}
+
+func createSystemToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, name string) (auth.CreateTokenResult, error) {
+	t.Helper()
+
+	service := auth.NewService(pool, writer)
+	root, err := service.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "root",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		return auth.CreateTokenResult{}, err
+	}
+	return service.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   name,
+		Source: domain.SourceSystem,
+		Actor:  &root.Token,
+	})
 }
 
 // newIntegrationPool mirrors the helper in internal/api/signals_integration_test.go;
