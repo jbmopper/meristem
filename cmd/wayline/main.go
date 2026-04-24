@@ -1,8 +1,8 @@
 // wayline is the single binary for the wayline coordination plane.
 //
 // Two runtime modes share one codebase and one database, per the spec:
-//   wayline api     - HTTP surface
-//   wayline worker  - background jobs (not in v0; placeholder ships in v1)
+//   wayline api               - HTTP surface
+//   wayline worker --once     - one-shot bounded-patience scan (v1 kernel)
 //
 // Plus operational subcommands:
 //   wayline migrate  - apply pending Postgres migrations
@@ -60,6 +60,10 @@ func main() {
 		err = runSeed(ctx, logger, args)
 	case "rebuild":
 		err = runRebuild(ctx, logger, args)
+	case "worker":
+		err = runWorker(ctx, logger, args)
+	case "feed":
+		err = runFeed(ctx, logger, args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -131,6 +135,8 @@ usage:
   wayline mcp               run the MCP stdio server (reads WAYLINE_TOKEN)
   wayline seed v1           seed the v1 substrate backlog (reads WAYLINE_TOKEN, must be source=system)
   wayline rebuild           fold events through projectors into a sandbox schema and diff vs live
+  wayline worker --once     one-shot bounded-patience scan (reads WAYLINE_TOKEN, must be source=system)
+  wayline feed [--watch]    human-readable terminal view of the activity log
   wayline healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
   wayline version           print version
   wayline help              show this message

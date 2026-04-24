@@ -199,10 +199,14 @@ func runSeedV1(ctx context.Context, logger *slog.Logger, args []string) error {
 	return nil
 }
 
+type tokenAuthenticator interface {
+	Authenticate(context.Context, string) (domain.Token, error)
+}
+
 // resolveSystemToken loads the bearer in WAYLINE_TOKEN and refuses to
-// proceed unless it is a system-source token. docs/v0.md is explicit:
-// "The seed command uses a dedicated `system` token, not root."
-func resolveSystemToken(ctx context.Context, service *auth.Service) (domain.Token, error) {
+// proceed unless it is a dedicated, non-root system token. docs/v0.md is
+// explicit: "The seed command uses a dedicated `system` token, not root."
+func resolveSystemToken(ctx context.Context, service tokenAuthenticator) (domain.Token, error) {
 	secret := os.Getenv("WAYLINE_TOKEN")
 	if secret == "" {
 		return domain.Token{}, fmt.Errorf("seed v1: WAYLINE_TOKEN with a system-source bearer is required (mint one with `wayline tokens create --source system --name seed`)")
@@ -213,6 +217,9 @@ func resolveSystemToken(ctx context.Context, service *auth.Service) (domain.Toke
 	}
 	if tok.Source != domain.SourceSystem {
 		return domain.Token{}, fmt.Errorf("seed v1: WAYLINE_TOKEN must be source=system, got %q (root is deliberately not accepted)", tok.Source)
+	}
+	if tok.IsRoot {
+		return domain.Token{}, fmt.Errorf("seed v1: WAYLINE_TOKEN must be a dedicated system token, not root")
 	}
 	return tok, nil
 }

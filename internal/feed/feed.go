@@ -31,6 +31,7 @@ var IncludedKinds = []string{
 	domain.EventWorkItemEventAppended,
 	domain.EventWorkItemRelationAdded,
 	domain.EventSignalReceived,
+	domain.EventPatienceBreached,
 }
 
 // ExcludedKinds enumerates the event kinds the system explicitly *does not*
