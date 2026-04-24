@@ -1,0 +1,29 @@
+# Operator-local state. .wayline/ holds the bootstrap-minted root and
+# seed token secrets (and any agent tokens minted from this host); the
+# files are mode 0600 on disk and must never reach a remote repo.
+.wayline/
+
+# Per-host config. .env.example is the public template (committed);
+# .env and .env.<profile> are local secrets.
+.env
+.env.*
+!.env.example
+
+# Editor / agent / OS clutter.
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+.serena/
+terminals/
+
+# Go build artifacts.
+*.test
+*.out
+coverage.*
+/wayline
+/cmd/wayline/wayline
+
+# Local snapshot binaries we sometimes drop in /tmp during dev are not
+# in-tree, but if a developer builds at the repo root they should not
+# accidentally commit the resulting binary.

@@ -1,0 +1,36 @@
+# Anything not needed by `go build ./cmd/wayline` is excluded from the
+# Docker build context. Smaller context = faster `docker build` and a
+# tighter cache surface.
+
+# Local dev clutter and VCS metadata.
+.git/
+.github/
+.gitignore
+.gitattributes
+.DS_Store
+*.log
+
+# Editor / agent state.
+.cursor/
+.vscode/
+.idea/
+terminals/
+
+# Per-host secrets. .env.example is intentionally allow-listed below.
+.env
+.env.*
+!.env.example
+
+# Documentation, examples, and operator scripts. The runtime binary
+# does not consume them; the schema parity test reads docs/schemas/ at
+# test time only, and we do not run tests in the Dockerfile.
+docs/
+examples/
+scripts/
+deploy/
+README.md
+AGENTS.md
+
+# Coverage and other build artefacts that some workflows leave behind.
+coverage.out
+*.test
