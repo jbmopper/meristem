@@ -9,6 +9,10 @@
 .env.*
 !.env.example
 
+# Operator scratch. HUMAN.md is jay's running notebook — questions,
+# half-formed thoughts, things to ask. Not for the repo.
+HUMAN.md
+
 # Editor / agent / OS clutter.
 .DS_Store
 .idea/

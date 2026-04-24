@@ -61,12 +61,9 @@ func (s *Service) CreateToken(ctx context.Context, in CreateTokenInput) (CreateT
 			return CreateTokenResult{}, ErrRootRequired
 		}
 	}
-	tokenSource := in.Source
-	if tokenSource == "" {
-		tokenSource = domain.SourceHuman
-	}
-	if !tokenSource.Valid() {
-		return CreateTokenResult{}, fmt.Errorf("auth: invalid token source %q", in.Source)
+	tokenSource, err := normalizeTokenSource(in)
+	if err != nil {
+		return CreateTokenResult{}, err
 	}
 	eventSource := sourceForToken(in.Actor)
 	secret, hash, err := NewSecret()
@@ -138,6 +135,20 @@ func (s *Service) CreateToken(ctx context.Context, in CreateTokenInput) (CreateT
 		return CreateTokenResult{}, err
 	}
 	return CreateTokenResult{Token: tok, Secret: secret}, nil
+}
+
+func normalizeTokenSource(in CreateTokenInput) (domain.Source, error) {
+	tokenSource := in.Source
+	if tokenSource == "" {
+		tokenSource = domain.SourceHuman
+	}
+	if !tokenSource.Valid() {
+		return "", fmt.Errorf("auth: invalid token source %q", in.Source)
+	}
+	if in.IsRoot && tokenSource != domain.SourceHuman {
+		return "", fmt.Errorf("auth: root tokens must use source=%q, got %q", domain.SourceHuman, tokenSource)
+	}
+	return tokenSource, nil
 }
 
 func (s *Service) Revoke(ctx context.Context, id uuid.UUID, actor domain.Token) error {

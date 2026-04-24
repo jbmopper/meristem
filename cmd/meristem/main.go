@@ -1,8 +1,8 @@
 // meristem is the single binary for the meristem coordination plane.
 //
 // Two runtime modes share one codebase and one database, per the spec:
-//   meristem api     - HTTP surface
-//   meristem worker  - background jobs (not in v0; placeholder ships in v1)
+//   meristem api               - HTTP surface
+//   meristem worker --once     - one-shot bounded-patience scan (v1 kernel)
 //
 // Plus operational subcommands:
 //   meristem migrate  - apply pending Postgres migrations
@@ -60,6 +60,10 @@ func main() {
 		err = runSeed(ctx, logger, args)
 	case "rebuild":
 		err = runRebuild(ctx, logger, args)
+	case "worker":
+		err = runWorker(ctx, logger, args)
+	case "feed":
+		err = runFeed(ctx, logger, args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -131,6 +135,8 @@ usage:
   meristem mcp               run the MCP stdio server (reads MERISTEM_TOKEN)
   meristem seed v1           seed the v1 substrate backlog (reads MERISTEM_TOKEN, must be source=system)
   meristem rebuild           fold events through projectors into a sandbox schema and diff vs live
+  meristem worker --once     one-shot bounded-patience scan (reads MERISTEM_TOKEN, must be source=system)
+  meristem feed [--watch]    human-readable terminal view of the activity log
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
   meristem version           print version
   meristem help              show this message

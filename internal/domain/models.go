@@ -16,6 +16,21 @@ const (
 	EventWorkItemEventAppended = "work_item.event_appended"
 	EventWorkItemRelationAdded = "work_item.relation_added"
 	EventSignalReceived        = "signal.received"
+	// EventPatienceBreached records that a non-terminal work_item has been
+	// in its current state longer than the configured patience budget for
+	// that state. Recorded by `meristem worker --once` (see internal/worker).
+	// The event is record-only in this slice: it carries the breach observation
+	// and the budget against which it was measured, but does not by itself
+	// drive any further action. Subsequent slices add the convergence behavior
+	// the spec calls "bounded patience" — escalation, retry, or forced fail.
+	//
+	// The deterministic event_id is keyed on (work_item_id, state, kind, payload)
+	// where payload includes the state observed; rerunning the worker for an
+	// item still breached in the same state produces the same id and dedupes
+	// to one row. A subsequent transition out of the state ends the breach;
+	// re-entering would breach again on the next budget elapse, which is a
+	// new (state, payload) and therefore a new event.
+	EventPatienceBreached = "patience.breached"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -35,6 +50,7 @@ var AllEventKinds = []string{
 	EventWorkItemEventAppended,
 	EventWorkItemRelationAdded,
 	EventSignalReceived,
+	EventPatienceBreached,
 }
 
 const (
