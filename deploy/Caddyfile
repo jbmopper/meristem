@@ -1,0 +1,60 @@
+# meristem reverse-proxy / TLS terminator.
+#
+# Used by the "production" profile in docker-compose.yml. Caddy:
+#   - Fetches a Let's Encrypt certificate for ${MERISTEM_HOSTNAME} on
+#     first start and renews it automatically.
+#   - Terminates TLS and forwards plaintext HTTP to the meristem service
+#     on the compose network (port 8080).
+#   - Strips the hop-by-hop headers and adds X-Forwarded-* so meristem
+#     sees the real client.
+#
+# Configuration is environment-driven via MERISTEM_HOSTNAME. For a
+# real deploy, set it to the hostname Let's Encrypt should issue for:
+#
+#   MERISTEM_HOSTNAME=meristem.example.com \
+#     docker compose --profile production up -d caddy
+#
+# For local experimentation without a public DNS name, leave
+# MERISTEM_HOSTNAME unset and Caddy will serve plain HTTP on :80
+# against the localhost site block below. Don't expose that to the
+# internet.
+
+{
+    # Caddy's admin endpoint stays on 127.0.0.1 inside the container;
+    # we never expose it on the host network.
+    admin off
+    # Send Caddy's structured logs to stdout so `docker logs caddy`
+    # works the same way as for the meristem service.
+    log {
+        output stdout
+        format json
+    }
+}
+
+# Production site: real hostname, automatic TLS.
+{$MERISTEM_HOSTNAME} {
+    encode gzip
+
+    # Forward everything to the meristem service. The service name
+    # `meristem` resolves on the compose network to the api container;
+    # the upstream port is the one meristem listens on inside the
+    # container (MERISTEM_HTTP_ADDR=:8080).
+    reverse_proxy meristem:8080 {
+        header_up X-Real-IP {remote_host}
+        # Health probe: caddy will mark the upstream unhealthy if
+        # /readyz returns non-2xx. meristem already implements /readyz
+        # as a ping against Postgres.
+        health_uri /readyz
+        health_interval 10s
+        health_timeout 3s
+    }
+}
+
+# Localhost site: plain HTTP only, for `docker compose --profile production
+# up -d caddy` runs that aren't bound to a real hostname yet. Remove or
+# disable before exposing to the internet.
+:80 {
+    @localhost host localhost
+    reverse_proxy @localhost meristem:8080
+    respond 404
+}

@@ -1,0 +1,132 @@
+# meristem local development stack.
+#
+# Two opt-in topologies driven by the MERISTEM_PROFILE environment variable
+# / `--profile` flag, plus the bare default.
+#
+# Default (no profile): just Postgres on loopback. Fastest iteration loop;
+# the meristem binary runs from the host with `go run ./cmd/meristem ...`.
+#
+#   docker compose up -d postgres
+#   export MERISTEM_DATABASE_URL=postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable
+#   go run ./cmd/meristem migrate
+#   go run ./cmd/meristem tokens create --root
+#   go run ./cmd/meristem api
+#
+# Profile "app": Postgres + meristem-migrate + meristem (the API in a
+# container). Use this when another project on the same host needs to
+# integrate against a stable, always-on endpoint.
+#
+#   docker compose --profile app up -d
+#
+# Profile "production": Postgres + meristem + caddy (TLS terminator). Use
+# this on a real host with a real DNS name.
+#
+#   MERISTEM_HOSTNAME=meristem.example.com \
+#     docker compose --profile production up -d
+#
+# Postgres always binds to 127.0.0.1 to keep it off the public network.
+# `meristem` binds to 127.0.0.1:8080 by default; production traffic is
+# expected to enter through the caddy service, which terminates TLS.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: meristem-postgres
+    environment:
+      POSTGRES_USER: meristem
+      POSTGRES_PASSWORD: meristem
+      POSTGRES_DB: meristem
+    ports:
+      # Bound to loopback only. Production runs Postgres on the same host as
+      # the meristem binary with no public listener (see spec: Security
+      # Primitives).
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - meristem-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meristem -d meristem"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot init container. Applies all pending migrations and exits.
+  # `service_completed_successfully` lets the long-running meristem service
+  # gate on a clean migration before it accepts traffic.
+  meristem-migrate:
+    profiles: ["app", "production"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${MERISTEM_VERSION:-dev}
+    image: meristem:${MERISTEM_VERSION:-dev}
+    container_name: meristem-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MERISTEM_DATABASE_URL: postgres://meristem:meristem@postgres:5432/meristem?sslmode=disable
+    command: ["migrate"]
+    restart: "no"
+
+  meristem:
+    profiles: ["app", "production"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${MERISTEM_VERSION:-dev}
+    image: meristem:${MERISTEM_VERSION:-dev}
+    container_name: meristem-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meristem-migrate:
+        condition: service_completed_successfully
+    environment:
+      MERISTEM_DATABASE_URL: postgres://meristem:meristem@postgres:5432/meristem?sslmode=disable
+      MERISTEM_HTTP_ADDR: ":8080"
+    ports:
+      # Loopback only by default. The "production" profile fronts this
+      # with caddy on :443, which is the only port that should ever be
+      # public-facing.
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    # The runtime image is distroless: no curl, no shell. We ship the
+    # probe as a meristem subcommand so the binary that already lives in
+    # the container can answer "is /readyz green?" without any extra
+    # tooling. start_period gives migrations + first listen a window
+    # before unhealthy is reported.
+    healthcheck:
+      test: ["CMD", "/meristem", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # TLS terminator for the production topology. Caddy fetches a Let's
+  # Encrypt certificate for ${MERISTEM_HOSTNAME} on first start and
+  # renews it automatically. For local-only experimentation, leave this
+  # service stopped and talk to meristem:8080 directly.
+  caddy:
+    profiles: ["production"]
+    image: caddy:2-alpine
+    container_name: meristem-caddy
+    depends_on:
+      meristem:
+        condition: service_healthy
+    environment:
+      MERISTEM_HOSTNAME: ${MERISTEM_HOSTNAME:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  meristem-pgdata:
+  caddy-data:
+  caddy-config:

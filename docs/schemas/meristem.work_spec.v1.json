@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "meristem Work Spec v1",
+  "description": "Canonical normalized specification of one unit of work. Attached to a work_item as an artifact and used to render prompts, dispatch agents, dedupe repeated signals, and validate outcomes. Synthesized from jay/issue_workflow/issue_spec_schema.json (AgentFixIssueSpecification), ns_obv/docs/issue-automation/issue-record.schema.json (Issue Record), and clinical-demo/src/clinical_demo/issues/workflow.py (IssueSpecification). v1 is additive; new optional fields may appear without bumping schema_version. Breaking changes ship as meristem.work_spec.v2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "title",
+    "priority",
+    "acceptance_criteria"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "legacy.work_spec.v1"
+    },
+    "kind": {
+      "type": "string",
+      "description": "Coarse category. Reserved values in v1: 'repair', 'review_finding', 'repairable_failure', 'capture'. Callers may use other strings; reservation is non-exclusive in v1.",
+      "minLength": 1
+    },
+    "dedupe_key": {
+      "type": "string",
+      "description": "Semantic identity. Two work_specs with the same dedupe_key collapse to the same work_item. Distinct from the HTTP Idempotency-Key header (transport retry identity), the work_spec fingerprint (content identity), and event_id (immutable fact identity). Stable across retries and across processes; choose values like 'repo:jay:repair:worker-retry-budget'.",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "description": "Short human label used in lists, notifications, and the work_items.title column.",
+      "minLength": 1
+    },
+    "priority": {
+      "type": "string",
+      "description": "P0 (highest) through P3 (lowest). Mirrors the priority field in all three source schemas (jay, ns_obv, clinical-demo).",
+      "pattern": "^P[0-3]$"
+    },
+    "objective": {
+      "type": "string",
+      "description": "One-sentence statement of what done looks like.",
+      "minLength": 1
+    },
+    "details": {
+      "type": "string",
+      "description": "Human-readable diagnosis or context. Maps to ns_obv.diagnosis, jay.details, clinical-demo.diagnosis.",
+      "minLength": 1
+    },
+    "source": {
+      "type": "object",
+      "description": "Where the signal that produced this spec came from. Required when known; omit only for owner-originated work.",
+      "additionalProperties": false,
+      "required": ["kind", "identifier"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Reserved values: 'review_finding' (clinical-demo, ns_obv), 'system_event' (jay UnifiedLogger.emit with repair=...), 'webhook', 'manual'. Callers may use other strings.",
+          "minLength": 1
+        },
+        "identifier": {
+          "type": "string",
+          "description": "Stable identifier within the source kind. Example: '2026-04-22-codex-review:finding-001' for a review finding, or the upstream event id for a system event.",
+          "minLength": 1
+        },
+        "external_ref": {
+          "type": "string",
+          "description": "Optional pointer to the originating artifact (file path, URL, opaque ref).",
+          "minLength": 1
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "description": "Where the work needs to land. Optional; not all work is repo-scoped. Generalizes ns_obv.location and clinical-demo.IssueLocation by adding 'repo'.",
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "line_start": { "type": "integer", "minimum": 1 },
+        "line_end": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "description": "Checkable conditions that must hold for the work to be considered done. Used by the eventual review endpoint. Required and non-empty per all three source schemas.",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "validation": {
+      "type": "object",
+      "description": "How a reviewer or agent verifies the acceptance criteria. Unifies jay.validation_steps with ns_obv.verification {commands, notes}.",
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "type": "array",
+          "description": "Shell commands to run, in order.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "notes": {
+          "type": "array",
+          "description": "Human guidance for verification (for example, 'run targeted tests first if available').",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "description": "Negative requirements (do-not-do statements). Used to keep an agent from drifting into adjacent fixes.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "labels": {
+      "type": "array",
+      "description": "Free-form tags. No canonical list in v1.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "implementation_notes": {
+      "type": "array",
+      "description": "Optional hints for the implementer. Preserved from jay's contract.",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
