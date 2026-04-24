@@ -12,7 +12,7 @@ The synthesis was checked against these local files:
 
 - `/Users/juliusmopper/Dev/wayline/docs/spec.md`
 - `/Users/juliusmopper/Dev/wayline/AGENTS.md`
-- `/Users/juliusmopper/Dev/wayline/docs/thoughs.md`
+- `/Users/juliusmopper/Dev/wayline/docs/thoughts.md`
 - `/Users/juliusmopper/Dev/clinical-demo/issues/README.md`
 - `/Users/juliusmopper/Dev/clinical-demo/src/clinical_demo/issues/workflow.py`
 - `/Users/juliusmopper/Dev/jay/README.md`
@@ -27,7 +27,7 @@ Freshness caveat: `/Users/juliusmopper/Dev/wayline` was not a git checkout when 
 
 ## Current Drift To Preserve
 
-`docs/spec.md` and `AGENTS.md` still state the active implementation rule as "idempotency everywhere" and "Postgres is the system." `docs/thoughs.md` argues for a conceptual reframe: convergence should be the model, the event log should be truth, and idempotency should become a consequence rather than the headline principle.
+`docs/spec.md` and `AGENTS.md` still state the active implementation rule as "idempotency everywhere" and "Postgres is the system." `docs/thoughts.md` argues for a conceptual reframe: convergence should be the model, the event log should be truth, and idempotency should become a consequence rather than the headline principle.
 
 For now, keep both truths in view:
 
@@ -286,7 +286,7 @@ The cheapest path that unlocks the imported behavior:
 To reproduce the API recommendation, ask the assistant to do the following:
 
 ```text
-Read `/Users/juliusmopper/Dev/wayline/docs/spec.md`, `/Users/juliusmopper/Dev/wayline/AGENTS.md`, and `/Users/juliusmopper/Dev/wayline/docs/thoughs.md`.
+Read `/Users/juliusmopper/Dev/wayline/docs/spec.md`, `/Users/juliusmopper/Dev/wayline/AGENTS.md`, and `/Users/juliusmopper/Dev/wayline/docs/thoughts.md`.
 
 Then inspect the auto-repair references:
 - `/Users/juliusmopper/Dev/clinical-demo/issues/README.md`
@@ -294,6 +294,6 @@ Then inspect the auto-repair references:
 - `/Users/juliusmopper/Dev/ns_obv/docs/issue-automation/README.md`
 - `/Users/juliusmopper/Dev/stanford-cs336/assignment1-basics/plugins/repo-portfolio-repair-agent/skills/repo-portfolio-repair/SKILL.md`
 
-Synthesize them into a wayline API direction. Preserve `docs/spec.md` as canonical, but include the `docs/thoughs.md` reframe: convergence is the model, the event log is truth, and idempotency is an implementation property. Recommend first-class `signals`, `artifacts`, `runs`, `plans`, `reviews`, `actions`, and approvals rather than separate repo-local auto-healing systems. Distinguish `Idempotency-Key`, `dedupe_key`, `fingerprint`, and `event_id`.
+Synthesize them into a wayline API direction. Preserve `docs/spec.md` as canonical, but include the `docs/thoughts.md` reframe: convergence is the model, the event log is truth, and idempotency is an implementation property. Recommend first-class `signals`, `artifacts`, `runs`, `plans`, `reviews`, `actions`, and approvals rather than separate repo-local auto-healing systems. Distinguish `Idempotency-Key`, `dedupe_key`, `fingerprint`, and `event_id`.
 ```
 
