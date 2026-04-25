@@ -268,6 +268,65 @@ func (s *Service) cursorExists(ctx context.Context, seq int64) (bool, error) {
 	return found, nil
 }
 
+// EncodeCursor turns a seq into the v1 opaque cursor wire string. Public
+// because the SSE handler needs to stamp `id:` frames with the same value
+// browsers will echo back as Last-Event-ID on reconnect.
+func EncodeCursor(seq int64) string {
+	return encodeCursor(seq)
+}
+
+// ResolveStreamStart decodes cursorStr into the seq the SSE handler will
+// use as its "strictly after" point. Empty cursorStr means "from now":
+// the function returns the current MAX(seq) so the stream sees only
+// events appended after the connection opens. A supplied cursorStr is
+// decoded and existence-checked exactly as Page() does — same 400 path
+// for fabricated cursors, same v0-format invalidation for old clients.
+//
+// This is the SSE counterpart to head() + cursorExists() inside Page; it
+// exists as a separate entry point because the SSE handler doesn't want
+// the long-poll loop, just the start position.
+func (s *Service) ResolveStreamStart(ctx context.Context, cursorStr string) (int64, error) {
+	if cursorStr == "" {
+		head, err := s.head(ctx)
+		if err != nil {
+			return 0, err
+		}
+		return head.seq, nil
+	}
+	decoded, err := decodeCursor(cursorStr)
+	if err != nil {
+		return 0, err
+	}
+	if decoded.seq > 0 {
+		ok, err := s.cursorExists(ctx, decoded.seq)
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			return 0, fmt.Errorf("%w: seq %d was never issued", ErrInvalidCursor, decoded.seq)
+		}
+	}
+	return decoded.seq, nil
+}
+
+// Tail returns at most limit feed-visible events with seq > fromSeq,
+// oldest-first, in a single non-blocking query. The SSE handler calls
+// this in a tight poll loop between heartbeats; pool conns are released
+// between calls so 100 concurrent streams don't pin the pool.
+//
+// Item.Seq is populated; the SSE handler stamps it onto the SSE id frame
+// via EncodeCursor.
+func (s *Service) Tail(ctx context.Context, fromSeq int64, limit int) ([]Item, error) {
+	if limit <= 0 || limit > maxLimit {
+		limit = defaultLimit
+	}
+	page, err := s.queryAfter(ctx, cursor{seq: fromSeq}, limit)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
 // queryAfter runs a single after-cursor SELECT against the seq column.
 // seq is BIGSERIAL (strictly increasing per insert under default
 // isolation), so WHERE seq > $cursor ORDER BY seq is a true monotonic

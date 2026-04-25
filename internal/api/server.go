@@ -101,6 +101,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/inbox/messages", s.command(http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("GET /v1/feed", s.protected(http.HandlerFunc(s.handleFeed)))
+	s.mux.Handle("GET /v1/feed/stream", s.protected(http.HandlerFunc(s.handleFeedStream)))
 	s.mux.Handle("GET /v1/work-items", s.protected(http.HandlerFunc(s.handleListWorkItems)))
 	s.mux.Handle("POST /v1/work-items", s.command(http.HandlerFunc(s.handleCreateWorkItem)))
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))

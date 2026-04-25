@@ -5,22 +5,25 @@
 // which left no comfortable seat for the owner. Until the web UI substrate
 // item ships, this gives a person at a terminal a readable view of what
 // the system has been up to. It owns no state, has no special privileges,
-// and runs nowhere persistent: it is just a polling client of /v1/feed
-// formatted for eyes.
+// and runs nowhere persistent.
 //
 // Two modes:
 //
 //   meristem feed                snapshot of the last --limit items, exit
-//   meristem feed --watch        bootstrap "from now" via opaque cursor,
-//                               then long-poll /v1/feed?cursor=...&wait=...
-//                               and append matching new items as they arrive
+//   meristem feed --watch        consume the SSE push stream at /v1/feed/stream;
+//                               server pushes each new event as it lands,
+//                               client prints (after optional --mentions filter).
+//                               Reconnects with Last-Event-ID on disconnect
+//                               so events that landed during the gap are
+//                               replayed deterministically.
 //
-// Watch mode uses the resumable cursor + bounded long-poll endpoint
-// (e1625848): the server returns oldest-first events strictly after the
-// cursor with at-least-once delivery, and the client round-trips
-// next_cursor verbatim. No client-side dedupe is needed (cursor advances
-// past every printed item), and no in-memory event-id set grows
-// unboundedly across long sessions.
+// Watch mode uses Server-Sent Events (a11dd7d5). The model is push, not
+// pull: the client opens one long-lived connection, the server writes
+// SSE frames as events happen, and the client never re-asks for events
+// it has already seen. Reconnects send Last-Event-ID (the SSE-standard
+// header) carrying the last cursor we processed, so the server replays
+// from there before resuming live push. No polling loop, no client-side
+// dedupe map, no per-poll re-read of payload state already in context.
 //
 // Optional client-side filter:
 //
@@ -31,18 +34,23 @@
 //                              Recurses into work_item.event_appended.inner
 //                              so notes posted as appended sub-events are
 //                              filtered the same as direct payloads.
+//                              The cursor still advances past dropped events,
+//                              so reconnects don't re-deliver them.
 //
-// Output format is one line per event, sorted oldest-first so reading
-// top-to-bottom matches the timeline. Per-kind summaries (work_item.created,
-// transitioned, patience.breached, signal.received, message.captured, etc.)
-// are formatted in summarize(); unknown kinds fall back to the raw kind
+// Output format is one line per event, in arrival order (which is
+// chronologically equivalent — the SSE stream emits oldest-first by
+// events.seq). Per-kind summaries (work_item.created, transitioned,
+// patience.breached, signal.received, message.captured, etc.) are
+// formatted in summarize(); unknown kinds fall back to the raw kind
 // string so a new event kind shipping without renderer support is loud-but-
 // not-broken.
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -60,14 +68,13 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("feed", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	api := fs.String("api", "http://127.0.0.1:8080", "meristem API base URL")
-	limit := fs.Int("limit", 20, "number of feed items to fetch per poll (max 200)")
-	watch := fs.Bool("watch", false, "long-poll for new items and append (Ctrl-C to exit)")
-	wait := fs.Duration("wait", 30*time.Second, "long-poll cap when --watch (server caps at 60s)")
+	limit := fs.Int("limit", 20, "number of feed items to fetch (snapshot mode)")
+	watch := fs.Bool("watch", false, "consume the SSE push stream and append new items (Ctrl-C to exit)")
 	mentions := fs.String("mentions", "", "comma-separated names; in --watch mode, only print items that mention any of them")
-	// retainedForCompat: --interval is preserved as a backoff knob for the
-	// transient-error retry path. The healthy --watch loop drives its
-	// cadence off the server's bounded long-poll, not this duration.
-	retryBackoff := fs.Duration("interval", 2*time.Second, "retry backoff when a poll fails in --watch mode")
+	// retryBackoff caps how often we reconnect on transient SSE failures.
+	// The healthy --watch path holds one long-lived connection and never
+	// touches this; only network blips and server restarts reach it.
+	retryBackoff := fs.Duration("interval", 2*time.Second, "reconnect backoff when the SSE stream drops in --watch mode")
 	if err := fs.Parse(args); err != nil {
 		feedUsage(os.Stderr)
 		return err
@@ -81,14 +88,17 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 		fmt.Fprintf(os.Stderr, "feed: using token from %s\n", source)
 	}
 
-	// HTTP timeout must outlast the longest expected long-poll. The server
-	// caps wait at 60s; we add headroom for handler overhead and the
-	// bootstrap call. Snapshot mode (no --watch) reuses this client and is
-	// not harmed by the longer ceiling.
+	// Two clients with different timeout disciplines:
+	//   - snapshot HTTP: bounded 30s; a snapshot read should complete fast.
+	//   - stream HTTP: NO Timeout; SSE connections are designed to be long-
+	//     lived. Cancellation comes from ctx, not from a wallclock cap.
+	//     A timeout would silently kill healthy streams the moment they
+	//     went idle past the threshold.
 	client := &feedClient{
-		baseURL: strings.TrimRight(*api, "/"),
-		token:   token,
-		http:    &http.Client{Timeout: 90 * time.Second},
+		baseURL:    strings.TrimRight(*api, "/"),
+		token:      token,
+		http:       &http.Client{Timeout: 30 * time.Second},
+		streamHTTP: &http.Client{Timeout: 0},
 	}
 
 	if !*watch {
@@ -101,8 +111,6 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 
 	return runFeedWatch(ctx, logger, client, watchOptions{
-		limit:        *limit,
-		wait:         *wait,
 		mentions:     parseMentions(*mentions),
 		retryBackoff: *retryBackoff,
 	}, os.Stdout)
@@ -123,36 +131,35 @@ func parseMentions(raw string) []string {
 }
 
 type watchOptions struct {
-	limit        int
-	wait         time.Duration
 	mentions     []string
 	retryBackoff time.Duration
 }
 
-// runFeedWatch implements the long-poll watcher against the resumable
-// /v1/feed cursor (e1625848). Sequence:
+// runFeedWatch consumes /v1/feed/stream over SSE. Sequence:
 //
-//  1. Bootstrap: GET /v1/feed?wait=0s with no cursor → server snapshots
-//     the current head and returns an empty page + next_cursor. This
-//     gives the watcher a "start from now" cursor without dumping history.
-//  2. Loop: GET /v1/feed?cursor=<cursor>&wait=<wait> → server long-polls
-//     up to `wait` for events strictly after the cursor. On items, print
-//     and advance the cursor. On HasMore, immediately drain (next call
-//     uses the new cursor with wait=0) before going back to long-poll.
-//  3. Recover: a 400 invalid_cursor means the server forgot or the
-//     encoding rolled over; re-bootstrap a head and continue rather than
-//     crash the session. Any other error is soft-failed with a backoff.
+//  1. Open the stream with no Last-Event-ID. The server's
+//     ResolveStreamStart treats the absence of a cursor as "from now"
+//     (its current MAX(seq)), so a fresh watcher does not dump history.
+//  2. Read SSE frames as they arrive: each event has an `id:` line
+//     (the v1 opaque cursor) and a `data:` line (the JSON envelope).
+//     Apply the mentions filter, print, and advance lastID. Heartbeat
+//     comments (lines starting with `:`) reset our liveness timer but
+//     produce no output.
+//  3. On disconnect or error: backoff, then reconnect with the saved
+//     lastID as the Last-Event-ID header. The server replays events
+//     strictly after that cursor, so anything that landed during the
+//     gap is delivered before live push resumes. A 400 invalid_cursor
+//     (server forgot the seq, or encoding rolled over) is recovered by
+//     reconnecting without lastID rather than crashing the session.
 //
-// No client-side dedupe map is needed — the cursor advances past every
-// item before the next call, so the server never re-sends them. This is
-// the property pre-cursor watchers paid for with an unbounded `seen`
-// set; replacing one with the other is the whole point of e1625848.
+// The mentions filter is intentionally client-side: the server sends
+// every visible event, the client decides which to print. This keeps
+// the stream's framing identical for all consumers (so a future shared
+// broadcaster can fan one stream to many filters) and keeps dropped
+// events from creating gaps in the cursor (the client still advances
+// past them so reconnects don't redeliver).
 func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, opts watchOptions, out io.Writer) error {
-	cursor, err := bootstrapWatchCursor(ctx, client, opts.limit)
-	if err != nil {
-		return fmt.Errorf("feed --watch: bootstrap: %w", err)
-	}
-
+	var lastID string
 	for {
 		select {
 		case <-ctx.Done():
@@ -160,52 +167,41 @@ func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, 
 		default:
 		}
 
-		page, err := client.fetchPage(ctx, cursor, opts.wait, opts.limit)
-		if err != nil {
-			if isInvalidCursorErr(err) {
-				if logger != nil {
-					logger.Warn("feed --watch: cursor invalid, re-bootstrapping head")
-				}
-				newCursor, bootErr := bootstrapWatchCursor(ctx, client, opts.limit)
-				if bootErr != nil {
-					return fmt.Errorf("feed --watch: re-bootstrap: %w", bootErr)
-				}
-				cursor = newCursor
-				continue
+		newLastID, err := client.consumeStream(ctx, lastID, func(ev sseEvent) error {
+			if matchesMentions(ev.Item, opts.mentions) {
+				fmt.Fprintln(out, formatItem(ev.Item))
 			}
+			return nil
+		})
+		// Always preserve the last cursor we processed, even if the
+		// connection ended in error. The next reconnect will resume
+		// from there. Empty newLastID means we reconnect "from now".
+		if newLastID != "" {
+			lastID = newLastID
+		}
+
+		if err == nil || errors.Is(err, context.Canceled) {
+			return nil
+		}
+
+		if isInvalidCursorErr(err) {
 			if logger != nil {
-				logger.Warn("feed --watch: poll failed", slog.String("error", err.Error()))
+				logger.Warn("feed --watch: server rejected resume cursor, restarting from now",
+					slog.String("last_id", lastID))
 			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(opts.retryBackoff):
-			}
-			continue
+			lastID = ""
+		} else if logger != nil {
+			logger.Warn("feed --watch: stream ended, reconnecting",
+				slog.String("error", err.Error()),
+				slog.String("backoff", opts.retryBackoff.String()))
 		}
 
-		for _, it := range page.Items {
-			if matchesMentions(it, opts.mentions) {
-				fmt.Fprintln(out, formatItem(it))
-			}
-		}
-		if page.NextCursor != "" {
-			cursor = page.NextCursor
-		}
-		// HasMore drains immediately (no long-poll between drained pages)
-		// so a burst of events doesn't get split across two long-poll cycles.
-		if !page.HasMore {
-			continue
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(opts.retryBackoff):
 		}
 	}
-}
-
-func bootstrapWatchCursor(ctx context.Context, client *feedClient, limit int) (string, error) {
-	page, err := client.fetchPage(ctx, "", 0, limit)
-	if err != nil {
-		return "", err
-	}
-	return page.NextCursor, nil
 }
 
 // matchesMentions is the client-side filter for --mentions. The empty
@@ -303,21 +299,18 @@ type feedItem struct {
 // feedClient is the smallest possible HTTP client for /v1/feed. Inlined
 // (rather than going through pkg/meristem) because the SDK currently only
 // covers the write paths integrators most need; growing it to cover GETs
-// is its own slice. If that slice lands, lift this code into the SDK and
-// have the CLI call it.
+// and streaming is its own slice. If that slice lands, lift this code
+// into the SDK and have the CLI call it.
+//
+// http is for short-lived snapshot reads (Timeout enforced).
+// streamHTTP is for the long-lived SSE connection (no Timeout — only
+// ctx cancellation can end it). Splitting them keeps the snapshot path
+// safe from a hung server while letting the stream live indefinitely.
 type feedClient struct {
-	baseURL string
-	token   string
-	http    *http.Client
-}
-
-// feedPage is the watcher-mode response shape from /v1/feed when either
-// ?cursor= or ?wait= is present. NextCursor is opaque and round-tripped
-// verbatim. HasMore signals an immediate drain rather than a long-poll.
-type feedPage struct {
-	Items      []feedItem `json:"items"`
-	NextCursor string     `json:"next_cursor"`
-	HasMore    bool       `json:"has_more"`
+	baseURL    string
+	token      string
+	http       *http.Client
+	streamHTTP *http.Client
 }
 
 func (c *feedClient) fetch(ctx context.Context, limit int) ([]feedItem, error) {
@@ -354,47 +347,137 @@ func (c *feedClient) fetch(ctx context.Context, limit int) ([]feedItem, error) {
 	return envelope.Items, nil
 }
 
-// fetchPage hits /v1/feed in watcher mode. cursor empty + wait=0 is the
-// bootstrap shape (server returns the head). cursor non-empty + wait>0 is
-// the normal long-poll shape. cursor non-empty + wait=0 is the drain
-// shape used when HasMore is true on the previous response.
-func (c *feedClient) fetchPage(ctx context.Context, cursor string, wait time.Duration, limit int) (feedPage, error) {
-	u, err := url.Parse(c.baseURL + "/v1/feed")
-	if err != nil {
-		return feedPage{}, fmt.Errorf("feed: parse api URL: %w", err)
-	}
-	q := u.Query()
-	q.Set("limit", fmt.Sprintf("%d", limit))
-	if cursor != "" {
-		q.Set("cursor", cursor)
-	}
-	// wait=0s is sent explicitly so the server distinguishes "I want
-	// watcher response shape with no long-poll" from "I want snapshot
-	// response shape." The server selects by presence of either param.
-	q.Set("wait", wait.String())
-	u.RawQuery = q.Encode()
+// sseEvent is one frame from /v1/feed/stream after parsing.
+type sseEvent struct {
+	ID   string
+	Item feedItem
+}
 
+// consumeStream opens GET /v1/feed/stream and calls onEvent for each
+// frame the server pushes. lastID, if non-empty, is sent as the
+// SSE-standard Last-Event-ID header so the server replays from that
+// point before resuming live push.
+//
+// Returns the cursor of the most recent successfully-handled event
+// (so the caller can resume there even when the connection ended in
+// error) and the terminal error, if any. A clean disconnect (server
+// shutdown) returns a non-nil error too — at this layer there is no
+// "the stream is supposed to end."
+//
+// SSE wire parsing per https://html.spec.whatwg.org/multipage/server-sent-events.html
+// (stripped to what our server actually emits):
+//
+//	id: <opaque cursor>     # last-event-id for this event
+//	event: feed             # event type (we ignore; assume "feed")
+//	data: <one-line json>   # payload
+//	(blank line)            # dispatch
+//
+// Comment lines start with `:` and serve as keepalive only. Lines we
+// don't recognize are tolerated (forward-compat with future SSE fields
+// the server might emit, e.g. retry:).
+func (c *feedClient) consumeStream(ctx context.Context, lastID string, onEvent func(sseEvent) error) (string, error) {
+	u, err := url.Parse(c.baseURL + "/v1/feed/stream")
+	if err != nil {
+		return lastID, fmt.Errorf("feed: parse api URL: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return feedPage{}, err
+		return lastID, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "text/event-stream")
+	if lastID != "" {
+		req.Header.Set("Last-Event-ID", lastID)
+	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.streamHTTP.Do(req)
 	if err != nil {
-		return feedPage{}, fmt.Errorf("feed: request: %w", err)
+		return lastID, fmt.Errorf("feed: stream connect: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return feedPage{}, fmt.Errorf("feed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return lastID, fmt.Errorf("feed: stream %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
-	var page feedPage
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		return feedPage{}, fmt.Errorf("feed: decode page: %w", err)
+	// Buffer sized for an event payload comfortably larger than typical
+	// (most events are <2KB; cap at 1MB to bound damage from a runaway
+	// payload while still tolerating large work-item bodies).
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+	var (
+		curID    string
+		curData  strings.Builder
+		curEvent string
+	)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			// blank line = dispatch
+			if curData.Len() == 0 {
+				curEvent = ""
+				continue
+			}
+			ev, ok := parseSSEDispatch(curID, curEvent, curData.String())
+			curData.Reset()
+			curEvent = ""
+			if !ok {
+				continue
+			}
+			if ev.ID != "" {
+				lastID = ev.ID
+			}
+			if err := onEvent(ev); err != nil {
+				return lastID, err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			// Comment / keepalive — ignore.
+			continue
+		}
+		field, value, _ := strings.Cut(line, ":")
+		// SSE allows " " padding after the colon; strip exactly one space.
+		value = strings.TrimPrefix(value, " ")
+		switch field {
+		case "id":
+			curID = value
+		case "event":
+			curEvent = value
+		case "data":
+			if curData.Len() > 0 {
+				curData.WriteByte('\n')
+			}
+			curData.WriteString(value)
+		default:
+			// Tolerate unknown fields (forward-compat).
+		}
 	}
-	return page, nil
+	if err := scanner.Err(); err != nil {
+		return lastID, fmt.Errorf("feed: stream read: %w", err)
+	}
+	// Scanner returned cleanly (server closed). Treat as a connection
+	// drop the caller should reconnect from. If ctx is the cause, the
+	// outer loop checks ctx.Err() and exits gracefully.
+	if ctx.Err() != nil {
+		return lastID, ctx.Err()
+	}
+	return lastID, fmt.Errorf("feed: stream closed by server")
+}
+
+// parseSSEDispatch turns one accumulated SSE frame into a typed event.
+// We ignore curEvent (the server only emits "feed"); a future kind
+// dimension would key off it. Returns ok=false if the data isn't a
+// recognizable feed envelope, which is logged-and-skipped rather than
+// fatal so a malformed event from a future server version doesn't kill
+// the watcher.
+func parseSSEDispatch(id, _, data string) (sseEvent, bool) {
+	var item feedItem
+	if err := json.Unmarshal([]byte(data), &item); err != nil {
+		return sseEvent{}, false
+	}
+	return sseEvent{ID: id, Item: item}, true
 }
 
 // formatItem renders one feed entry as a single fixed-shape line. Columns:
@@ -634,13 +717,13 @@ func findmeristemDir(start string) string {
 func feedUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
   meristem feed [--limit=N]
-  meristem feed --watch [--wait=DURATION] [--mentions=NAME[,NAME...]]
+  meristem feed --watch [--mentions=NAME[,NAME...]]
 
 Prints recent activity from the meristem event feed in a human-readable
 form. Without --watch, fetches the last --limit items and exits. With
---watch, bootstraps a "from now" cursor and long-polls /v1/feed for
-events strictly after that cursor. No client-side dedupe; the cursor
-advances past every printed item.
+--watch, holds one long-lived connection to /v1/feed/stream (SSE) and
+prints each event the server pushes, reconnecting with Last-Event-ID
+on disconnect so events that landed during the gap are replayed.
 
 Token resolution (first match wins):
   1. MERISTEM_TOKEN env var
@@ -649,17 +732,18 @@ Token resolution (first match wins):
      The chosen path is announced on stderr.
 
 Flags:
-  --limit=N            items per fetch (default 20, server caps at 200)
-  --watch              long-poll, append new items (Ctrl-C to exit)
-  --wait=DURATION      long-poll cap when --watch (default 30s, server caps at 60s)
+  --limit=N            items per snapshot fetch (default 20, server caps at 200)
+  --watch              consume the SSE push stream (Ctrl-C to exit)
   --mentions=A,B       in --watch mode, only print items mentioning any of
                        these names (matched on payload.author, the
                        payload.mentions array, or "@name" in text/note)
-  --interval=DURATION  retry backoff when a poll fails in --watch (default 2s);
-                       the healthy loop drives off the server long-poll
+  --interval=DURATION  reconnect backoff when the SSE stream drops in --watch
+                       (default 2s); only network blips and server restarts
+                       reach this — the healthy path holds one connection
   --api=URL            meristem API base URL (default http://127.0.0.1:8080)
 
-Output is one line per event, sorted oldest-first. Format:
+Output is one line per event, in arrival order (oldest-first by events.seq).
+Format:
   MM-DD HH:MM:SS  source  subj8  per-kind summary
 `)
 }
