@@ -13,6 +13,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -67,17 +68,66 @@ func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFeed serves /v1/feed in two modes:
+//
+//   - Snapshot (back-compat): no cursor, no wait → latest-N events
+//     newest-first under {"items": [...]}. Same response shape as v0.
+//   - Watcher: cursor and/or wait present → events strictly after the
+//     cursor in oldest-first order, with at-least-once semantics. The
+//     response gains next_cursor + has_more for resumable consumption.
+//
+// Mode is selected by the presence of either query param so the v0
+// callers (the meristem feed CLI today) keep working without flagging
+// their requests, and watcher-mode callers opt in by sending what they
+// already need to send anyway. Cursor opacity is contractual — the
+// 32-char encoded blob is for round-tripping, not parsing.
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	limit, ok := parseLimit(w, r)
 	if !ok {
 		return
 	}
-	items, err := s.feed.List(r.Context(), limit)
+	q := r.URL.Query()
+	cursor := q.Get("cursor")
+	waitStr := q.Get("wait")
+
+	if cursor == "" && waitStr == "" {
+		items, err := s.feed.List(r.Context(), limit)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+
+	var wait time.Duration
+	if waitStr != "" {
+		parsed, err := time.ParseDuration(waitStr)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_wait", "wait must be a Go duration string (e.g. 30s)")
+			return
+		}
+		if parsed < 0 {
+			writeAPIError(w, http.StatusBadRequest, "invalid_wait", "wait must be non-negative")
+			return
+		}
+		wait = parsed
+	}
+
+	page, err := s.feed.Page(r.Context(), feed.ListOptions{
+		Cursor: cursor,
+		Wait:   wait,
+		Limit:  limit,
+	})
 	if err != nil {
+		if errors.Is(err, feed.ErrInvalidCursor) {
+			writeAPIError(w, http.StatusBadRequest, "invalid_cursor", "cursor is malformed; obtain a fresh one from a feed response")
+			return
+		}
 		writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) handleListWorkItems(w http.ResponseWriter, r *http.Request) {

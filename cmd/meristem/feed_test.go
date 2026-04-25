@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -378,49 +379,351 @@ func withCwd(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 }
 
-// TestRunFeedWatchAppendsOnlyNewItems pins the dedupe property of --watch:
-// items already printed in an earlier poll do not reappear on later polls,
-// even though the API returns overlapping windows. We use a 5ms ticker and
-// cancel the context after a short window to keep the test fast.
-func TestRunFeedWatchAppendsOnlyNewItems(t *testing.T) {
-	t1 := time.Date(2026, 4, 24, 14, 0, 0, 0, time.UTC)
-	t2 := time.Date(2026, 4, 24, 14, 0, 1, 0, time.UTC)
-
-	pollCount := 0
+// TestRunFeedWatchAdvancesCursorAndDoesNotRepeat is the cursor-mode
+// equivalent of the old "no dedupe re-render" test. It pins three things
+// at once because they are the same property viewed from three angles:
+//
+//  1. Bootstrap call sends no cursor and wait=0s.
+//  2. Each subsequent call sends the cursor returned by the previous call.
+//  3. Each item appears in output exactly once (the cursor advanced past
+//     it; the server has no reason to send it again).
+//
+// If we ever regress to "repaginate the same window each tick," this
+// test catches it because the recorded cursor sequence flattens into
+// repeats and the output gains duplicate lines.
+func TestRunFeedWatchAdvancesCursorAndDoesNotRepeat(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		callCursors []string
+		callWaits   []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pollCount++
+		mu.Lock()
+		callCursors = append(callCursors, r.URL.Query().Get("cursor"))
+		callWaits = append(callWaits, r.URL.Query().Get("wait"))
+		callIdx := len(callCursors)
+		mu.Unlock()
+
 		w.Header().Set("Content-Type", "application/json")
-		if pollCount == 1 {
+		switch callIdx {
+		case 1:
+			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"cur-after-bootstrap","has_more":false}`))
+		case 2:
 			_, _ = w.Write([]byte(`{"items":[
 				{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11111111","kind":"work_item.created","payload":{"title":"alpha","state":"captured"}}
-			]}`))
-			return
+			],"next_cursor":"cur-after-e1","has_more":false}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"items":[
+				{"event_id":"e2","occurred_at":"2026-04-24T14:00:01Z","source":"system","subject_kind":"work_item","subject_id":"22222222","kind":"work_item.transitioned","payload":{"to":"triaged"}}
+			],"next_cursor":"cur-after-e2","has_more":false}`))
+		default:
+			// Empty page with cursor unchanged: this is what the real
+			// server returns when the long-poll deadline fires with no
+			// new events. The watcher must just go around again with the
+			// same cursor, NOT retreat to the bootstrap path.
+			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"cur-after-e2","has_more":false}`))
 		}
-		// Subsequent polls return the same e1 plus a new e2. The renderer
-		// must skip e1 (seen) and print only e2.
-		_, _ = w.Write([]byte(`{"items":[
-			{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11111111","kind":"work_item.created","payload":{"title":"alpha","state":"captured"}},
-			{"event_id":"e2","occurred_at":"2026-04-24T14:00:01Z","source":"system","subject_kind":"work_item","subject_id":"22222222","kind":"work_item.transitioned","payload":{"to":"triaged"}}
-		]}`))
 	}))
 	defer srv.Close()
 
 	client := &feedClient{baseURL: srv.URL, token: "tok", http: srv.Client()}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	var buf bytes.Buffer
-	if err := runFeedWatch(ctx, nil, client, 50, 5*time.Millisecond, &buf); err != nil {
+	if err := runFeedWatch(ctx, nil, client, watchOptions{
+		limit:        50,
+		wait:         10 * time.Millisecond,
+		retryBackoff: 5 * time.Millisecond,
+	}, &buf); err != nil {
 		t.Fatalf("runFeedWatch: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(callCursors) < 3 {
+		t.Fatalf("expected at least 3 calls (bootstrap + 2 polls), got %d (cursors=%v)", len(callCursors), callCursors)
+	}
+	if callCursors[0] != "" {
+		t.Errorf("call 1 (bootstrap) cursor = %q, want empty", callCursors[0])
+	}
+	if callWaits[0] != "0s" {
+		t.Errorf("call 1 wait = %q, want %q", callWaits[0], "0s")
+	}
+	if callCursors[1] != "cur-after-bootstrap" {
+		t.Errorf("call 2 cursor = %q, want %q", callCursors[1], "cur-after-bootstrap")
+	}
+	if callCursors[2] != "cur-after-e1" {
+		t.Errorf("call 3 cursor = %q, want %q (cursor must advance after a non-empty page)", callCursors[2], "cur-after-e1")
 	}
 
 	out := buf.String()
 	if strings.Count(out, "alpha") != 1 {
-		t.Errorf("expected exactly one alpha line (no re-render of e1), output:\n%s", out)
+		t.Errorf("expected exactly one alpha line, output:\n%s", out)
 	}
 	if strings.Count(out, "→ triaged") != 1 {
 		t.Errorf("expected exactly one triaged line, output:\n%s", out)
 	}
-	_ = t1
-	_ = t2
+}
+
+// TestRunFeedWatchRecoversFromInvalidCursor pins the recovery contract.
+// A 400 invalid_cursor response from the server (cursor decode failure,
+// encoding rolled over, etc.) must NOT kill the watcher session. The
+// loop re-bootstraps a fresh head and continues; the user sees a
+// short gap, not a crash.
+//
+// Why it matters: cursor opacity is contractual but the encoding can
+// change. Without this recovery path, every encoding bump would break
+// every running --watch session.
+func TestRunFeedWatchRecoversFromInvalidCursor(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		idx := calls
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch idx {
+		case 1:
+			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"stale-cursor","has_more":false}`))
+		case 2:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_cursor","message":"cursor is malformed"}}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"fresh-cursor","has_more":false}`))
+		default:
+			_, _ = w.Write([]byte(`{"items":[
+				{"event_id":"after-recovery","occurred_at":"2026-04-24T14:00:05Z","source":"system","subject_kind":"work_item","subject_id":"33333333","kind":"work_item.created","payload":{"title":"post-recovery","state":"captured"}}
+			],"next_cursor":"cur-after-recovery","has_more":false}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := &feedClient{baseURL: srv.URL, token: "tok", http: srv.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	var buf bytes.Buffer
+	if err := runFeedWatch(ctx, nil, client, watchOptions{
+		limit:        50,
+		wait:         10 * time.Millisecond,
+		retryBackoff: 5 * time.Millisecond,
+	}, &buf); err != nil {
+		t.Fatalf("runFeedWatch returned error instead of recovering: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls < 4 {
+		t.Errorf("expected at least 4 calls (bootstrap, 400, re-bootstrap, success), got %d", calls)
+	}
+	if !strings.Contains(buf.String(), "post-recovery") {
+		t.Errorf("expected post-recovery item in output, got:\n%s", buf.String())
+	}
+}
+
+// TestRunFeedWatchFiltersMentions pins the --mentions filter behavior:
+// items that mention the named recipient are printed; everything else
+// is dropped silently. The cursor still advances past dropped items
+// (otherwise dropped events would prevent the watcher from making
+// progress at all on a noisy feed).
+func TestRunFeedWatchFiltersMentions(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		idx := calls
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch idx {
+		case 1:
+			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"c0","has_more":false}`))
+		default:
+			_, _ = w.Write([]byte(`{"items":[
+				{"event_id":"e-other","occurred_at":"2026-04-24T14:00:00Z","source":"agent","subject_kind":"work_item","subject_id":"11","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-B","text":"unrelated chatter"}}},
+				{"event_id":"e-direct","occurred_at":"2026-04-24T14:00:01Z","source":"agent","subject_kind":"work_item","subject_id":"22","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-A","text":"a note authored by A"}}},
+				{"event_id":"e-mention","occurred_at":"2026-04-24T14:00:02Z","source":"agent","subject_kind":"work_item","subject_id":"33","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-B","text":"hey @agent-A please look"}}}
+			],"next_cursor":"c1","has_more":false}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := &feedClient{baseURL: srv.URL, token: "tok", http: srv.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	var buf bytes.Buffer
+	if err := runFeedWatch(ctx, nil, client, watchOptions{
+		limit:        50,
+		wait:         10 * time.Millisecond,
+		mentions:     []string{"agent-A"},
+		retryBackoff: 5 * time.Millisecond,
+	}, &buf); err != nil {
+		t.Fatalf("runFeedWatch: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "unrelated chatter") {
+		t.Errorf("unrelated note leaked through filter, output:\n%s", out)
+	}
+	if !strings.Contains(out, "a note authored by A") {
+		t.Errorf("authored-by-A note should match, output:\n%s", out)
+	}
+	if !strings.Contains(out, "hey @agent-A please look") {
+		t.Errorf("@agent-A mention should match, output:\n%s", out)
+	}
+}
+
+// TestMatchesMentions covers the small matching matrix at unit level
+// independent of the watch loop. Direct payload, mentions array,
+// @-syntax in text/note, and recursion into the event_appended inner
+// envelope are all exercised.
+func TestMatchesMentions(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  string
+		mentions []string
+		want     bool
+	}{
+		{
+			name:     "no mentions filter matches everything",
+			payload:  `{"text":"random"}`,
+			mentions: nil,
+			want:     true,
+		},
+		{
+			name:     "author equality matches",
+			payload:  `{"author":"agent-A","text":"x"}`,
+			mentions: []string{"agent-A"},
+			want:     true,
+		},
+		{
+			name:     "author mismatch does not match",
+			payload:  `{"author":"agent-B","text":"x"}`,
+			mentions: []string{"agent-A"},
+			want:     false,
+		},
+		{
+			name:     "mentions array hit",
+			payload:  `{"author":"agent-B","mentions":["agent-A","agent-C"]}`,
+			mentions: []string{"agent-A"},
+			want:     true,
+		},
+		{
+			name:     "@name in text body",
+			payload:  `{"author":"agent-B","text":"poking @agent-A on this"}`,
+			mentions: []string{"agent-A"},
+			want:     true,
+		},
+		{
+			name:     "@name in note field also matches",
+			payload:  `{"note":"see @agent-A"}`,
+			mentions: []string{"agent-A"},
+			want:     true,
+		},
+		{
+			name:     "recurses into event_appended inner",
+			payload:  `{"inner_kind":"work_item.note_added","inner":{"author":"agent-A","text":"hi"}}`,
+			mentions: []string{"agent-A"},
+			want:     true,
+		},
+		{
+			name:     "bare-name (no @) does NOT match (avoids false positives)",
+			payload:  `{"text":"agent-A is fine"}`,
+			mentions: []string{"agent-A"},
+			want:     false,
+		},
+		{
+			name:     "any-of: matches if at least one name hits",
+			payload:  `{"author":"agent-B"}`,
+			mentions: []string{"agent-A", "agent-B"},
+			want:     true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			it := feedItem{Payload: json.RawMessage(c.payload)}
+			if got := matchesMentions(it, c.mentions); got != c.want {
+				t.Errorf("matchesMentions(%s, %v) = %v, want %v", c.payload, c.mentions, got, c.want)
+			}
+		})
+	}
+}
+
+// TestFeedClientFetchPageHonorsCursorAndWait pins the wire shape for the
+// watcher-mode endpoint: cursor and wait both ride as query params,
+// Authorization carries the Bearer, and the response decodes into the
+// feedPage struct (items + next_cursor + has_more).
+func TestFeedClientFetchPageHonorsCursorAndWait(t *testing.T) {
+	var (
+		gotCursor string
+		gotWait   string
+		gotLimit  string
+		gotAuth   string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCursor = r.URL.Query().Get("cursor")
+		gotWait = r.URL.Query().Get("wait")
+		gotLimit = r.URL.Query().Get("limit")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[
+			{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11","kind":"work_item.created","payload":{"title":"x","state":"captured"}}
+		],"next_cursor":"abc123","has_more":true}`))
+	}))
+	defer srv.Close()
+
+	c := &feedClient{baseURL: srv.URL, token: "wln_secret", http: srv.Client()}
+	page, err := c.fetchPage(context.Background(), "prev-cursor", 30*time.Second, 25)
+	if err != nil {
+		t.Fatalf("fetchPage: %v", err)
+	}
+	if gotAuth != "Bearer wln_secret" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer wln_secret")
+	}
+	if gotCursor != "prev-cursor" {
+		t.Errorf("cursor = %q, want %q", gotCursor, "prev-cursor")
+	}
+	if gotWait != "30s" {
+		t.Errorf("wait = %q, want %q", gotWait, "30s")
+	}
+	if gotLimit != "25" {
+		t.Errorf("limit = %q, want %q", gotLimit, "25")
+	}
+	if page.NextCursor != "abc123" {
+		t.Errorf("next_cursor = %q, want %q", page.NextCursor, "abc123")
+	}
+	if !page.HasMore {
+		t.Errorf("has_more = false, want true")
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(page.Items))
+	}
+}
+
+func TestParseMentions(t *testing.T) {
+	cases := map[string][]string{
+		"":                       nil,
+		"agent-A":                {"agent-A"},
+		"agent-A,agent-B":        {"agent-A", "agent-B"},
+		" agent-A , agent-B ":    {"agent-A", "agent-B"},
+		"a,,b":                   {"a", "b"},
+		strings.Repeat(",", 10):  nil,
+	}
+	for in, want := range cases {
+		got := parseMentions(in)
+		if len(got) != len(want) {
+			t.Errorf("parseMentions(%q) = %v, want %v", in, got, want)
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("parseMentions(%q)[%d] = %q, want %q", in, i, got[i], want[i])
+			}
+		}
+	}
 }
