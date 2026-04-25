@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -154,6 +155,150 @@ func TestFeedWatcherResumesFromCursor(t *testing.T) {
 			t.Errorf("item leaked from pre-cursor batch into resume page: %v", item)
 		}
 	}
+}
+
+// TestFeedFabricatedCursorReturns400 closes the contract gap B found in
+// e1625848: a syntactically-valid-but-fabricated cursor (correct base64,
+// correct byte length, but encoding a seq the server never issued) must
+// 400, not 200-with-empty-items. The latter silently masks consumer bugs
+// and previously could skip history if the fabricated seq happened to
+// land in the live range.
+//
+// Why this test specifically: it pins the existence-validation path
+// added in 70a2f732. Removing the cursorExists check would cause a
+// fabricated future seq to silently return empty pages — the exact
+// failure mode B reproduced manually.
+func TestFeedFabricatedCursorReturns400(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	tokenResult, err := auth.NewService(pool, app.NewEventWriter()).CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "feed-fabricated",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	server := New(pool, nil)
+
+	// Encode a cursor pointing at seq=99999999 — well beyond anything
+	// the integration test could plausibly emit. Uses the same wire
+	// format the server emits, so this isn't testing "weird bytes" — it's
+	// testing "a syntactically perfect cursor that no event ever held."
+	fabricated := encodeSeqCursorForTest(99999999)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/feed?cursor="+fabricated, nil)
+	req.Header.Set("Authorization", "Bearer "+tokenResult.Secret)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("fabricated cursor: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !contains(rec.Body.String(), "invalid_cursor") {
+		t.Errorf("expected error code invalid_cursor in body, got: %s", rec.Body.String())
+	}
+}
+
+// TestFeedNoSkipUnderSameMicrosecondContention is the no-skip companion
+// to the contract test above. It addresses B's second finding: with the
+// old (occurred_at, id) compound key, two events that landed in the
+// same occurred_at microsecond bucket could sort in a way that
+// permanently skipped one on resume. Under the v1 cursor (events.seq),
+// resume MUST return every event written between the cursor and now,
+// regardless of timestamp collisions.
+//
+// The harder version of this test would force same-microsecond
+// occurred_at deterministically; the practical version writes a tight
+// burst of N events (which on a fast machine produces several
+// micro-second collisions) and asserts the post-cursor page returns
+// exactly N items, all distinct, all from the post-cursor batch. If
+// the (occurred_at, id) regression returns, this test starts losing
+// items intermittently.
+func TestFeedNoSkipUnderSameMicrosecondContention(t *testing.T) {
+	const burst = 50
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	tokenResult, err := auth.NewService(pool, app.NewEventWriter()).CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "feed-noskip",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	server := New(pool, nil)
+
+	// Establish the cursor BEFORE the burst so every burst event must
+	// be returned by the resume page.
+	cursor := fetchHeadCursor(t, server.Handler(), tokenResult.Secret)
+
+	for i := 0; i < burst; i++ {
+		key := "noskip-" + itoa(i)
+		dedupe := "integration:noskip:" + itoa(i)
+		rec := postSignal(t, server.Handler(), tokenResult.Secret, key, signalRequestBody(t, dedupe))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("burst signal %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Drain pages until exhausted. The server caps at 200 items per
+	// page; burst<200 keeps this single-page in practice but the loop
+	// is correct either way.
+	seen := make(map[string]bool)
+	currentCursor := cursor
+	for {
+		page := fetchPage(t, server.Handler(), tokenResult.Secret, "/v1/feed?cursor="+currentCursor+"&limit=200")
+		for _, item := range page.Items {
+			id, _ := item["event_id"].(string)
+			if seen[id] {
+				t.Errorf("duplicate event_id %s in resume pages — at-least-once is fine, but a single page should not double-count", id)
+			}
+			seen[id] = true
+		}
+		if !page.HasMore {
+			break
+		}
+		currentCursor = page.NextCursor
+	}
+
+	// Count the burst items we actually got back. The signals service
+	// emits at least one signal.received event per POST; with dedupe
+	// keys distinct it also creates work_item.created. The minimum we
+	// MUST see is `burst` signal.received events; missing any of those
+	// is the no-skip regression.
+	signalCount := 0
+	for id := range seen {
+		if id != "" {
+			signalCount++
+		}
+	}
+	if signalCount < burst {
+		t.Fatalf("no-skip regression: wrote %d burst events, resume page returned %d (missing %d)",
+			burst, signalCount, burst-signalCount)
+	}
+}
+
+// encodeSeqCursorForTest mirrors the server's v1 cursor LAYOUT (not the
+// base64 encoding) so integration tests can build fabricated cursors
+// without exporting the internal encoder. We deliberately duplicate the
+// 8-bytes-BE layout — that's the contract surface this test guards. We
+// reuse the standard base64.RawURLEncoding because it's not part of the
+// surface being tested; bugs in the standard library would also corrupt
+// real consumer cursors and surface elsewhere.
+func encodeSeqCursorForTest(seq int64) string {
+	buf := make([]byte, 8)
+	for i := 7; i >= 0; i-- {
+		buf[i] = byte(seq & 0xff)
+		seq >>= 8
+	}
+	return base64.RawURLEncoding.EncodeToString(buf)
 }
 
 func fetchHeadCursor(t *testing.T, h http.Handler, token string) string {

@@ -5,40 +5,49 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"time"
-
-	"github.com/google/uuid"
 )
 
 // ErrInvalidCursor is returned when a caller-supplied cursor is malformed
-// or has the wrong length. The HTTP layer maps it to 400 so consumers
-// learn fast that they're round-tripping the wrong string. Silent
-// fallback to "from the start" was rejected during e1625848 design
-// because it masks consumer bugs.
+// (wrong length, not base64) OR semantically invalid (decodes cleanly but
+// references a sequence value that was never issued by this server). The
+// HTTP layer maps it to 400 so consumers learn fast that they're round-
+// tripping the wrong string. Silent fallback to "from the start" was
+// rejected during e1625848 design because it masks consumer bugs; the
+// existence-validation path was added in the 70a2f732 repair after B
+// found that fabricated-but-syntactically-valid v0 cursors were silently
+// returning empty pages.
 var ErrInvalidCursor = errors.New("invalid cursor")
 
 // cursor is the SERVER-SIDE shape of an opaque resume token. Consumers
 // MUST treat the encoded form as a verbatim blob; the encoding is an
-// implementation detail and we reserve the right to change it. v0
-// encodes (occurred_at, event_id) as 24 raw bytes (8 BE micros + 16
-// UUID) → 32 base64url chars (no padding).
+// implementation detail and we reserve the right to change it.
 //
-// (occurred_at, id) is the compound sort key used by the after-cursor
-// query, picked because event_id is content-addressed (SHA-256 of the
-// canonical payload) and so has no relationship to time on its own.
-// occurred_at can collide on simultaneous appends; id is the
-// tie-breaker.
+// v1 (current): encodes a single events.seq value (BIGSERIAL, monotonic
+// per-insert) as 8 BE bytes → 11 base64url chars (no padding). seq is
+// the right primitive because it is strictly increasing per insert and
+// has no contention behavior under same-microsecond writes (which the
+// v0 (occurred_at, id) compound key did — see 70a2f732 for the no-skip
+// repair narrative).
+//
+// v0 (legacy, invalidated by this version): 24 raw bytes (8 BE
+// occurred_at micros + 16 UUID) → 32 base64url chars. Watchers holding
+// a v0 cursor will fail at the length check below and the watcher
+// consumer (db27a9c9) will re-bootstrap via its isInvalidCursorErr
+// recovery path.
 type cursor struct {
-	occurredAt time.Time
-	eventID    uuid.UUID
+	seq int64
 }
 
-const cursorRawSize = 8 + 16
+const cursorRawSize = 8
 
-func encodeCursor(occurredAt time.Time, eventID uuid.UUID) string {
+// CursorEncodedLen is the byte length of a v1 encoded cursor. Pinned as
+// a constant so the test that guards "consumers will get fail-fast on
+// v0 cursors" can assert against this rather than a magic number.
+const CursorEncodedLen = 11
+
+func encodeCursor(seq int64) string {
 	buf := make([]byte, cursorRawSize)
-	binary.BigEndian.PutUint64(buf[:8], uint64(occurredAt.UnixMicro()))
-	copy(buf[8:], eventID[:])
+	binary.BigEndian.PutUint64(buf, uint64(seq))
 	return base64.RawURLEncoding.EncodeToString(buf)
 }
 
@@ -51,12 +60,11 @@ func decodeCursor(s string) (cursor, error) {
 		return cursor{}, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
 	}
 	if len(raw) != cursorRawSize {
-		return cursor{}, fmt.Errorf("%w: wrong length", ErrInvalidCursor)
+		return cursor{}, fmt.Errorf("%w: wrong length (got %d bytes, want %d)", ErrInvalidCursor, len(raw), cursorRawSize)
 	}
-	micros := int64(binary.BigEndian.Uint64(raw[:8]))
-	c := cursor{
-		occurredAt: time.UnixMicro(micros).UTC(),
+	seq := int64(binary.BigEndian.Uint64(raw))
+	if seq < 0 {
+		return cursor{}, fmt.Errorf("%w: negative seq", ErrInvalidCursor)
 	}
-	copy(c.eventID[:], raw[8:])
-	return c, nil
+	return cursor{seq: seq}, nil
 }
