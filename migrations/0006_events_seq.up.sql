@@ -1,0 +1,31 @@
+-- 0006_events_seq: add a monotonic ordering primitive to events.
+--
+-- Why: e1625848 shipped a (occurred_at, id) compound key as the cursor
+-- ordering primitive. B's review found that occurred_at = now() with
+-- microsecond precision is not unique under same-microsecond contention,
+-- and id is a SHA-256 of canonical(payload) — content-addressed, NOT
+-- monotonic. Two events landing at the same occurred_at can sort in
+-- a way that permanently skips one of them on cursor resume.
+--
+-- BIGSERIAL gives a strictly-increasing-per-insert primitive (gaps are
+-- allowed; only out-of-order would break "strictly after" semantics, and
+-- BIGSERIAL is in-order under the default isolation we use).
+--
+-- This is an ADD COLUMN with a non-null default backed by nextval(). The
+-- ALTER rewrites the table and assigns sequence values to existing rows
+-- in heap-scan order. For an append-only table that has never been
+-- UPDATEd, this is approximately insertion order — close enough for
+-- backfill, since v0 32-char cursors are invalidated at the length check
+-- in the new opaque(seq) encoding (the watcher consumer recovers via the
+-- isInvalidCursorErr re-bootstrap path shipped in db27a9c9).
+--
+-- Note: ALTER TABLE column add does NOT fire the events_no_update
+-- BEFORE UPDATE FOR EACH ROW trigger — it is a DDL rewrite, not a DML
+-- update. The append-only invariant is preserved.
+
+ALTER TABLE events ADD COLUMN seq BIGSERIAL UNIQUE NOT NULL;
+
+-- The UNIQUE constraint auto-creates an index covering equality and
+-- range queries on seq, which is what the new feed.queryAfter uses
+-- (WHERE seq > $cursor ORDER BY seq ASC LIMIT N). Adding a separate
+-- index would be redundant.

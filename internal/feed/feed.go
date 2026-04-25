@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,6 +62,11 @@ type Item struct {
 	Kind         string          `json:"kind"`
 	Payload      json.RawMessage `json:"payload"`
 	ActorTokenID *uuid.UUID      `json:"actor_token_id,omitempty"`
+	// Seq is the events.seq monotonic ordering primitive (added in
+	// 70a2f732). Surfaced internally for cursor encoding; not exposed
+	// in the JSON wire shape because cursor opacity forbids consumers
+	// from reading sequence values directly.
+	Seq int64 `json:"-"`
 }
 
 type Service struct {
@@ -139,6 +145,13 @@ func (s *Service) List(ctx context.Context, limit int) ([]Item, error) {
 // watcher returns nothing immediately and waits opts.Wait for new
 // events; the consumer then resumes from NextCursor.
 //
+// When opts.Cursor is supplied, the seq it encodes is validated against
+// the live events log (existence-check, repaired in 70a2f732 after B
+// found that fabricated cursors were silently returning empty pages).
+// Unknown seq → ErrInvalidCursor → 400 at the HTTP layer. The check
+// happens before the after-cursor query so a fabricated future seq
+// never gets dressed up as "no events after this point yet."
+//
 // When opts.Wait > 0 and the initial after-cursor query is empty, the
 // call enters bounded poll mode: a 250ms tick that re-runs the query
 // until events arrive, the wait cap fires, or the request context is
@@ -147,7 +160,7 @@ func (s *Service) List(ctx context.Context, limit int) ([]Item, error) {
 //
 // Cursor opacity is contractual; consumers that parse the encoded blob
 // will break at the first encoding change. See cursor.go for the v0
-// shape, which is documented as server-internal.
+// (legacy) and v1 (current) shapes, both documented as server-internal.
 func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 	limit := opts.Limit
 	if limit <= 0 || limit > maxLimit {
@@ -162,17 +175,32 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 	}
 
 	var cur cursor
-	var err error
 	if opts.Cursor != "" {
-		cur, err = decodeCursor(opts.Cursor)
+		decoded, err := decodeCursor(opts.Cursor)
 		if err != nil {
 			return Page{}, err
 		}
+		// Existence check: a syntactically-valid-but-fabricated cursor
+		// (made-up seq, valid encoding) must 400 deterministically. seq=0
+		// is a special case meaning "before any event" and is allowed
+		// without a roundtrip — consumers building their own bootstrap
+		// can encode seq=0 to mean "give me everything from the start."
+		if decoded.seq > 0 {
+			ok, err := s.cursorExists(ctx, decoded.seq)
+			if err != nil {
+				return Page{}, err
+			}
+			if !ok {
+				return Page{}, fmt.Errorf("%w: seq %d was never issued", ErrInvalidCursor, decoded.seq)
+			}
+		}
+		cur = decoded
 	} else {
-		cur, err = s.head(ctx)
+		head, err := s.head(ctx)
 		if err != nil {
 			return Page{}, err
 		}
+		cur = head
 	}
 
 	deadline := time.Now().Add(wait)
@@ -187,7 +215,7 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 		if wait == 0 || !time.Now().Before(deadline) {
 			return Page{
 				Items:      []Item{},
-				NextCursor: encodeCursor(cur.occurredAt, cur.eventID),
+				NextCursor: encodeCursor(cur.seq),
 				HasMore:    false,
 			}, nil
 		}
@@ -199,42 +227,64 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 	}
 }
 
-// head returns a cursor pointing at the most recent feed-visible event,
-// or a zero-time cursor when the log is empty. Used to bootstrap
-// "from now" watcher mode when no caller cursor is supplied.
+// head returns a cursor pointing at the highest-seq event in the events
+// log (across all kinds, not just feed-visible ones — the cursor is a
+// pointer into the underlying log, not the projection). Used to
+// bootstrap "from now" watcher mode when no caller cursor is supplied.
+//
+// When the log is empty, returns seq=0 — which encodeCursor renders as
+// the all-zeros cursor and decodeCursor accepts as "before any event."
+// Consumers that bootstrap against an empty log get a cursor that, on
+// the next call, returns events 1..N (everything written since).
 func (s *Service) head(ctx context.Context) (cursor, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT occurred_at, id FROM events
-		WHERE kind = ANY($1::text[])
-		ORDER BY occurred_at DESC, id DESC
-		LIMIT 1
-	`, IncludedKinds)
-	var c cursor
-	if err := row.Scan(&c.occurredAt, &c.eventID); err != nil {
+	row := s.pool.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events`)
+	var seq int64
+	if err := row.Scan(&seq); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return cursor{occurredAt: time.Unix(0, 0).UTC(), eventID: uuid.Nil}, nil
+			return cursor{seq: 0}, nil
 		}
 		return cursor{}, err
 	}
-	return c, nil
+	return cursor{seq: seq}, nil
 }
 
-// queryAfter runs a single after-cursor SELECT. The (occurred_at, id)
-// tuple comparison is the standard SQL idiom for resumable pagination
-// over a compound key; it returns rows where occurred_at > cur.occurredAt,
-// OR occurred_at = cur.occurredAt AND id > cur.eventID — exactly the
-// "events strictly after this cursor" semantics the consumer expects.
+// cursorExists verifies that the seq encoded in a consumer-supplied
+// cursor was actually emitted by this server. Closes the contract gap
+// B found in e1625848: without this check, a fabricated cursor decodes
+// cleanly and the after-cursor query returns "events after that point"
+// — empty for a future seq, masking consumer bugs.
+//
+// The check runs against ANY event (not just feed-visible), because the
+// cursor IS into the underlying log. A consumer that received a cursor
+// pointing at an idempotency.recorded event (excluded from /v1/feed)
+// must still be able to round-trip it; the after-cursor query will skip
+// non-feed-visible events, but the cursor itself is valid.
+func (s *Service) cursorExists(ctx context.Context, seq int64) (bool, error) {
+	var found bool
+	row := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE seq = $1)`, seq)
+	if err := row.Scan(&found); err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
+// queryAfter runs a single after-cursor SELECT against the seq column.
+// seq is BIGSERIAL (strictly increasing per insert under default
+// isolation), so WHERE seq > $cursor ORDER BY seq is a true monotonic
+// resume primitive — no skip risk under same-microsecond contention,
+// no compound-key tuple comparison, no dependency on content-addressed
+// id ordering.
 //
 // limit+1 is fetched to compute HasMore without a separate COUNT query.
 func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int) (Page, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload
+		SELECT id, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload, seq
 		FROM events
 		WHERE kind = ANY($1::text[])
-		AND (occurred_at, id) > ($2::timestamptz, $3::uuid)
-		ORDER BY occurred_at ASC, id ASC
-		LIMIT $4
-	`, IncludedKinds, cur.occurredAt, cur.eventID, limit+1)
+		AND seq > $2
+		ORDER BY seq ASC
+		LIMIT $3
+	`, IncludedKinds, cur.seq, limit+1)
 	if err != nil {
 		return Page{}, err
 	}
@@ -243,7 +293,7 @@ func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int) (Page, 
 	for rows.Next() {
 		var item Item
 		var source string
-		if err := rows.Scan(&item.EventID, &item.OccurredAt, &item.ActorTokenID, &source, &item.SubjectKind, &item.SubjectID, &item.Kind, &item.Payload); err != nil {
+		if err := rows.Scan(&item.EventID, &item.OccurredAt, &item.ActorTokenID, &source, &item.SubjectKind, &item.SubjectID, &item.Kind, &item.Payload, &item.Seq); err != nil {
 			return Page{}, err
 		}
 		item.Source = domain.Source(source)
@@ -260,14 +310,14 @@ func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int) (Page, 
 	if len(items) == 0 {
 		return Page{
 			Items:      []Item{},
-			NextCursor: encodeCursor(cur.occurredAt, cur.eventID),
+			NextCursor: encodeCursor(cur.seq),
 			HasMore:    false,
 		}, nil
 	}
 	last := items[len(items)-1]
 	return Page{
 		Items:      items,
-		NextCursor: encodeCursor(last.OccurredAt, last.EventID),
+		NextCursor: encodeCursor(last.Seq),
 		HasMore:    hasMore,
 	}, nil
 }
