@@ -165,6 +165,7 @@ A projection writer turns appended events into derived rows. It is the *only* co
 - Do not couple to a specific editor, model vendor, or cloud in core. Per-vendor adapters are explicit work_items.
 - Do not write a migration that disables the `events` append-only triggers.
 - Do not commit secrets or credentials in any form.
+- Do not add a typed `agent` object or `agent_kind` enum. Agent identity is `token.source = 'agent'` plus the tools the bearer has access to. Agent specialization lives in artifacts and prompts, never in the schema.
 
 ## Coordination with other agents
 
