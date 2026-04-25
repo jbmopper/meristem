@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -391,72 +392,84 @@ func withCwd(t *testing.T, dir string) {
 // If we ever regress to "repaginate the same window each tick," this
 // test catches it because the recorded cursor sequence flattens into
 // repeats and the output gains duplicate lines.
-func TestRunFeedWatchAdvancesCursorAndDoesNotRepeat(t *testing.T) {
-	var (
-		mu          sync.Mutex
-		callCursors []string
-		callWaits   []string
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		callCursors = append(callCursors, r.URL.Query().Get("cursor"))
-		callWaits = append(callWaits, r.URL.Query().Get("wait"))
-		callIdx := len(callCursors)
-		mu.Unlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		switch callIdx {
-		case 1:
-			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"cur-after-bootstrap","has_more":false}`))
-		case 2:
-			_, _ = w.Write([]byte(`{"items":[
-				{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11111111","kind":"work_item.created","payload":{"title":"alpha","state":"captured"}}
-			],"next_cursor":"cur-after-e1","has_more":false}`))
-		case 3:
-			_, _ = w.Write([]byte(`{"items":[
-				{"event_id":"e2","occurred_at":"2026-04-24T14:00:01Z","source":"system","subject_kind":"work_item","subject_id":"22222222","kind":"work_item.transitioned","payload":{"to":"triaged"}}
-			],"next_cursor":"cur-after-e2","has_more":false}`))
-		default:
-			// Empty page with cursor unchanged: this is what the real
-			// server returns when the long-poll deadline fires with no
-			// new events. The watcher must just go around again with the
-			// same cursor, NOT retreat to the bootstrap path.
-			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"cur-after-e2","has_more":false}`))
+// sseTestServer constructs an httptest.Server that speaks SSE. Each
+// connection runs handler with a frame writer; the test owns when to
+// emit and when to close the connection by returning from handler.
+//
+// The test server flushes after each call to writeFrame so the client
+// sees frames immediately, mirroring how the real server pushes.
+func sseTestServer(t *testing.T, handler func(t *testing.T, r *http.Request, write func(id, data string), close func())) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		closed := false
+		write := func(id, data string) {
+			if closed {
+				return
+			}
+			fmt.Fprintf(w, "id: %s\nevent: feed\ndata: %s\n\n", id, data)
+			flusher.Flush()
 		}
+		closeFn := func() { closed = true }
+		handler(t, r, write, closeFn)
 	}))
+}
+
+// TestRunFeedWatchSSEDeliversInOrderAndAdvancesLastID pins the core
+// happy path of the SSE watcher. Two SSE frames are pushed on a single
+// connection that stays open until ctx cancels — no reconnect, so each
+// event is delivered exactly once. The first-connect Last-Event-ID is
+// captured to confirm a fresh watcher boots "from now" with no cursor.
+func TestRunFeedWatchSSEDeliversInOrderAndAdvancesLastID(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		firstLEI  string
+		firstAuth string
+		captured  bool
+	)
+	srv := sseTestServer(t, func(t *testing.T, r *http.Request, write func(id, data string), closeFn func()) {
+		mu.Lock()
+		if !captured {
+			firstLEI = r.Header.Get("Last-Event-ID")
+			firstAuth = r.Header.Get("Authorization")
+			captured = true
+		}
+		mu.Unlock()
+		write("AAAAAAAAAAB",
+			`{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11111111","kind":"work_item.created","payload":{"title":"alpha","state":"captured"}}`)
+		write("AAAAAAAAAAC",
+			`{"event_id":"e2","occurred_at":"2026-04-24T14:00:01Z","source":"system","subject_kind":"work_item","subject_id":"22222222","kind":"work_item.transitioned","payload":{"to":"triaged"}}`)
+		// Block until the client closes the connection (ctx cancellation
+		// in the watcher closes it via http.Client). This prevents the
+		// watcher from reconnecting and replaying frames as duplicates.
+		<-r.Context().Done()
+	})
 	defer srv.Close()
 
-	client := &feedClient{baseURL: srv.URL, token: "tok", http: srv.Client()}
+	client := &feedClient{
+		baseURL: srv.URL, token: "tok",
+		http:       srv.Client(),
+		streamHTTP: srv.Client(),
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	var buf bytes.Buffer
-	if err := runFeedWatch(ctx, nil, client, watchOptions{
-		limit:        50,
-		wait:         10 * time.Millisecond,
+	_ = runFeedWatch(ctx, nil, client, watchOptions{
 		retryBackoff: 5 * time.Millisecond,
-	}, &buf); err != nil {
-		t.Fatalf("runFeedWatch: %v", err)
-	}
+	}, &buf)
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(callCursors) < 3 {
-		t.Fatalf("expected at least 3 calls (bootstrap + 2 polls), got %d (cursors=%v)", len(callCursors), callCursors)
+	if firstLEI != "" {
+		t.Errorf("first connect should have empty Last-Event-ID, got %q", firstLEI)
 	}
-	if callCursors[0] != "" {
-		t.Errorf("call 1 (bootstrap) cursor = %q, want empty", callCursors[0])
+	if firstAuth != "Bearer tok" {
+		t.Errorf("Authorization header = %q, want %q", firstAuth, "Bearer tok")
 	}
-	if callWaits[0] != "0s" {
-		t.Errorf("call 1 wait = %q, want %q", callWaits[0], "0s")
-	}
-	if callCursors[1] != "cur-after-bootstrap" {
-		t.Errorf("call 2 cursor = %q, want %q", callCursors[1], "cur-after-bootstrap")
-	}
-	if callCursors[2] != "cur-after-e1" {
-		t.Errorf("call 3 cursor = %q, want %q (cursor must advance after a non-empty page)", callCursors[2], "cur-after-e1")
-	}
-
 	out := buf.String()
 	if strings.Count(out, "alpha") != 1 {
 		t.Errorf("expected exactly one alpha line, output:\n%s", out)
@@ -466,105 +479,201 @@ func TestRunFeedWatchAdvancesCursorAndDoesNotRepeat(t *testing.T) {
 	}
 }
 
-// TestRunFeedWatchRecoversFromInvalidCursor pins the recovery contract.
-// A 400 invalid_cursor response from the server (cursor decode failure,
-// encoding rolled over, etc.) must NOT kill the watcher session. The
-// loop re-bootstraps a fresh head and continues; the user sees a
-// short gap, not a crash.
-//
-// Why it matters: cursor opacity is contractual but the encoding can
-// change. Without this recovery path, every encoding bump would break
-// every running --watch session.
-func TestRunFeedWatchRecoversFromInvalidCursor(t *testing.T) {
-	var mu sync.Mutex
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// TestRunFeedWatchSSEReconnectsWithLastEventID pins the resume-after-
+// disconnect contract. First connection emits one event then closes;
+// the watcher must reconnect carrying that event's id as Last-Event-ID
+// so the server can replay anything that landed during the gap.
+func TestRunFeedWatchSSEReconnectsWithLastEventID(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		connectCount   int
+		secondLEI      string
+		secondLEIOnce  sync.Once
+		secondReached  = make(chan struct{})
+	)
+	srv := sseTestServer(t, func(t *testing.T, r *http.Request, write func(id, data string), closeFn func()) {
 		mu.Lock()
-		calls++
-		idx := calls
+		connectCount++
+		idx := connectCount
 		mu.Unlock()
 
-		w.Header().Set("Content-Type", "application/json")
-		switch idx {
-		case 1:
-			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"stale-cursor","has_more":false}`))
-		case 2:
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":{"code":"invalid_cursor","message":"cursor is malformed"}}`))
-		case 3:
-			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"fresh-cursor","has_more":false}`))
-		default:
-			_, _ = w.Write([]byte(`{"items":[
-				{"event_id":"after-recovery","occurred_at":"2026-04-24T14:00:05Z","source":"system","subject_kind":"work_item","subject_id":"33333333","kind":"work_item.created","payload":{"title":"post-recovery","state":"captured"}}
-			],"next_cursor":"cur-after-recovery","has_more":false}`))
+		if idx == 1 {
+			write("FIRSTEVENTID",
+				`{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11","kind":"work_item.created","payload":{"title":"first","state":"captured"}}`)
+			// Give the client time to receive and process the frame,
+			// then drop the connection by returning. The watcher's
+			// outer loop will reconnect carrying FIRSTEVENTID.
+			time.Sleep(60 * time.Millisecond)
+			return
 		}
-	}))
+
+		secondLEIOnce.Do(func() {
+			lei := r.Header.Get("Last-Event-ID")
+			mu.Lock()
+			secondLEI = lei
+			mu.Unlock()
+			close(secondReached)
+		})
+		// Hold the second connection open so the watcher doesn't loop
+		// past it and clobber what we recorded.
+		<-r.Context().Done()
+	})
 	defer srv.Close()
 
-	client := &feedClient{baseURL: srv.URL, token: "tok", http: srv.Client()}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	client := &feedClient{
+		baseURL: srv.URL, token: "tok",
+		http:       srv.Client(),
+		streamHTTP: srv.Client(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	var buf bytes.Buffer
-	if err := runFeedWatch(ctx, nil, client, watchOptions{
-		limit:        50,
-		wait:         10 * time.Millisecond,
+	_ = runFeedWatch(ctx, nil, client, watchOptions{
 		retryBackoff: 5 * time.Millisecond,
-	}, &buf); err != nil {
-		t.Fatalf("runFeedWatch returned error instead of recovering: %v", err)
+	}, &buf)
+
+	select {
+	case <-secondReached:
+	case <-time.After(400 * time.Millisecond):
+		t.Fatal("server never received the reconnect")
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if calls < 4 {
-		t.Errorf("expected at least 4 calls (bootstrap, 400, re-bootstrap, success), got %d", calls)
+	if secondLEI != "FIRSTEVENTID" {
+		t.Errorf("reconnect Last-Event-ID = %q, want %q (the cursor of the last delivered event)", secondLEI, "FIRSTEVENTID")
 	}
-	if !strings.Contains(buf.String(), "post-recovery") {
-		t.Errorf("expected post-recovery item in output, got:\n%s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "first") {
+		t.Errorf("first event should be printed, output:\n%s", out)
+	}
+}
+
+// TestRunFeedWatchSSERecoversFromInvalidCursor pins the recovery
+// contract. A 400 invalid_cursor response on connect must NOT kill the
+// watcher session: the loop drops its lastID and reconnects from now,
+// so a stale cursor surviving an encoding bump or a server restart
+// causes a short gap, not a crash.
+//
+// Connection sequence:
+//   1: stream one event with id=STALECURSOR, drop
+//   2: receive STALECURSOR, return 400 invalid_cursor
+//   3: receive empty LEI (recovery dropped it), stream post-recovery event
+func TestRunFeedWatchSSERecoversFromInvalidCursor(t *testing.T) {
+	var (
+		mu               sync.Mutex
+		connects         int
+		thirdLEI         string
+		thirdLEIOnce     sync.Once
+		thirdReached     = make(chan struct{})
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		connects++
+		idx := connects
+		mu.Unlock()
+		lei := r.Header.Get("Last-Event-ID")
+
+		switch idx {
+		case 1:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			flusher.Flush()
+			fmt.Fprintf(w, "id: STALECURSOR\nevent: feed\ndata: %s\n\n",
+				`{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11","kind":"work_item.created","payload":{"title":"pre","state":"captured"}}`)
+			flusher.Flush()
+			time.Sleep(60 * time.Millisecond)
+		case 2:
+			if lei != "STALECURSOR" {
+				t.Errorf("connect 2 LEI = %q, want STALECURSOR", lei)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_cursor","message":"cursor is malformed"}}`))
+		default:
+			thirdLEIOnce.Do(func() {
+				mu.Lock()
+				thirdLEI = lei
+				mu.Unlock()
+				close(thirdReached)
+			})
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			flusher.Flush()
+			fmt.Fprintf(w, "id: POSTRECVCURSR\nevent: feed\ndata: %s\n\n",
+				`{"event_id":"e2","occurred_at":"2026-04-24T14:00:05Z","source":"system","subject_kind":"work_item","subject_id":"33","kind":"work_item.created","payload":{"title":"post-recovery","state":"captured"}}`)
+			flusher.Flush()
+			<-r.Context().Done()
+		}
+	}))
+	defer srv.Close()
+
+	client := &feedClient{
+		baseURL: srv.URL, token: "tok",
+		http:       srv.Client(),
+		streamHTTP: srv.Client(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+
+	var buf bytes.Buffer
+	_ = runFeedWatch(ctx, nil, client, watchOptions{
+		retryBackoff: 5 * time.Millisecond,
+	}, &buf)
+
+	select {
+	case <-thirdReached:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("watcher never reached the post-recovery connect")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if thirdLEI != "" {
+		t.Errorf("connect 3 LEI = %q, want empty (recovery dropped stale cursor)", thirdLEI)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "post-recovery") {
+		t.Errorf("expected post-recovery item in output, got:\n%s", out)
 	}
 }
 
 // TestRunFeedWatchFiltersMentions pins the --mentions filter behavior:
 // items that mention the named recipient are printed; everything else
-// is dropped silently. The cursor still advances past dropped items
-// (otherwise dropped events would prevent the watcher from making
-// progress at all on a noisy feed).
+// is dropped silently. lastID still advances past dropped items
+// (otherwise dropped events on a noisy feed would re-deliver on every
+// reconnect).
 func TestRunFeedWatchFiltersMentions(t *testing.T) {
-	var mu sync.Mutex
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		calls++
-		idx := calls
-		mu.Unlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		switch idx {
-		case 1:
-			_, _ = w.Write([]byte(`{"items":[],"next_cursor":"c0","has_more":false}`))
-		default:
-			_, _ = w.Write([]byte(`{"items":[
-				{"event_id":"e-other","occurred_at":"2026-04-24T14:00:00Z","source":"agent","subject_kind":"work_item","subject_id":"11","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-B","text":"unrelated chatter"}}},
-				{"event_id":"e-direct","occurred_at":"2026-04-24T14:00:01Z","source":"agent","subject_kind":"work_item","subject_id":"22","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-A","text":"a note authored by A"}}},
-				{"event_id":"e-mention","occurred_at":"2026-04-24T14:00:02Z","source":"agent","subject_kind":"work_item","subject_id":"33","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-B","text":"hey @agent-A please look"}}}
-			],"next_cursor":"c1","has_more":false}`))
-		}
-	}))
+	srv := sseTestServer(t, func(t *testing.T, r *http.Request, write func(id, data string), closeFn func()) {
+		write("ID-OTHER",
+			`{"event_id":"e-other","occurred_at":"2026-04-24T14:00:00Z","source":"agent","subject_kind":"work_item","subject_id":"11","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-B","text":"unrelated chatter"}}}`)
+		write("ID-DIRECT",
+			`{"event_id":"e-direct","occurred_at":"2026-04-24T14:00:01Z","source":"agent","subject_kind":"work_item","subject_id":"22","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-A","text":"a note authored by A"}}}`)
+		write("ID-MENTION",
+			`{"event_id":"e-mention","occurred_at":"2026-04-24T14:00:02Z","source":"agent","subject_kind":"work_item","subject_id":"33","kind":"work_item.event_appended","payload":{"inner_kind":"work_item.note_added","inner":{"author":"agent-B","text":"hey @agent-A please look"}}}`)
+		// Hold the connection until ctx cancels so the watcher doesn't
+		// reconnect and re-deliver these events.
+		_ = closeFn
+		<-r.Context().Done()
+	})
 	defer srv.Close()
 
-	client := &feedClient{baseURL: srv.URL, token: "tok", http: srv.Client()}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	client := &feedClient{
+		baseURL: srv.URL, token: "tok",
+		http:       srv.Client(),
+		streamHTTP: srv.Client(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
 	var buf bytes.Buffer
-	if err := runFeedWatch(ctx, nil, client, watchOptions{
-		limit:        50,
-		wait:         10 * time.Millisecond,
+	_ = runFeedWatch(ctx, nil, client, watchOptions{
 		mentions:     []string{"agent-A"},
 		retryBackoff: 5 * time.Millisecond,
-	}, &buf); err != nil {
-		t.Fatalf("runFeedWatch: %v", err)
-	}
+	}, &buf)
 
 	out := buf.String()
 	if strings.Contains(out, "unrelated chatter") {
@@ -655,53 +764,61 @@ func TestMatchesMentions(t *testing.T) {
 }
 
 // TestFeedClientFetchPageHonorsCursorAndWait pins the wire shape for the
-// watcher-mode endpoint: cursor and wait both ride as query params,
-// Authorization carries the Bearer, and the response decodes into the
-// feedPage struct (items + next_cursor + has_more).
-func TestFeedClientFetchPageHonorsCursorAndWait(t *testing.T) {
+// TestConsumeStreamSendsLastEventIDAndAuth pins the stream-connect
+// contract independent of the watcher loop: Authorization carries the
+// Bearer, Last-Event-ID rides on the request when supplied, frames are
+// parsed into sseEvent, and the cursor of the last frame is returned
+// for the watcher's resume bookkeeping.
+func TestConsumeStreamSendsLastEventIDAndAuth(t *testing.T) {
 	var (
-		gotCursor string
-		gotWait   string
-		gotLimit  string
-		gotAuth   string
+		gotAuth string
+		gotLEI  string
+		gotAcc  string
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotCursor = r.URL.Query().Get("cursor")
-		gotWait = r.URL.Query().Get("wait")
-		gotLimit = r.URL.Query().Get("limit")
+	srv := sseTestServer(t, func(t *testing.T, r *http.Request, write func(id, data string), _ func()) {
 		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"items":[
-			{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11","kind":"work_item.created","payload":{"title":"x","state":"captured"}}
-		],"next_cursor":"abc123","has_more":true}`))
-	}))
+		gotLEI = r.Header.Get("Last-Event-ID")
+		gotAcc = r.Header.Get("Accept")
+		write("CURFINAL",
+			`{"event_id":"e1","occurred_at":"2026-04-24T14:00:00Z","source":"system","subject_kind":"work_item","subject_id":"11","kind":"work_item.created","payload":{"title":"x","state":"captured"}}`)
+		<-r.Context().Done()
+	})
 	defer srv.Close()
 
-	c := &feedClient{baseURL: srv.URL, token: "wln_secret", http: srv.Client()}
-	page, err := c.fetchPage(context.Background(), "prev-cursor", 30*time.Second, 25)
-	if err != nil {
-		t.Fatalf("fetchPage: %v", err)
+	c := &feedClient{
+		baseURL: srv.URL, token: "wln_secret",
+		http:       srv.Client(),
+		streamHTTP: srv.Client(),
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	var got []sseEvent
+	lastID, _ := c.consumeStream(ctx, "PRIORCURSOR", func(ev sseEvent) error {
+		got = append(got, ev)
+		return nil
+	})
+
 	if gotAuth != "Bearer wln_secret" {
-		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer wln_secret")
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer wln_secret")
 	}
-	if gotCursor != "prev-cursor" {
-		t.Errorf("cursor = %q, want %q", gotCursor, "prev-cursor")
+	if gotLEI != "PRIORCURSOR" {
+		t.Errorf("Last-Event-ID = %q, want %q", gotLEI, "PRIORCURSOR")
 	}
-	if gotWait != "30s" {
-		t.Errorf("wait = %q, want %q", gotWait, "30s")
+	if gotAcc != "text/event-stream" {
+		t.Errorf("Accept = %q, want %q", gotAcc, "text/event-stream")
 	}
-	if gotLimit != "25" {
-		t.Errorf("limit = %q, want %q", gotLimit, "25")
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
 	}
-	if page.NextCursor != "abc123" {
-		t.Errorf("next_cursor = %q, want %q", page.NextCursor, "abc123")
+	if got[0].ID != "CURFINAL" {
+		t.Errorf("event id = %q, want %q", got[0].ID, "CURFINAL")
 	}
-	if !page.HasMore {
-		t.Errorf("has_more = false, want true")
+	if got[0].Item.EventID != "e1" {
+		t.Errorf("event_id = %q, want %q", got[0].Item.EventID, "e1")
 	}
-	if len(page.Items) != 1 {
-		t.Fatalf("items = %d, want 1", len(page.Items))
+	if lastID != "CURFINAL" {
+		t.Errorf("returned lastID = %q, want %q", lastID, "CURFINAL")
 	}
 }
 
