@@ -23,6 +23,10 @@ import (
 // Stdout is reserved for JSON-RPC traffic; structured logs go to stderr
 // so launching clients can pipe stdio cleanly.
 func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
+	if _, _, err := validateStartupSafety(logger); err != nil {
+		return err
+	}
+
 	secret := os.Getenv("MERISTEM_TOKEN")
 	if secret == "" {
 		return fmt.Errorf("mcp: MERISTEM_TOKEN is required (mint one with `meristem tokens create --source agent`)")

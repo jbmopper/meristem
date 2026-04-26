@@ -13,6 +13,7 @@ v0 in development. Once v0 is up, all further work is tracked as `work_item`s in
 Currently shipped:
 
 - `meristem migrate` — apply embedded Postgres migrations.
+- `meristem safety check` — validate deterministic resource limits (request bodies, feed long-poll cap, patience budgets); `api`, `worker`, `mcp`, and non–dry-run `seed v1` refuse to start if invalid.
 - `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, and work-item routes.
 - `meristem tokens {create, list, revoke}` — bearer token lifecycle.
 - `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface.
@@ -24,7 +25,7 @@ Currently shipped:
 
 ## Spec
 
-The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
+The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
 
 ## Layout
 
@@ -32,6 +33,7 @@ The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-fa
 cmd/meristem/       binary entry point
 internal/api/      HTTP surface
 internal/mcp/      MCP server (JSON-RPC over stdio)
+internal/safety/   deterministic resource limits (startup gate + HTTP enforcement)
 internal/storage/  Postgres pool and migration runner
 pkg/meristem/       public Go client SDK (importable by external projects)
 migrations/        SQL migrations (embedded into the binary)
@@ -49,11 +51,12 @@ One-shot bootstrap on the host. Requires Go 1.25+, Docker, and a POSIX shell.
 scripts/bootstrap.sh
 ```
 
-The script is idempotent at every step: it brings up the Postgres container, applies migrations, mints a root token if none exists (writing the secret to `.meristem/root.token`, mode 0600), and prints the next commands you might want to run. Re-running it is safe.
+The script is idempotent at every step: it first runs `meristem safety check`, then brings up the Postgres container, applies migrations, mints a root token if none exists (writing the secret to `.meristem/root.token`, mode 0600), and prints the next commands you might want to run. Re-running it is safe.
 
 After bootstrap, start the API and post a signal:
 
 ```bash
+go run ./cmd/meristem safety check
 MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
   go run ./cmd/meristem api &
 
@@ -72,6 +75,7 @@ MERISTEM_TOKEN=mrs_... examples/curl-signal.sh
 Fastest iteration loop. The meristem binary runs from your shell, only Postgres lives in Docker.
 
 ```bash
+go run ./cmd/meristem safety check
 docker compose up -d postgres
 cp .env.example .env
 export $(grep -v '^#' .env | xargs)
@@ -85,8 +89,10 @@ In another shell:
 
 ```bash
 curl -s http://localhost:8080/healthz   # liveness, ignores Postgres
-curl -s http://localhost:8080/readyz    # readiness, pings Postgres
+curl -s http://localhost:8080/readyz    # readiness, pings Postgres; includes safety_policy
 ```
+
+Resource-safety controls are code-owned in this slice (not environment-tunable): default caps are documented in [`docs/safety.md`](docs/safety.md).
 
 To roll back the most recently applied migration (development only):
 
@@ -98,7 +104,7 @@ go run ./cmd/meristem migrate down
 
 Use this when another project on the same host needs a stable, always-on endpoint. Builds the meristem image from the local source and runs `meristem migrate` once as an init container before bringing up the api.
 
-If you have an **older** local compose volume from before the Postgres role/database were renamed, drop the old named volume (for example `meristem-pgdata` or `maristem-pgdata`) or `docker volume prune` the stale data so Postgres re-initializes with the `meristem` user and database from `docker-compose.yml`.
+If you have an **older** local compose volume from before the Postgres role/database matched this repo, drop the stale named volume or `docker volume prune` so Postgres re-initializes with the `meristem` user and database from `docker-compose.yml`.
 
 ```bash
 docker compose --profile app up -d
@@ -205,30 +211,9 @@ Production secrets live in the host cloud's KMS. v1 wraps per-connection credent
 
 ## GitHub repository
 
-The Go module path is `github.com/jbmopper/meristem`. The Git remote should match (e.g. `https://github.com/jbmopper/meristem.git`).
-
-**Publish to a new empty repository** (after you create `jbmopper/meristem` on GitHub with no README/license, or use a different owner/name and adjust the URL):
+The Go module path is `github.com/jbmopper/meristem`. Point `origin` at the canonical remote, for example:
 
 ```bash
-# Option A — point `origin` at the new repo only (replaces meristem as default push target)
 git remote set-url origin https://github.com/jbmopper/meristem.git
 git push -u origin main
-# add other branches/tags as needed
 ```
-
-**Keep the old repo as a second remote** (duplicate / mirror until you archive `meristem`):
-
-```bash
-git remote rename origin meristem
-git remote add origin https://github.com/jbmopper/meristem.git
-git push -u origin main
-# push updates to both: git push meristem main && git push origin main
-```
-
-**Rename the local clone** (optional; do this with the IDE closed, or reopen the folder after):
-
-```bash
-cd /path/to/Dev && mv meristem meristem && cd meristem
-```
-
-On GitHub you can **archive** `jbmopper/meristem` or leave it with a note redirecting to `meristem` once clients have switched imports and remotes.

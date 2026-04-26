@@ -168,6 +168,10 @@ func runSeedV1(ctx context.Context, logger *slog.Logger, args []string) error {
 		return nil
 	}
 
+	if _, _, err := validateStartupSafety(logger); err != nil {
+		return err
+	}
+
 	cfg, err := storage.LoadConfigFromEnv()
 	if err != nil {
 		return err

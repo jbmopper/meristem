@@ -38,6 +38,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 // Budgets maps a work_item state to the longest a healthy item should sit
@@ -57,15 +58,13 @@ type Budgets struct {
 // indefinitely", not "every item is impatient." Operators can tighten via
 // configuration once the daemon ships.
 func DefaultBudgets() Budgets {
+	policy := safety.DefaultPolicy()
+	out := make(map[domain.WorkItemState]time.Duration, len(policy.PatienceBudgets))
+	for state, budget := range policy.PatienceBudgets {
+		out[state] = budget
+	}
 	return Budgets{
-		ByState: map[domain.WorkItemState]time.Duration{
-			domain.WorkItemCaptured:         24 * time.Hour,
-			domain.WorkItemTriaged:          72 * time.Hour,
-			domain.WorkItemPlanned:          72 * time.Hour,
-			domain.WorkItemAwaitingApproval: 48 * time.Hour,
-			domain.WorkItemRunning:          24 * time.Hour,
-			domain.WorkItemBlocked:          24 * time.Hour,
-		},
+		ByState: out,
 	}
 }
 

@@ -47,6 +47,10 @@ func runWorker(ctx context.Context, logger *slog.Logger, args []string) error {
 }
 
 func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) error {
+	if _, _, err := validateStartupSafety(logger); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("worker --once", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	// --budget=DURATION overrides the per-state defaults with a single

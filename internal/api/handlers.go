@@ -14,6 +14,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -109,6 +110,10 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		if parsed < 0 {
 			writeAPIError(w, http.StatusBadRequest, "invalid_wait", "wait must be non-negative")
+			return
+		}
+		if parsed > s.policy.MaxFeedWait {
+			writeAPIError(w, http.StatusBadRequest, "wait_too_large", fmt.Sprintf("wait must be <= %s", s.policy.MaxFeedWait))
 			return
 		}
 		wait = parsed
@@ -288,9 +293,15 @@ func authenticatedToken(w http.ResponseWriter, r *http.Request) (domain.Token, b
 
 func decodeJSONRequest(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer func() { _ = r.Body.Close() }()
+	r.Body = http.MaxBytesReader(w, r.Body, safety.DefaultPolicy().MaxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.UseNumber()
 	if err := dec.Decode(out); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds resource safety limit")
+			return false
+		}
 		writeAPIError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
 		return false
 	}

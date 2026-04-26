@@ -73,7 +73,9 @@ internal/inbox/       message capture
 internal/workitems/   lifecycle, transitions, relations
 internal/feed/        chronological projection
 internal/signals/     non-human structured input → work_items (see docs/signals.md)
+internal/safety/      deterministic resource limits (request bodies, feed wait, patience budgets)
 internal/storage/     pgx pool + migration runner
+internal/worker/      bounded-patience scan kernel (v1)
 internal/mcp/         MCP tool definitions + stdio transport
 migrations/           numbered SQL embedded into the binary
 docs/                 spec.md (source of truth) and other specs

@@ -21,15 +21,15 @@ const (
 	workSpecSchemaVersion = "meristem.work_spec.v1"
 	// workSpecSchemaVersionLegacyMaristem: misspelled project name era; remove after cutover.
 	workSpecSchemaVersionLegacyMaristem = "maristem.work_spec.v1"
-	// workSpecSchemaVersionLegacymeristem: pre-migration name; remove after cutover.
-	workSpecSchemaVersionLegacymeristem = "legacy.work_spec.v1"
+	// workSpecSchemaVersionLegacyWire: fixed wire literal retained for older clients; remove after cutover.
+	workSpecSchemaVersionLegacyWire = "legacy.work_spec.v1"
 	workSpecPriorityPattern            = `^P[0-3]$`
 )
 
 var priorityPattern = regexp.MustCompile(workSpecPriorityPattern)
 
 func isValidWorkSpecSchemaVersion(s string) bool {
-	return s == workSpecSchemaVersion || s == workSpecSchemaVersionLegacyMaristem || s == workSpecSchemaVersionLegacymeristem
+	return s == workSpecSchemaVersion || s == workSpecSchemaVersionLegacyMaristem || s == workSpecSchemaVersionLegacyWire
 }
 
 // Allowed-key and required-key sets the validator consults. Lifted to
@@ -247,7 +247,7 @@ func validateWorkSpec(raw json.RawMessage) error {
 	if value, err := requiredString(obj, "schema_version", "work_spec"); err != nil {
 		return err
 	} else if !isValidWorkSpecSchemaVersion(value) {
-		return fmt.Errorf("work_spec.schema_version must be %q (legacy %q, %q also accepted until removed)", workSpecSchemaVersion, workSpecSchemaVersionLegacyMaristem, workSpecSchemaVersionLegacymeristem)
+		return fmt.Errorf("work_spec.schema_version must be %q (legacy %q, %q also accepted until removed)", workSpecSchemaVersion, workSpecSchemaVersionLegacyMaristem, workSpecSchemaVersionLegacyWire)
 	}
 	if _, err := requiredString(obj, "kind", "work_spec"); err != nil {
 		return err

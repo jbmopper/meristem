@@ -23,6 +23,7 @@ import (
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/signals"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -56,6 +57,7 @@ type Server struct {
 	signals               *signals.Service
 	workItems             *workitems.Service
 	feed                  *feed.Service
+	policy                safety.Policy
 }
 
 // New constructs a Server. The pool must already be open; the API does not
@@ -73,6 +75,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		logger: logger,
 		addr:   addr,
 		mux:    http.NewServeMux(),
+		policy: safety.DefaultPolicy(),
 	}
 	if pool != nil {
 		s.writer = app.NewEventWriter()
@@ -140,7 +143,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		s.logger.Info("api listening", slog.String("addr", s.addr))
+		policyID, _ := s.policy.Fingerprint()
+		s.logger.Info("api listening",
+			slog.String("addr", s.addr),
+			slog.String("safety_policy", policyID),
+		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -192,9 +199,12 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	policyID, _ := s.policy.Fingerprint()
 	writeJSON(w, http.StatusOK, map[string]string{
-		"status":   "ok",
-		"database": "ok",
+		"status":        "ok",
+		"database":      "ok",
+		"safety":        "ok",
+		"safety_policy": policyID,
 	})
 }
 

@@ -2,20 +2,22 @@
 # meristem bootstrap — one-shot stand-up.
 #
 # What it does (idempotent at every step):
-#   1. Brings up the Postgres container if it is not already healthy.
-#   2. Runs `meristem migrate` to apply any pending migrations.
-#   3. Mints a root token if none exists, writing the secret to
+#   1. Validates deterministic resource-safety controls. If this fails,
+#      the system must not be restarted.
+#   2. Brings up the Postgres container if it is not already healthy.
+#   3. Runs `meristem migrate` to apply any pending migrations.
+#   4. Mints a root token if none exists, writing the secret to
 #      .meristem/root.token (mode 0600). If a root already exists, the
 #      token file is left alone.
-#   4. Mints a system-source token (`seed`) if none exists, writing the
+#   5. Mints a system-source token (`seed`) if none exists, writing the
 #      secret to .meristem/seed.token (mode 0600). The seed token is
 #      what `meristem seed v1` needs to attribute its writes to a
 #      `system` actor instead of root or a human.
-#   5. Runs `meristem seed v1` so the v0 acceptance criterion "each v1
+#   6. Runs `meristem seed v1` so the v0 acceptance criterion "each v1
 #      substrate item exists as a `work_item`" is live. Per the seed
 #      slice, that command is itself idempotent (one transaction per
 #      item, deterministic event ids), so reruns are no-ops.
-#   6. Prints a short summary of what other commands you might want to
+#   7. Prints a short summary of what other commands you might want to
 #      run next.
 #
 # Re-running the script is safe: each step short-circuits when its
@@ -108,19 +110,24 @@ write_secret_from_capture() {
     printf '%s\n' "$secret" > "$dest_file"
 }
 
-# --- step 1: postgres ------------------------------------------------------
+# --- step 1: resource-safety gate ------------------------------------------
+
+log "validating deterministic resource-safety controls"
+$MERISTEM_BIN safety check >/dev/null
+
+# --- step 2: postgres ------------------------------------------------------
 
 log "ensuring postgres is up"
 docker compose up -d postgres
 wait_for_postgres
 log "postgres is healthy on 127.0.0.1:5432"
 
-# --- step 2: migrations ----------------------------------------------------
+# --- step 3: migrations ----------------------------------------------------
 
 log "applying migrations"
 $MERISTEM_BIN migrate
 
-# --- step 3: root token ----------------------------------------------------
+# --- step 4: root token ----------------------------------------------------
 
 mkdir -p "$TOKEN_DIR"
 chmod 700 "$TOKEN_DIR"
@@ -143,7 +150,7 @@ else
     log "root secret written to $ROOT_TOKEN_FILE (mode 0600); guard or move it."
 fi
 
-# --- step 4: seed token (system source) ------------------------------------
+# --- step 5: seed token (system source) ------------------------------------
 # `meristem seed v1` requires a system-source token (not root); see
 # docs/v0.md "Events" — "The seed command uses a dedicated `system`
 # token, not root."
@@ -170,7 +177,7 @@ else
     log "seed secret written to $SEED_TOKEN_FILE (mode 0600)."
 fi
 
-# --- step 5: seed v1 substrate backlog -------------------------------------
+# --- step 6: seed v1 substrate backlog -------------------------------------
 # Closes v0 acceptance test #7 ("each v1 substrate item exists as a
 # work_item"). The command is itself idempotent — one transaction per
 # item with a deterministic event id — so reruns produce no new events.
@@ -178,7 +185,7 @@ fi
 log "seeding v1 substrate backlog (meristem seed v1)"
 MERISTEM_TOKEN="$(cat "$SEED_TOKEN_FILE")" $MERISTEM_BIN seed v1
 
-# --- step 6: next steps ----------------------------------------------------
+# --- step 7: next steps ----------------------------------------------------
 
 cat <<EOF
 

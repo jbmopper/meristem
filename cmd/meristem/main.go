@@ -10,6 +10,7 @@
 //   meristem mcp      - run the MCP stdio server
 //   meristem seed     - seed substrate backlogs into the running system
 //   meristem rebuild  - rebuild projections from events into a sandbox schema and diff
+//   meristem safety   - validate deterministic resource-safety controls
 //   meristem version  - print build info
 package main
 
@@ -64,6 +65,8 @@ func main() {
 		err = runWorker(ctx, logger, args)
 	case "feed":
 		err = runFeed(ctx, logger, args)
+	case "safety":
+		err = runSafety(ctx, logger, args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -85,6 +88,10 @@ func main() {
 }
 
 func runAPI(ctx context.Context, logger *slog.Logger, _ []string) error {
+	if _, _, err := validateStartupSafety(logger); err != nil {
+		return err
+	}
+
 	cfg, err := storage.LoadConfigFromEnv()
 	if err != nil {
 		return err
@@ -137,6 +144,7 @@ usage:
   meristem rebuild           fold events through projectors into a sandbox schema and diff vs live
   meristem worker --once     one-shot bounded-patience scan (reads MERISTEM_TOKEN, must be source=system)
   meristem feed [--watch]    human-readable terminal view of the activity log
+  meristem safety check      validate deterministic resource-safety controls
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
   meristem version           print version
   meristem help              show this message
