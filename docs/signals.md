@@ -87,7 +87,7 @@ Field rules:
 - `kind` (required): one of `review_finding`, `repairable_failure`, `webhook`, `manual`, or any other string the source defines. Reservation is non-exclusive in v1.
 - `dedupe_key` (optional but strongly recommended): if present, two signals with the same value link to the same live work_item. If the latest matching work_item is terminal (`done`, `failed`, or `canceled`), the next signal is treated as a recurrence and creates a fresh work_item. If absent, every signal creates a fresh work_item.
 - `source` (optional): origin metadata. Required when known so audits can reconstruct provenance.
-- `work_spec` (required): the proposed work, conforming to `docs/schemas/meristem.work_spec.v1.json`. The handler validates against the schema and rejects with `400` on failure. The server also accepts a small set of legacy `work_spec.schema_version` literals for backward-compatible clients (see `internal/api/signals.go`); new traffic should use `meristem.work_spec.v1`.
+- `work_spec` (required): the proposed work, conforming to `docs/schemas/meristem.work_spec.v1.json`. The handler validates against the schema and rejects with `400` on failure. The server also accepts legacy `work_spec.schema_version` values `maristem.work_spec.v1` (historical typo) and `legacy.work_spec.v1` (reserved alias); new traffic should use `meristem.work_spec.v1`. The exact accepted strings are pinned in `internal/api/signals.go`.
 
 Response envelope (success):
 
