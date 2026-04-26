@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jbmopper/wayline/internal/app"
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/storage"
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/storage"
 )
 
 // TestFeedWatcherWakesUpOnNewEvent pins the e1625848 wake-up contract:

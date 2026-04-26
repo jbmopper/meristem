@@ -1,10 +1,10 @@
-# wayline single-binary container.
+# meristem single-binary container.
 #
 # Multi-stage build:
 #   - builder: alpine + Go toolchain, builds a fully static, stripped
 #     binary using build/module caches mounted at build time.
 #   - runtime: distroless static-debian12 (nonroot uid 65532). No shell,
-#     no package manager, no setuid. The binary runs every wayline
+#     no package manager, no setuid. The binary runs every meristem
 #     subcommand (api, migrate, tokens, mcp, version), so the same image
 #     covers the migration init container, the long-running api, and any
 #     ad-hoc operator command.
@@ -12,8 +12,8 @@
 # Migrations are embedded into the binary via embed.FS, so the runtime
 # image needs no extra files.
 #
-# Default CMD is "api" so `docker run wayline` runs the HTTP server.
-# Override at run time, e.g. `docker run wayline migrate`.
+# Default CMD is "api" so `docker run meristem` runs the HTTP server.
+# Override at run time, e.g. `docker run meristem migrate`.
 #
 # syntax=docker/dockerfile:1.6
 ARG GO_VERSION=1.25
@@ -40,12 +40,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags "-s -w -X main.version=${VERSION}" \
-        -o /out/wayline \
-        ./cmd/wayline
+        -o /out/meristem \
+        ./cmd/meristem
 
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
-COPY --from=build /out/wayline /wayline
+COPY --from=build /out/meristem /meristem
 USER nonroot:nonroot
 EXPOSE 8080
-ENTRYPOINT ["/wayline"]
+ENTRYPOINT ["/meristem"]
 CMD ["api"]

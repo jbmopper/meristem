@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/feed"
-	"github.com/jbmopper/wayline/internal/workitems"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 type workItemResponse struct {
@@ -77,7 +77,7 @@ func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
 //     response gains next_cursor + has_more for resumable consumption.
 //
 // Mode is selected by the presence of either query param so the v0
-// callers (the wayline feed CLI today) keep working without flagging
+// callers (the meristem feed CLI today) keep working without flagging
 // their requests, and watcher-mode callers opt in by sending what they
 // already need to send anyway. Cursor opacity is contractual — the
 // 32-char encoded blob is for round-tripping, not parsing.

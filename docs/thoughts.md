@@ -66,7 +66,7 @@ The conceptual system is the event log. Postgres holds it (as the `events` table
 
 ### Option 3 — SQLite-per-operator
 For a system explicitly framed as "single operator," Postgres might be over-specified. SQLite gives you the same transactional guarantees, zero ops, ships inside the binary, and the entire database is one file the operator can email to themselves.
-- **Pros:** Drastically more humane: no docker compose, no DSN, no port. The operator's machine *is* the wayline. Backup = file copy. Move to a new machine = copy a file.
+- **Pros:** Drastically more humane: no docker compose, no DSN, no port. The operator's machine *is* the meristem. Backup = file copy. Move to a new machine = copy a file.
 - **Cons:** Concurrent writers are a tighter constraint, multi-host deployment becomes "you don't," and full-text search and JSONB operations are weaker than Postgres. The constraint that pushes you off SQLite isn't the operator — it's the agents writing concurrently.
 
 ### Option 4 — Git as substrate

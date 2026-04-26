@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 func TestNormalizeTokenSource(t *testing.T) {

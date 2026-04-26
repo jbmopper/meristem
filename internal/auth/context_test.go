@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 func TestTokenContext_Roundtrip(t *testing.T) {

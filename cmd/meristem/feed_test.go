@@ -169,13 +169,13 @@ func TestFeedClientFetchHonorsAuthAndLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &feedClient{baseURL: srv.URL, token: "wln_secret", http: srv.Client()}
+	c := &feedClient{baseURL: srv.URL, token: "mrs_secret", http: srv.Client()}
 	items, err := c.fetch(context.Background(), 33)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if gotAuth != "Bearer wln_secret" {
-		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer wln_secret")
+	if gotAuth != "Bearer mrs_secret" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer mrs_secret")
 	}
 	if gotLimit != "33" {
 		t.Errorf("limit query = %q, want %q", gotLimit, "33")
@@ -235,11 +235,11 @@ func TestPrintItemsSortsOldestFirst(t *testing.T) {
 }
 
 // TestResolveFeedTokenEnvWins pins the precedence rule: even when a
-// .wayline/ on disk has tokens that would otherwise be picked up,
-// WAYLINE_TOKEN takes precedence and source is reported as "WAYLINE_TOKEN".
+// .meristem/ on disk has tokens that would otherwise be picked up,
+// MERISTEM_TOKEN takes precedence and source is reported as "MERISTEM_TOKEN".
 func TestResolveFeedTokenEnvWins(t *testing.T) {
 	dir := t.TempDir()
-	wln := filepath.Join(dir, ".wayline")
+	wln := filepath.Join(dir, ".meristem")
 	if err := os.MkdirAll(wln, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestResolveFeedTokenEnvWins(t *testing.T) {
 	}
 	withCwd(t, dir)
 
-	t.Setenv("WAYLINE_TOKEN", "env-token")
+	t.Setenv("MERISTEM_TOKEN", "env-token")
 	tok, src, err := resolveFeedToken()
 	if err != nil {
 		t.Fatalf("resolveFeedToken: %v", err)
@@ -256,16 +256,16 @@ func TestResolveFeedTokenEnvWins(t *testing.T) {
 	if tok != "env-token" {
 		t.Errorf("token = %q, want %q (env should win over file)", tok, "env-token")
 	}
-	if src != "WAYLINE_TOKEN" {
-		t.Errorf("source = %q, want %q", src, "WAYLINE_TOKEN")
+	if src != "MERISTEM_TOKEN" {
+		t.Errorf("source = %q, want %q", src, "MERISTEM_TOKEN")
 	}
 }
 
-// TestResolveFeedTokenWalksUp pins the walk-upward discovery: a .wayline/
+// TestResolveFeedTokenWalksUp pins the walk-upward discovery: a .meristem/
 // at the project root is found from a deep subdirectory.
 func TestResolveFeedTokenWalksUp(t *testing.T) {
 	root := t.TempDir()
-	wln := filepath.Join(root, ".wayline")
+	wln := filepath.Join(root, ".meristem")
 	if err := os.MkdirAll(wln, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestResolveFeedTokenWalksUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	withCwd(t, deep)
-	t.Setenv("WAYLINE_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN", "")
 
 	tok, src, err := resolveFeedToken()
 	if err != nil {
@@ -286,8 +286,8 @@ func TestResolveFeedTokenWalksUp(t *testing.T) {
 	if tok != "found-it" {
 		t.Errorf("token = %q, want %q", tok, "found-it")
 	}
-	if !strings.HasSuffix(src, ".wayline/root.token") {
-		t.Errorf("source = %q, want suffix .wayline/root.token", src)
+	if !strings.HasSuffix(src, ".meristem/root.token") {
+		t.Errorf("source = %q, want suffix .meristem/root.token", src)
 	}
 }
 
@@ -295,7 +295,7 @@ func TestResolveFeedTokenWalksUp(t *testing.T) {
 // agent-A.token when both exist, matching the documented order.
 func TestResolveFeedTokenPriorityOrder(t *testing.T) {
 	dir := t.TempDir()
-	wln := filepath.Join(dir, ".wayline")
+	wln := filepath.Join(dir, ".meristem")
 	if err := os.MkdirAll(wln, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestResolveFeedTokenPriorityOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	withCwd(t, dir)
-	t.Setenv("WAYLINE_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN", "")
 
 	tok, _, err := resolveFeedToken()
 	if err != nil {
@@ -322,7 +322,7 @@ func TestResolveFeedTokenPriorityOrder(t *testing.T) {
 // than returning an empty token to the API.
 func TestResolveFeedTokenFallsThroughEmptyFiles(t *testing.T) {
 	dir := t.TempDir()
-	wln := filepath.Join(dir, ".wayline")
+	wln := filepath.Join(dir, ".meristem")
 	if err := os.MkdirAll(wln, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestResolveFeedTokenFallsThroughEmptyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	withCwd(t, dir)
-	t.Setenv("WAYLINE_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN", "")
 
 	tok, _, err := resolveFeedToken()
 	if err != nil {
@@ -345,19 +345,19 @@ func TestResolveFeedTokenFallsThroughEmptyFiles(t *testing.T) {
 }
 
 // TestResolveFeedTokenNoSources pins the error path: with no env var and
-// no .wayline directory anywhere up the tree, the resolver returns a clear
+// no .meristem directory anywhere up the tree, the resolver returns a clear
 // error rather than a usable empty token.
 func TestResolveFeedTokenNoSources(t *testing.T) {
 	dir := t.TempDir()
 	withCwd(t, dir)
-	t.Setenv("WAYLINE_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN", "")
 
 	_, _, err := resolveFeedToken()
 	if err == nil {
-		t.Fatal("expected error when no env and no .wayline, got nil")
+		t.Fatal("expected error when no env and no .meristem, got nil")
 	}
-	if !strings.Contains(err.Error(), "no .wayline/") {
-		t.Errorf("error should mention missing .wayline directory; got: %v", err)
+	if !strings.Contains(err.Error(), "no .meristem/") {
+		t.Errorf("error should mention missing .meristem directory; got: %v", err)
 	}
 }
 
@@ -786,7 +786,7 @@ func TestConsumeStreamSendsLastEventIDAndAuth(t *testing.T) {
 	defer srv.Close()
 
 	c := &feedClient{
-		baseURL: srv.URL, token: "wln_secret",
+		baseURL: srv.URL, token: "mrs_secret",
 		http:       srv.Client(),
 		streamHTTP: srv.Client(),
 	}
@@ -799,8 +799,8 @@ func TestConsumeStreamSendsLastEventIDAndAuth(t *testing.T) {
 		return nil
 	})
 
-	if gotAuth != "Bearer wln_secret" {
-		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer wln_secret")
+	if gotAuth != "Bearer mrs_secret" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer mrs_secret")
 	}
 	if gotLEI != "PRIORCURSOR" {
 		t.Errorf("Last-Event-ID = %q, want %q", gotLEI, "PRIORCURSOR")

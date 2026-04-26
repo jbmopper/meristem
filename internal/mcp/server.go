@@ -10,11 +10,11 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/feed"
-	"github.com/jbmopper/wayline/internal/inbox"
-	"github.com/jbmopper/wayline/internal/workitems"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 // Deps bundles the domain services the MCP tools wrap. They are the same
@@ -55,7 +55,7 @@ func New(deps Deps, info ServerInfo, logger *slog.Logger) *Server {
 		logger = slog.Default()
 	}
 	if info.Name == "" {
-		info.Name = "wayline"
+		info.Name = "meristem"
 	}
 	if info.Version == "" {
 		info.Version = "dev"
@@ -262,7 +262,7 @@ func (s *Server) handleCallTool(ctx context.Context, raw json.RawMessage) (any, 
 	}
 	actor := s.actorToken()
 	if actor.ID == (domain.Token{}).ID {
-		return toolErrorResult("mcp server is not authenticated; set WAYLINE_TOKEN before launching"), nil
+		return toolErrorResult("mcp server is not authenticated; set MERISTEM_TOKEN before launching"), nil
 	}
 	result, err := tool.Handler(ctx, actor, params.Arguments)
 	if err != nil {

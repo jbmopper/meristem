@@ -1,4 +1,4 @@
-module github.com/jbmopper/wayline
+module github.com/jbmopper/meristem
 
 go 1.25.0
 

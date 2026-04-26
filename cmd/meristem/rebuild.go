@@ -8,7 +8,7 @@
 //
 // The rebuild never mutates live data. It runs inside one transaction
 // that ROLLBACK-s at the end, regardless of outcome. The sandbox schema
-// (default `wayline_rebuild`) lives only for the duration of the
+// (default `meristem_rebuild`) lives only for the duration of the
 // transaction; nothing is left behind.
 //
 // The fold is deterministic: events are streamed in (occurred_at, id)
@@ -31,10 +31,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/wayline/internal/app"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/projections"
-	"github.com/jbmopper/wayline/internal/storage"
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/projections"
+	"github.com/jbmopper/meristem/internal/storage"
 )
 
 // projectionTables is the canonical list of tables derived from `events`.
@@ -56,7 +56,7 @@ var projectionTables = []string{
 func runRebuild(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("rebuild", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	schemaName := fs.String("schema", "wayline_rebuild", "sandbox schema name (dropped at end)")
+	schemaName := fs.String("schema", "meristem_rebuild", "sandbox schema name (dropped at end)")
 	verbose := fs.Bool("verbose", false, "log per-table row counts and content hashes")
 	if err := fs.Parse(args); err != nil {
 		rebuildUsage(os.Stderr)
@@ -335,7 +335,7 @@ func tableSignature(ctx context.Context, tx pgx.Tx, schema, table string) (int64
 
 // looksLikeIdentifier vets a user-supplied schema name. We intentionally
 // permit only a-zA-Z0-9_ to keep the test cheap; legitimate schema
-// names inside a Postgres deployment dedicated to wayline never need
+// names inside a Postgres deployment dedicated to meristem never need
 // punctuation.
 func looksLikeIdentifier(s string) bool {
 	if s == "" || len(s) > 63 {
@@ -363,7 +363,7 @@ func quoteIdent(s string) string {
 
 func rebuildUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  wayline rebuild [--schema=NAME] [--verbose]
+  meristem rebuild [--schema=NAME] [--verbose]
 
 Folds public.events through every registered projector into a sandbox
 schema and diffs the result against the live projection tables. The

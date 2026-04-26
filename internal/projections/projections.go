@@ -2,7 +2,7 @@
 // projection writers, and defines the Projector contract those writers
 // satisfy.
 //
-// Projection writers are the *only* code in wayline that may INSERT or
+// Projection writers are the *only* code in meristem that may INSERT or
 // UPDATE non-`events` tables. They run synchronously in the same
 // transaction as the event append (see internal/events.Writer.Append), so
 // "the event log is truth" is enforced: a row exists in `messages` or
@@ -21,7 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // Projector derives projection rows from an appended event. Implementations

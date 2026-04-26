@@ -1,4 +1,4 @@
-// Package domain holds wayline's pure types and the small validation rules
+// Package domain holds meristem's pure types and the small validation rules
 // that govern them. It does not import any transport, storage, or projection
 // package, and depends on nothing inside `internal/` — the rest of the
 // codebase imports domain, never the other way.

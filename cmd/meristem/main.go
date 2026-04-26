@@ -1,16 +1,16 @@
-// wayline is the single binary for the wayline coordination plane.
+// meristem is the single binary for the meristem coordination plane.
 //
 // Two runtime modes share one codebase and one database, per the spec:
-//   wayline api               - HTTP surface
-//   wayline worker --once     - one-shot bounded-patience scan (v1 kernel)
+//   meristem api               - HTTP surface
+//   meristem worker --once     - one-shot bounded-patience scan (v1 kernel)
 //
 // Plus operational subcommands:
-//   wayline migrate  - apply pending Postgres migrations
-//   wayline tokens   - mint, list, and revoke bearer tokens
-//   wayline mcp      - run the MCP stdio server
-//   wayline seed     - seed substrate backlogs into the running system
-//   wayline rebuild  - rebuild projections from events into a sandbox schema and diff
-//   wayline version  - print build info
+//   meristem migrate  - apply pending Postgres migrations
+//   meristem tokens   - mint, list, and revoke bearer tokens
+//   meristem mcp      - run the MCP stdio server
+//   meristem seed     - seed substrate backlogs into the running system
+//   meristem rebuild  - rebuild projections from events into a sandbox schema and diff
+//   meristem version  - print build info
 package main
 
 import (
@@ -22,8 +22,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jbmopper/wayline/internal/api"
-	"github.com/jbmopper/wayline/internal/storage"
+	"github.com/jbmopper/meristem/internal/api"
+	"github.com/jbmopper/meristem/internal/storage"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
@@ -126,24 +126,24 @@ func runMigrate(ctx context.Context, logger *slog.Logger, args []string) error {
 }
 
 func usage(w *os.File) {
-	fmt.Fprintf(w, `wayline %s
+	fmt.Fprintf(w, `meristem %s
 
 usage:
-  wayline api               run the HTTP API
-  wayline migrate [up|down] apply or roll back database migrations
-  wayline tokens ...        create, list, or revoke bearer tokens
-  wayline mcp               run the MCP stdio server (reads WAYLINE_TOKEN)
-  wayline seed v1           seed the v1 substrate backlog (reads WAYLINE_TOKEN, must be source=system)
-  wayline rebuild           fold events through projectors into a sandbox schema and diff vs live
-  wayline worker --once     one-shot bounded-patience scan (reads WAYLINE_TOKEN, must be source=system)
-  wayline feed [--watch]    human-readable terminal view of the activity log
-  wayline healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
-  wayline version           print version
-  wayline help              show this message
+  meristem api               run the HTTP API
+  meristem migrate [up|down] apply or roll back database migrations
+  meristem tokens ...        create, list, or revoke bearer tokens
+  meristem mcp               run the MCP stdio server (reads MERISTEM_TOKEN)
+  meristem seed v1           seed the v1 substrate backlog (reads MERISTEM_TOKEN, must be source=system)
+  meristem rebuild           fold events through projectors into a sandbox schema and diff vs live
+  meristem worker --once     one-shot bounded-patience scan (reads MERISTEM_TOKEN, must be source=system)
+  meristem feed [--watch]    human-readable terminal view of the activity log
+  meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
+  meristem version           print version
+  meristem help              show this message
 
 environment:
-  WAYLINE_DATABASE_URL  Postgres DSN (required for api, migrate, mcp, tokens, seed)
-  WAYLINE_HTTP_ADDR     listen address for the api (default :8080)
-  WAYLINE_TOKEN         bearer secret for mcp (any token), tokens (root), seed (system)
+  MERISTEM_DATABASE_URL  Postgres DSN (required for api, migrate, mcp, tokens, seed)
+  MERISTEM_HTTP_ADDR     listen address for the api (default :8080)
+  MERISTEM_TOKEN         bearer secret for mcp (any token), tokens (root), seed (system)
 `, version)
 }

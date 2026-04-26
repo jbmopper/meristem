@@ -1,6 +1,9 @@
 package api
 
-// Schema/validator parity guard for docs/schemas/wayline.work_spec.v1.json.
+// Schema/validator parity guard for docs/schemas/meristem.work_spec.v1.json.
+// The JSON Schema lists only the canonical schema_version; the HTTP validator
+// additionally accepts legacy maristem.work_spec.v1 and wayline.work_spec.v1
+// (see internal/api/signals.go).
 //
 // The hand-rolled validator in signals.go is a faithful but separate
 // transcription of the JSON Schema. Without a guard, the two drift: a
@@ -31,7 +34,7 @@ import (
 	"testing"
 )
 
-const workSpecSchemaPath = "../../docs/schemas/wayline.work_spec.v1.json"
+const workSpecSchemaPath = "../../docs/schemas/meristem.work_spec.v1.json"
 
 type workSpecSchemaNode struct {
 	Type                 string                         `json:"type,omitempty"`
@@ -114,7 +117,7 @@ func TestWorkSpec_SchemaTopLevelShape(t *testing.T) {
 	schemaKeys := sortedKeys(schema.Properties)
 	validatorKeys := sortedMapKeys(workSpecAllowedKeys)
 	if !equalStringSlices(schemaKeys, validatorKeys) {
-		t.Fatalf("work_spec allowed-key drift:\n  schema (docs/schemas/wayline.work_spec.v1.json): %v\n  validator (workSpecAllowedKeys):                  %v", schemaKeys, validatorKeys)
+		t.Fatalf("work_spec allowed-key drift:\n  schema (docs/schemas/meristem.work_spec.v1.json): %v\n  validator (workSpecAllowedKeys):                  %v", schemaKeys, validatorKeys)
 	}
 
 	schemaRequired := sortedSet(schema.Required)

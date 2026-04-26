@@ -2,7 +2,7 @@
 
 Validated locally on 2026-04-24 in `America/Denver`.
 
-This document records the synthesis of `wayline`'s API direction with the auto-repair, issue-agent, and repo-repair patterns found in nearby projects. It is intended for another assistant to reproduce the same API recommendation without needing the original chat context.
+This document records the synthesis of `meristem`'s API direction with the auto-repair, issue-agent, and repo-repair patterns found in nearby projects. It is intended for another assistant to reproduce the same API recommendation without needing the original chat context.
 
 This document is advisory. If it conflicts with `docs/spec.md`, `docs/spec.md` is canonical. If it conflicts with `AGENTS.md`, prefer `docs/spec.md` and then update the projection in `AGENTS.md`.
 
@@ -10,9 +10,9 @@ This document is advisory. If it conflicts with `docs/spec.md`, `docs/spec.md` i
 
 The synthesis was checked against these local files:
 
-- `/Users/juliusmopper/Dev/wayline/docs/spec.md`
-- `/Users/juliusmopper/Dev/wayline/AGENTS.md`
-- `/Users/juliusmopper/Dev/wayline/docs/thoughts.md`
+- `/Users/juliusmopper/Dev/meristem/docs/spec.md`
+- `/Users/juliusmopper/Dev/meristem/AGENTS.md`
+- `/Users/juliusmopper/Dev/meristem/docs/thoughts.md`
 - `/Users/juliusmopper/Dev/clinical-demo/issues/README.md`
 - `/Users/juliusmopper/Dev/clinical-demo/src/clinical_demo/issues/workflow.py`
 - `/Users/juliusmopper/Dev/jay/README.md`
@@ -23,7 +23,7 @@ The synthesis was checked against these local files:
 - `/Users/juliusmopper/Dev/stanford-cs336/assignment1-basics/plugins/repo-portfolio-repair-agent/skills/repo-portfolio-repair/SKILL.md`
 - `/Users/juliusmopper/Dev/stanford-cs336/assignment1-basics/plugins/repo-portfolio-repair-agent/scripts/repair_plan.py`
 
-Freshness caveat: `/Users/juliusmopper/Dev/wayline` was not a git checkout when checked, so this file is current against local disk only. It has not been compared with a remote branch.
+Freshness caveat: `/Users/juliusmopper/Dev/meristem` was not a git checkout when checked, so this file is current against local disk only. It has not been compared with a remote branch.
 
 ## Current Drift To Preserve
 
@@ -36,7 +36,7 @@ For now, keep both truths in view:
 
 ## Thesis
 
-`wayline` should not add a separate auto-healing subsystem. The auto-healing pattern should be a first-class use of the normal API.
+`meristem` should not add a separate auto-healing subsystem. The auto-healing pattern should be a first-class use of the normal API.
 
 The shared grammar is:
 
@@ -51,7 +51,7 @@ The existing systems are examples of that grammar:
 - `ns_obv` separates issue records from execution events, generates specs/prompts/manifests, and optionally launches agents.
 - `assignment1-basics` uses a deterministic repair-plan generator where zero planned steps means the repo is already repaired.
 
-`wayline` should absorb those functions as generalized coordination primitives, not copy their repo-local runners wholesale.
+`meristem` should absorb those functions as generalized coordination primitives, not copy their repo-local runners wholesale.
 
 ## Four Identities
 
@@ -62,7 +62,7 @@ The API should separate these identities clearly:
 - `fingerprint`: content identity for specs, plans, prompts, run inputs, and validation inputs. If the same fingerprint already succeeded, the run can skip safely.
 - `event_id`: immutable fact identity, derived from cause plus canonical content. Replays produce no new events.
 
-This distinction is the bridge between the existing projects and `wayline`'s substrate. It replaces repo-local dispatch ledgers and JSONL histories with first-class tables and append-only events.
+This distinction is the bridge between the existing projects and `meristem`'s substrate. It replaces repo-local dispatch ledgers and JSONL histories with first-class tables and append-only events.
 
 ## Canonical Work Spec
 
@@ -72,7 +72,7 @@ Example:
 
 ```json
 {
-  "schema_version": "wayline.work_spec.v1",
+  "schema_version": "meristem.work_spec.v1",
   "kind": "repair",
   "dedupe_key": "repo:clinical-demo:review:2026-04-22:finding-001",
   "title": "Public HITL entry point cannot resume a paused run",
@@ -241,7 +241,7 @@ Review findings become signals or child work items with their own dedupe keys.
 
 Agents should not own side effects directly. They should claim work, append progress, attach artifacts, propose plans, request runs, request actions, and propose transitions.
 
-`wayline` owns:
+`meristem` owns:
 
 - dedupe
 - idempotency
@@ -255,7 +255,7 @@ External writes go through `POST /v1/actions`. The action either executes immedi
 
 ## Mapping Existing Systems
 
-| System | Local concept | wayline concept |
+| System | Local concept | meristem concept |
 |---|---|---|
 | `clinical-demo` | review findings markdown | `POST /v1/signals` with `kind=review_finding` |
 | `clinical-demo` | recursive unresolved-finding review | `POST /v1/work-items/{id}/review` plus convergence loop |
@@ -286,7 +286,7 @@ The cheapest path that unlocks the imported behavior:
 To reproduce the API recommendation, ask the assistant to do the following:
 
 ```text
-Read `/Users/juliusmopper/Dev/wayline/docs/spec.md`, `/Users/juliusmopper/Dev/wayline/AGENTS.md`, and `/Users/juliusmopper/Dev/wayline/docs/thoughts.md`.
+Read `/Users/juliusmopper/Dev/meristem/docs/spec.md`, `/Users/juliusmopper/Dev/meristem/AGENTS.md`, and `/Users/juliusmopper/Dev/meristem/docs/thoughts.md`.
 
 Then inspect the auto-repair references:
 - `/Users/juliusmopper/Dev/clinical-demo/issues/README.md`
@@ -294,6 +294,6 @@ Then inspect the auto-repair references:
 - `/Users/juliusmopper/Dev/ns_obv/docs/issue-automation/README.md`
 - `/Users/juliusmopper/Dev/stanford-cs336/assignment1-basics/plugins/repo-portfolio-repair-agent/skills/repo-portfolio-repair/SKILL.md`
 
-Synthesize them into a wayline API direction. Preserve `docs/spec.md` as canonical, but include the `docs/thoughts.md` reframe: convergence is the model, the event log is truth, and idempotency is an implementation property. Recommend first-class `signals`, `artifacts`, `runs`, `plans`, `reviews`, `actions`, and approvals rather than separate repo-local auto-healing systems. Distinguish `Idempotency-Key`, `dedupe_key`, `fingerprint`, and `event_id`.
+Synthesize them into a meristem API direction. Preserve `docs/spec.md` as canonical, but include the `docs/thoughts.md` reframe: convergence is the model, the event log is truth, and idempotency is an implementation property. Recommend first-class `signals`, `artifacts`, `runs`, `plans`, `reviews`, `actions`, and approvals rather than separate repo-local auto-healing systems. Distinguish `Idempotency-Key`, `dedupe_key`, `fingerprint`, and `event_id`.
 ```
 

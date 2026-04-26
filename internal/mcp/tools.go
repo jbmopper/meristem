@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/workitems"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 // Tool is one MCP tool exposed by the server. The handler signature

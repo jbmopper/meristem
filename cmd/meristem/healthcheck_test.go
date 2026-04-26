@@ -23,7 +23,7 @@ func TestResolveHealthcheckURL(t *testing.T) {
 		{name: "any-interface short form", urlFlag: "", addrEnv: ":9090", want: "http://127.0.0.1:9090/readyz"},
 		{name: "explicit interface preserves port", urlFlag: "", addrEnv: "0.0.0.0:9090", want: "http://127.0.0.1:9090/readyz"},
 		{name: "loopback host preserves port", urlFlag: "", addrEnv: "127.0.0.1:9090", want: "http://127.0.0.1:9090/readyz"},
-		{name: "missing port rejected", urlFlag: "", addrEnv: "wayline", wantErr: true},
+		{name: "missing port rejected", urlFlag: "", addrEnv: "meristem", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -14,9 +14,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/events"
-	"github.com/jbmopper/wayline/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/idempotency"
 )
 
 // Sentinel errors. The HTTP handler maps these to 400; everything else is
@@ -67,7 +67,7 @@ func (m SourceMetadata) empty() bool {
 
 // ReceiveInput is the parsed request the handler hands to Receive.
 //
-// Schema validation against docs/schemas/wayline.work_spec.v1.json is the
+// Schema validation against docs/schemas/meristem.work_spec.v1.json is the
 // handler's responsibility — Receive only enforces what it cannot do its
 // own work without (a non-empty signal_kind, a JSON-valid work_spec with a
 // title to put on the work_items row).
@@ -253,7 +253,8 @@ func (s *Service) lookupLiveWorkItem(ctx context.Context, tx pgx.Tx, dedupeKey s
 
 // workSpecHeader is the small slice of work_spec the service reads to
 // populate the work_item.created event. Full schema validation against
-// wayline.work_spec.v1.json is the handler's responsibility; the service
+// meristem.work_spec.v1 (and legacy maristem.work_spec.v1, wayline.work_spec.v1) is the handler's
+// responsibility; the service
 // only needs enough to write the projection row honestly.
 type workSpecHeader struct {
 	Title     string `json:"title"`

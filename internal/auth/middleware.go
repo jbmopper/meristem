@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // Authenticator is the narrow seam Middleware needs from a token service.

@@ -15,11 +15,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// EnvDatabaseURL is the environment variable wayline reads to discover its
+// EnvDatabaseURL is the environment variable meristem reads to discover its
 // Postgres DSN. The variable is namespaced so it cannot collide with other
 // processes that happen to share the same shell (e.g. psql, other tools that
 // inspect the bare DATABASE_URL).
-const EnvDatabaseURL = "WAYLINE_DATABASE_URL"
+const EnvDatabaseURL = "MERISTEM_DATABASE_URL"
 
 // Config holds the knobs we expose to callers. Sensible defaults mean the
 // zero value is usable in tests; callers that want explicit control set

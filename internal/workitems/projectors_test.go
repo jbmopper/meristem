@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 func TestCreatedProjector_RejectsBlankTitle(t *testing.T) {

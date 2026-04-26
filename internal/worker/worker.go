@@ -36,8 +36,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/events"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
 )
 
 // Budgets maps a work_item state to the longest a healthy item should sit
@@ -161,7 +161,7 @@ type Result struct {
 	// that already had a corresponding event_id in the log (the
 	// deterministic-id ON CONFLICT DO NOTHING path). Equal to len(breaches)
 	// minus BreachesEmitted; reported separately so an operator inspecting
-	// `wayline worker --once` output can see "the scan saw N breaches; M
+	// `meristem worker --once` output can see "the scan saw N breaches; M
 	// were new this run."
 	BreachesAlreadyRecorded int
 }

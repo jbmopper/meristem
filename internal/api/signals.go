@@ -11,18 +11,26 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/signals"
+	"github.com/jbmopper/meristem/internal/signals"
 )
 
 // Pinned schema constants. The drift guard in
 // work_spec_schema_parity_test.go asserts these stay in step with
-// docs/schemas/wayline.work_spec.v1.json.
+// docs/schemas/meristem.work_spec.v1.json.
 const (
-	workSpecSchemaVersion   = "wayline.work_spec.v1"
-	workSpecPriorityPattern = `^P[0-3]$`
+	workSpecSchemaVersion = "meristem.work_spec.v1"
+	// workSpecSchemaVersionLegacyMaristem: misspelled project name era; remove after cutover.
+	workSpecSchemaVersionLegacyMaristem = "maristem.work_spec.v1"
+	// workSpecSchemaVersionLegacyWayline: pre-migration name; remove after cutover.
+	workSpecSchemaVersionLegacyWayline = "wayline.work_spec.v1"
+	workSpecPriorityPattern            = `^P[0-3]$`
 )
 
 var priorityPattern = regexp.MustCompile(workSpecPriorityPattern)
+
+func isValidWorkSpecSchemaVersion(s string) bool {
+	return s == workSpecSchemaVersion || s == workSpecSchemaVersionLegacyMaristem || s == workSpecSchemaVersionLegacyWayline
+}
 
 // Allowed-key and required-key sets the validator consults. Lifted to
 // package level so the parity test can inspect them; the validator
@@ -238,8 +246,8 @@ func validateWorkSpec(raw json.RawMessage) error {
 	}
 	if value, err := requiredString(obj, "schema_version", "work_spec"); err != nil {
 		return err
-	} else if value != workSpecSchemaVersion {
-		return fmt.Errorf("work_spec.schema_version must be %s", workSpecSchemaVersion)
+	} else if !isValidWorkSpecSchemaVersion(value) {
+		return fmt.Errorf("work_spec.schema_version must be %q (legacy %q, %q also accepted until removed)", workSpecSchemaVersion, workSpecSchemaVersionLegacyMaristem, workSpecSchemaVersionLegacyWayline)
 	}
 	if _, err := requiredString(obj, "kind", "work_spec"); err != nil {
 		return err

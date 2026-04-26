@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 type stubTokenAuthenticator struct {
@@ -24,7 +24,7 @@ func (s *stubTokenAuthenticator) Authenticate(_ context.Context, secret string) 
 }
 
 func TestResolveSystemTokenAcceptsDedicatedSystemToken(t *testing.T) {
-	t.Setenv("WAYLINE_TOKEN", "wln_seed")
+	t.Setenv("MERISTEM_TOKEN", "mrs_seed")
 	stub := &stubTokenAuthenticator{
 		tok: domain.Token{
 			ID:     uuid.New(),
@@ -36,8 +36,8 @@ func TestResolveSystemTokenAcceptsDedicatedSystemToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSystemToken: %v", err)
 	}
-	if stub.gotSecret != "wln_seed" {
-		t.Fatalf("Authenticate secret = %q, want %q", stub.gotSecret, "wln_seed")
+	if stub.gotSecret != "mrs_seed" {
+		t.Fatalf("Authenticate secret = %q, want %q", stub.gotSecret, "mrs_seed")
 	}
 	if got.ID != stub.tok.ID || got.Source != domain.SourceSystem || got.IsRoot {
 		t.Fatalf("resolveSystemToken returned %+v, want %+v", got, stub.tok)
@@ -45,7 +45,7 @@ func TestResolveSystemTokenAcceptsDedicatedSystemToken(t *testing.T) {
 }
 
 func TestResolveSystemTokenRejectsRootSystemToken(t *testing.T) {
-	t.Setenv("WAYLINE_TOKEN", "wln_seed")
+	t.Setenv("MERISTEM_TOKEN", "mrs_seed")
 	stub := &stubTokenAuthenticator{
 		tok: domain.Token{
 			ID:     uuid.New(),
@@ -58,13 +58,13 @@ func TestResolveSystemTokenRejectsRootSystemToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("resolveSystemToken should reject root-backed system tokens")
 	}
-	if got := err.Error(); got != "seed v1: WAYLINE_TOKEN must be a dedicated system token, not root" {
+	if got := err.Error(); got != "seed v1: MERISTEM_TOKEN must be a dedicated system token, not root" {
 		t.Fatalf("unexpected error: %q", got)
 	}
 }
 
 func TestResolveWorkerSystemTokenRejectsRootSystemToken(t *testing.T) {
-	t.Setenv("WAYLINE_TOKEN", "wln_worker")
+	t.Setenv("MERISTEM_TOKEN", "mrs_worker")
 	stub := &stubTokenAuthenticator{
 		tok: domain.Token{
 			ID:     uuid.New(),
@@ -77,7 +77,7 @@ func TestResolveWorkerSystemTokenRejectsRootSystemToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("resolveWorkerSystemToken should reject root-backed system tokens")
 	}
-	if got := err.Error(); got != "worker: WAYLINE_TOKEN must be a dedicated system token, not root" {
+	if got := err.Error(); got != "worker: MERISTEM_TOKEN must be a dedicated system token, not root" {
 		t.Fatalf("unexpected error: %q", got)
 	}
 }

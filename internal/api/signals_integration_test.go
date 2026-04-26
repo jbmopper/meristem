@@ -18,16 +18,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/wayline/internal/app"
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/feed"
-	"github.com/jbmopper/wayline/internal/storage"
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/storage"
 )
 
 const (
-	envIntegrationEnabled = "WAYLINE_INTEGRATION"
-	envTestDatabaseURL    = "WAYLINE_TEST_DATABASE_URL"
+	envIntegrationEnabled = "MERISTEM_INTEGRATION"
+	envTestDatabaseURL    = "MERISTEM_TEST_DATABASE_URL"
 )
 
 func TestSignalsEndpointIntegration(t *testing.T) {
@@ -143,7 +143,7 @@ func newIntegrationPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("integration tests require postgres URL DSN, got scheme %q", parsed.Scheme)
 	}
 
-	dbName := "wayline_itest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	dbName := "meristem_itest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	adminURL := *parsed
 	adminURL.Path = "/postgres"
 	testURL := *parsed

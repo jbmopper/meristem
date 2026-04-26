@@ -1,7 +1,7 @@
 # Minimum Viable Agent-to-Agent Coordination
 
 This document scopes the smallest extension that lets two agents
-coordinate through `wayline` instead of using the owner as a relay.
+coordinate through `meristem` instead of using the owner as a relay.
 It is intentionally narrower than "communication features." The goal is
 durable, attributed, asynchronous coordination on top of the existing
 event log, `work_item`s, and feed.
@@ -12,7 +12,7 @@ the spec and into tracked `work_item`s in the running system.
 
 ## Thesis
 
-Agent-to-agent coordination in `wayline` is **not** a separate chat
+Agent-to-agent coordination in `meristem` is **not** a separate chat
 subsystem. It is one more shape of "state needing resolution" on top of
 the existing substrate:
 
@@ -32,7 +32,7 @@ The current substrate already provides the durable half of this story:
 - `work_item`s are durable subjects with lifecycle and attribution.
 - `work_item.event_appended` can carry arbitrary coordination facts.
 - `/v1/feed` exposes a human-meaningful fold over the event log.
-- `wayline feed --watch` gives a crude watch loop.
+- `meristem feed --watch` gives a crude watch loop.
 - `patience.breached` proves the worker can observe stale non-terminal
   state.
 
@@ -114,7 +114,7 @@ Rationale:
 
 ### Watcher Contract
 
-`wayline feed --watch` should consume the cursor contract above.
+`meristem feed --watch` should consume the cursor contract above.
 
 Minimum behavior:
 
@@ -136,7 +136,7 @@ Push remains a thin layer above the feed cursor.
 - The consumer re-reads truth from `/v1/feed`.
 - MCP over stdio cannot receive unsolicited server push, so any desktop
   or editor push path must be a sidecar or local watcher process, not a
-  new push transport on the `wayline` server itself.
+  new push transport on the `meristem` server itself.
 
 ## Slice 2: Coordination On A Subject
 
@@ -174,7 +174,7 @@ Suggested payload fields:
   "mentions": ["agent-B"],
   "reply_to_event_id": "uuid?",
   "decision": "accept|reject|defer?",
-  "touched_paths": ["internal/feed", "cmd/wayline"],
+  "touched_paths": ["internal/feed", "cmd/meristem"],
   "next_step": "optional short string"
 }
 ```
@@ -240,12 +240,12 @@ Three constraints should hold from the start:
 This slice should land in this order:
 
 1. Feed cursor + long-poll on `/v1/feed`.
-2. `wayline feed --watch` consuming that cursor contract.
+2. `meristem feed --watch` consuming that cursor contract.
 3. Mention-filtered wake-up using the watcher.
 4. Stable coordination event conventions on `work_item.event_appended`.
 5. Structural resolver events for proposals/decisions that affect
    lifecycle.
-6. CLI sugar such as `wayline reply` or `wayline await`, only once the
+6. CLI sugar such as `meristem reply` or `meristem await`, only once the
    underlying model has been proven useful and the current ergonomics
    hurt in practice.
 
@@ -278,7 +278,7 @@ The current roadmap/work-item mapping is:
 If this document proves useful, the next natural backlog item after
 those two is:
 
-- **Minimum viable agent-to-agent coordination over wayline**
+- **Minimum viable agent-to-agent coordination over meristem**
   - stable coordination event conventions
   - watcher-based wake-up
   - structural decision flow only where lifecycle depends on it

@@ -22,10 +22,10 @@ import (
 //
 //  1. --url flag (highest priority; useful for ad-hoc operator probes
 //     against another host).
-//  2. http://127.0.0.1${WAYLINE_HTTP_ADDR}/readyz (the in-container
+//  2. http://127.0.0.1${MERISTEM_HTTP_ADDR}/readyz (the in-container
 //     case; we always probe loopback because the api is in the same
 //     network namespace as this command when invoked via HEALTHCHECK).
-//  3. http://127.0.0.1:8080/readyz when WAYLINE_HTTP_ADDR is unset.
+//  3. http://127.0.0.1:8080/readyz when MERISTEM_HTTP_ADDR is unset.
 //
 // On any non-2xx response or transport error, runHealthcheck returns
 // an error with enough context to make the docker logs useful; main.go
@@ -34,13 +34,13 @@ import (
 func runHealthcheck(ctx context.Context, _ *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	urlFlag := fs.String("url", "", "URL to probe (default derived from WAYLINE_HTTP_ADDR + /readyz)")
+	urlFlag := fs.String("url", "", "URL to probe (default derived from MERISTEM_HTTP_ADDR + /readyz)")
 	timeoutFlag := fs.Duration("timeout", 2*time.Second, "request timeout")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("healthcheck: %w", err)
 	}
 
-	target, err := resolveHealthcheckURL(*urlFlag, os.Getenv("WAYLINE_HTTP_ADDR"))
+	target, err := resolveHealthcheckURL(*urlFlag, os.Getenv("MERISTEM_HTTP_ADDR"))
 	if err != nil {
 		return fmt.Errorf("healthcheck: %w", err)
 	}
@@ -67,7 +67,7 @@ func runHealthcheck(ctx context.Context, _ *slog.Logger, args []string) error {
 }
 
 // resolveHealthcheckURL turns a possibly-empty --url and a possibly-
-// empty WAYLINE_HTTP_ADDR into a concrete URL to probe. Lifted out of
+// empty MERISTEM_HTTP_ADDR into a concrete URL to probe. Lifted out of
 // runHealthcheck so the parsing rules can be unit-tested without
 // going through the network.
 func resolveHealthcheckURL(urlFlag, addrEnv string) (string, error) {
@@ -80,7 +80,7 @@ func resolveHealthcheckURL(urlFlag, addrEnv string) (string, error) {
 		addr = ":8080"
 	}
 
-	// WAYLINE_HTTP_ADDR follows net.Listen syntax: ":8080" (any iface),
+	// MERISTEM_HTTP_ADDR follows net.Listen syntax: ":8080" (any iface),
 	// "127.0.0.1:8080", "0.0.0.0:8080", etc. We always probe loopback;
 	// the listening interface only determines what the api accepts
 	// from the outside, not how the in-container probe reaches it.
@@ -92,6 +92,6 @@ func resolveHealthcheckURL(urlFlag, addrEnv string) (string, error) {
 		port := addr[strings.LastIndex(addr, ":"):]
 		return fmt.Sprintf("http://%s%s/readyz", probeHost, port), nil
 	default:
-		return "", errors.New("WAYLINE_HTTP_ADDR must be in host:port form (e.g. \":8080\")")
+		return "", errors.New("MERISTEM_HTTP_ADDR must be in host:port form (e.g. \":8080\")")
 	}
 }

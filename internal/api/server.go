@@ -1,4 +1,4 @@
-// Package api owns the HTTP surface of wayline.
+// Package api owns the HTTP surface of meristem.
 //
 // v0 wires health/readiness plus the authenticated inbox, feed, and
 // work-item routes. Command routes run through auth before idempotency so
@@ -17,18 +17,18 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/wayline/internal/app"
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/events"
-	"github.com/jbmopper/wayline/internal/feed"
-	"github.com/jbmopper/wayline/internal/idempotency"
-	"github.com/jbmopper/wayline/internal/inbox"
-	"github.com/jbmopper/wayline/internal/signals"
-	"github.com/jbmopper/wayline/internal/workitems"
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/signals"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 // EnvHTTPAddr is the listen address. Defaults to :8080 when unset.
-const EnvHTTPAddr = "WAYLINE_HTTP_ADDR"
+const EnvHTTPAddr = "MERISTEM_HTTP_ADDR"
 
 // Defaults chosen to be reasonable behind a reverse proxy (Caddy/nginx). The
 // spec calls for TLS termination at that layer, not in-process.

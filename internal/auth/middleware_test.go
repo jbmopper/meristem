@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // stubAuth lets the middleware tests run without a database. It satisfies
@@ -95,7 +95,7 @@ func TestMiddleware_InvalidToken_401(t *testing.T) {
 	var captured domain.Token
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/whatever", nil)
-	req.Header.Set("Authorization", "Bearer wln_definitely-not-real")
+	req.Header.Set("Authorization", "Bearer mrs_definitely-not-real")
 	mw.Wrap(newDownstream(&captured)).ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
@@ -111,7 +111,7 @@ func TestMiddleware_RevokedToken_401_DistinctCode(t *testing.T) {
 	var captured domain.Token
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/whatever", nil)
-	req.Header.Set("Authorization", "Bearer wln_revoked-token")
+	req.Header.Set("Authorization", "Bearer mrs_revoked-token")
 	mw.Wrap(newDownstream(&captured)).ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
@@ -127,12 +127,12 @@ func TestMiddleware_RevokedToken_401_DistinctCode(t *testing.T) {
 
 func TestMiddleware_HappyPath_AttachesToken(t *testing.T) {
 	want := domain.Token{ID: uuid.New(), Name: "iphone", Source: domain.SourceHuman}
-	stub := &stubAuth{wantSecret: "wln_good", tok: want}
+	stub := &stubAuth{wantSecret: "mrs_good", tok: want}
 	mw := NewMiddleware(stub)
 	var captured domain.Token
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/whatever", nil)
-	req.Header.Set("Authorization", "Bearer wln_good")
+	req.Header.Set("Authorization", "Bearer mrs_good")
 	mw.Wrap(newDownstream(&captured)).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
@@ -147,12 +147,12 @@ func TestMiddleware_HappyPath_AttachesToken(t *testing.T) {
 
 func TestMiddleware_TrimsBearerWhitespace(t *testing.T) {
 	want := domain.Token{ID: uuid.New(), Name: "iphone", Source: domain.SourceHuman}
-	stub := &stubAuth{wantSecret: "wln_good", tok: want}
+	stub := &stubAuth{wantSecret: "mrs_good", tok: want}
 	mw := NewMiddleware(stub)
 	var captured domain.Token
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/whatever", nil)
-	req.Header.Set("Authorization", "Bearer    wln_good   ")
+	req.Header.Set("Authorization", "Bearer    mrs_good   ")
 	mw.Wrap(newDownstream(&captured)).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected whitespace-tolerant happy path, got %d (%s)", rec.Code, rec.Body.String())
@@ -172,7 +172,7 @@ func TestMiddleware_GenericAuthError_401(t *testing.T) {
 	var captured domain.Token
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/whatever", nil)
-	req.Header.Set("Authorization", "Bearer wln_anything")
+	req.Header.Set("Authorization", "Bearer mrs_anything")
 	mw.Wrap(newDownstream(&captured)).ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)

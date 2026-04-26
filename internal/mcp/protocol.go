@@ -1,10 +1,10 @@
-// Package mcp implements the wayline MCP server.
+// Package mcp implements the meristem MCP server.
 //
 // Transport is newline-delimited JSON-RPC 2.0 over stdio (the MCP standard
 // transport supported by Cursor and other current MCP clients). Each
 // message is one JSON object on one line; framing is purely the newline.
 //
-// The server resolves a single bearer token at startup (WAYLINE_TOKEN),
+// The server resolves a single bearer token at startup (MERISTEM_TOKEN),
 // then attributes every event it appends to that token. Each MCP-connected
 // agent (each Cursor instance, each custom worker) holds its own token row
 // per docs/v0.md, so attribution stays clean across concurrent agents.

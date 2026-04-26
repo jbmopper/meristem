@@ -1,4 +1,4 @@
-// `wayline worker --once` runs a single bounded-patience scan: it reads
+// `meristem worker --once` runs a single bounded-patience scan: it reads
 // every non-terminal work_item, compares dwell time against the per-state
 // budget, and appends one patience.breached event per observed breach.
 //
@@ -9,7 +9,7 @@
 // The acting (escalation, retry, forced fail) and the daemon loop are
 // next slices.
 //
-// Authentication mirrors `wayline seed v1`: WAYLINE_TOKEN must be a
+// Authentication mirrors `meristem seed v1`: MERISTEM_TOKEN must be a
 // system-source token. The events the worker writes attribute to "system"
 // regardless, but the actor_token_id field is what links the event back
 // to a specific worker process for audit.
@@ -24,11 +24,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/jbmopper/wayline/internal/app"
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/storage"
-	"github.com/jbmopper/wayline/internal/worker"
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/storage"
+	"github.com/jbmopper/meristem/internal/worker"
 )
 
 func runWorker(ctx context.Context, logger *slog.Logger, args []string) error {
@@ -118,30 +118,30 @@ func uniformBudgets(d time.Duration) worker.Budgets {
 	}}
 }
 
-// resolveWorkerSystemToken loads the bearer in WAYLINE_TOKEN and refuses
+// resolveWorkerSystemToken loads the bearer in MERISTEM_TOKEN and refuses
 // to proceed unless it is a dedicated, non-root system token. Same policy
-// as `wayline seed v1`: automation runs against the system, not via root.
+// as `meristem seed v1`: automation runs against the system, not via root.
 func resolveWorkerSystemToken(ctx context.Context, service tokenAuthenticator) (domain.Token, error) {
-	secret := os.Getenv("WAYLINE_TOKEN")
+	secret := os.Getenv("MERISTEM_TOKEN")
 	if secret == "" {
-		return domain.Token{}, fmt.Errorf("worker: WAYLINE_TOKEN with a system-source bearer is required (mint one with `wayline tokens create --source system --name worker`)")
+		return domain.Token{}, fmt.Errorf("worker: MERISTEM_TOKEN with a system-source bearer is required (mint one with `meristem tokens create --source system --name worker`)")
 	}
 	tok, err := service.Authenticate(ctx, secret)
 	if err != nil {
 		return domain.Token{}, err
 	}
 	if tok.Source != domain.SourceSystem {
-		return domain.Token{}, fmt.Errorf("worker: WAYLINE_TOKEN must be source=system, got %q (root is deliberately not accepted)", tok.Source)
+		return domain.Token{}, fmt.Errorf("worker: MERISTEM_TOKEN must be source=system, got %q (root is deliberately not accepted)", tok.Source)
 	}
 	if tok.IsRoot {
-		return domain.Token{}, fmt.Errorf("worker: WAYLINE_TOKEN must be a dedicated system token, not root")
+		return domain.Token{}, fmt.Errorf("worker: MERISTEM_TOKEN must be a dedicated system token, not root")
 	}
 	return tok, nil
 }
 
 func workerUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  WAYLINE_TOKEN=wln_<system> wayline worker --once [--budget=DURATION]
+  MERISTEM_TOKEN=mrs_<system> meristem worker --once [--budget=DURATION]
 
 Runs a single bounded-patience scan. Reads every non-terminal work_item,
 compares dwell time to the per-state budget, and appends one

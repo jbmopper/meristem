@@ -1,17 +1,17 @@
 # Roadmap notes — 2026-04-24
 
-A synthesis of an architectural conversation about wayline that was held in
+A synthesis of an architectural conversation about meristem that was held in
 the wrong repo (`clinical-demo`) by an assistant that had not yet read this
 project's actual state. After reading `docs/spec.md`, `AGENTS.md`,
 `docs/coord/2026-04-23-parallel-work.md`, and
 `docs/self-building-api-synthesis.md`, most of what felt like new agreement
 turned out to be already canonical. A smaller set of points is genuinely new
-and warrants spec edits or new entries in **What wayline Builds For Itself**.
+and warrants spec edits or new entries in **What meristem Builds For Itself**.
 
 This document is advisory. If it conflicts with `docs/spec.md`, that file
 wins; if it conflicts with `AGENTS.md`, fix the projection in `AGENTS.md`,
 then this. The "roadmap" is not this file — the roadmap lives in the spec's
-**v1 Substrate** + **What wayline Builds For Itself** sections, plus tracked
+**v1 Substrate** + **What meristem Builds For Itself** sections, plus tracked
 `work_item`s in the running system. Once an operator runs `scripts/bootstrap.sh`,
 the items below should be filed as signals/work_items rather than living here.
 
@@ -25,7 +25,7 @@ The conversation reached agreement on these. They are already the spec:
   ships with its escalation rule. (`AGENTS.md` principle 3.)
 - **Event log is truth; projections are deterministic.** Replay produces
   identical rows. (`AGENTS.md` principle 2; `docs/v0.md` Architecture; the
-  `wayline rebuild` subcommand proves it.)
+  `meristem rebuild` subcommand proves it.)
 - **Four identities — `Idempotency-Key`, `dedupe_key`, `fingerprint`,
   `event_id` — are distinct and have distinct guarantees.**
   (`docs/signals.md` "The four identities";
@@ -41,15 +41,15 @@ The conversation reached agreement on these. They are already the spec:
   Messages; `AGENTS.md` glossary.)
 - **Self-building is the open backlog, not a phase plan.** Everything past
   v1 arrives as work_items in the running system. (`docs/spec.md`
-  "What wayline Builds For Itself"; `AGENTS.md` principle 11.)
+  "What meristem Builds For Itself"; `AGENTS.md` principle 11.)
 - **The clinical-demo / jay / ns_obv issue-agent pattern is generalized
-  into wayline's normal API**, not a separate auto-healing subsystem.
+  into meristem's normal API**, not a separate auto-healing subsystem.
   Signals → work_items → runs → reviews → done | child repair.
   (`docs/self-building-api-synthesis.md` Thesis and Mapping.)
 - **Idempotency is a load-bearing technique, not the headline.**
   Convergence is the headline. (`AGENTS.md` Techniques section;
   `docs/thoughts.md`.)
-- **The system can later be assessed by being asked.** "Assess wayline's
+- **The system can later be assessed by being asked.** "Assess meristem's
   fit against [criteria]" is meant to become a normal `work_item` whose
   execution folds over the event log. (`AGENTS.md` "Direction" section.)
 
@@ -99,7 +99,7 @@ ossifies.
 
 **Where this lands:** A new "Triage" subsection under `docs/spec.md`
 Execution Model → Inbound, replacing the one-liner about intent
-classification. A backlog entry under "What wayline Builds For Itself"
+classification. A backlog entry under "What meristem Builds For Itself"
 named *"Triage as a first-class stage with dedup, boundary, and
 context-gathering responsibilities."*
 
@@ -132,7 +132,7 @@ correct but coarse. For convergence loops over ambiguous problems
 new `docs/convergence-techniques.md`) catalogs these termination
 signals. The reconciler implementation, when it is built, should expose
 its termination policy as configuration on the work_item, not bake a
-single iteration limit into code. A backlog entry under "What wayline
+single iteration limit into code. A backlog entry under "What meristem
 Builds For Itself" named *"Trajectory-aware reconciler termination
 (rate, sign, depth-without-return)."*
 
@@ -207,7 +207,7 @@ work_item enters `blocked` with `reason = trying_alternative_in_<child>`
 and resumes (or terminates) based on the child's outcome.
 
 **Where this lands:** This is the natural expansion of the reconciler
-beyond v1. Backlog entry under "What wayline Builds For Itself" named
+beyond v1. Backlog entry under "What meristem Builds For Itself" named
 *"Reconciler may spawn alternatives, not only retry; convergence-failure
 recovery as a child work_item, not only as escalation."*
 
@@ -233,25 +233,25 @@ ingress component; semantic interpretation is triage's responsibility."*
 ### 7. Filesystem isolation for parallel external writes
 
 The spec assumes external side effects happen in the integrators' hands
-(codex, cursor agents, custom workers via MCP), so wayline does not
+(codex, cursor agents, custom workers via MCP), so meristem does not
 directly touch external repos. That framing is correct and should not
 change.
 
-But once wayline orchestrates **two parallel runs against the same
+But once meristem orchestrates **two parallel runs against the same
 target** — two codex agents fixing different findings in the same repo,
 two cursor sessions on the same branch — filesystem races become an
-integrator-level concern that wayline's `runs` / `actions` design has to
+integrator-level concern that meristem's `runs` / `actions` design has to
 have a story for. Mutexes and channels solve in-memory races inside one
 process; they do not help two `codex exec` invocations both editing
 `main`.
 
 The realistic options to keep open (without committing to one yet):
 
-- Per-target serialization. Wayline schedules at most one writer per
+- Per-target serialization. Meristem schedules at most one writer per
   `(repo, branch)` at a time. Simple; lowest parallelism.
 - Worktree-per-task. Each run gets its own working directory on its own
   branch; merge happens as a follow-on work_item under approval.
-- Patch-as-unit. Agents emit patches; wayline applies them under
+- Patch-as-unit. Agents emit patches; meristem applies them under
   approval. Strongest correctness story; weakest live-iteration story.
 - Branch-per-task with throwaway checkouts. Cheap parallelism; conflict
   resolution becomes a follow-on work_item rather than a runtime error.
@@ -260,7 +260,7 @@ The right move is to **not bake a choice in until two parallel runs
 against the same target are actually happening.** Premature commitment
 here is the canonical example of the canonization risk in (4).
 
-**Where this lands:** A backlog entry under "What wayline Builds For
+**Where this lands:** A backlog entry under "What meristem Builds For
 Itself" named *"Filesystem isolation strategy for parallel external
 writes; defer until two parallel runs against the same target are
 actually happening."*
@@ -302,7 +302,7 @@ The above mapped to concrete diffs:
    (transcription, frame extraction, description). Semantic
    interpretation belongs in triage, where cross-message context is
    available."*
-4. Add to "What wayline Builds For Itself":
+4. Add to "What meristem Builds For Itself":
    - Triage as a first-class stage.
    - Trajectory-aware reconciler termination.
    - Reconciler may spawn alternatives, not only retry.
@@ -338,32 +338,32 @@ the explicit hook for (5) above.
 
 The `clinical-demo` issue-agent workflow ran end-to-end on 2026-04-23
 and converged in three iterations on two P1 fixes. Observations
-relevant to wayline:
+relevant to meristem:
 
 - **Stop-on-equality is the simplest trajectory-aware termination.** It
   worked for the trivial case (zero-equals-zero) but is brittle outside
-  it. Once wayline has a `runs`/`reviews` loop, the termination signal
+  it. Once meristem has a `runs`/`reviews` loop, the termination signal
   needs to be richer — see (2) above.
 - **Malformed agent output is the norm, not the exception.** The first
   finder iteration emitted prose where the template demanded structured
   markdown. The parser treated the result as zero findings and
-  converged. Wayline's `signals` parser must be similarly forgiving —
+  converged. Meristem's `signals` parser must be similarly forgiving —
   or, better, the prompt template + parser must be co-designed so that
   *"the agent didn't follow the format"* produces a recordable failure
   rather than a silent zero. The latter is more honest.
 - **Closed dispatch table = no triage.** clinical-demo had two
   hardcoded findings as input, two issues as output, no decisions to
-  make. Wayline cannot have a closed dispatch table because pre-issues
+  make. Meristem cannot have a closed dispatch table because pre-issues
   are open-ended; this is one of the load-bearing differences and the
   reason (1) above is the headline item.
 - **Manifest as the only on-disk record; everything else gitignored.**
   clinical-demo's run produced a `manifest.json` plus a tree of
-  gitignored intermediates. Wayline gets this for free via `events` +
-  `artifacts`. Do not add a parallel manifest concept to wayline; the
+  gitignored intermediates. Meristem gets this for free via `events` +
+  `artifacts`. Do not add a parallel manifest concept to meristem; the
   event log + artifact references already are it.
 - **HITL caching is non-trivial.** clinical-demo's HITL resume bug fix
   was to cache the compiled langgraph by `thread_id` so the
-  `InMemorySaver` survived across the pause/resume boundary. Wayline's
+  `InMemorySaver` survived across the pause/resume boundary. Meristem's
   analogous concern is *"what state must persist across a worker
   restart vs. across a worker hand-off."* The answer is consistent
   with `AGENTS.md` "Things not to do": anything not in Postgres is
@@ -382,7 +382,7 @@ intended:
 - The four identities and the dedupe semantics in
   `docs/self-building-api-synthesis.md` and `docs/signals.md` are
   correct.
-- The topology — agents post signals, wayline coordinates, humans
+- The topology — agents post signals, meristem coordinates, humans
   approve writes — is correct.
 - v0 is closed. Everything past v0 should arrive as work_items in the
   running system, including the items above. This document's purpose

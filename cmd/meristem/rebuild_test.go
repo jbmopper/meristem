@@ -11,8 +11,8 @@ func TestLooksLikeIdentifier(t *testing.T) {
 		want bool
 	}{
 		{"", false},
-		{"wayline_rebuild", true},
-		{"WaylineRebuild", true},
+		{"meristem_rebuild", true},
+		{"MeristemRebuild", true},
 		{"_underscore_lead", true},
 		{"trailing_digits_99", true},
 		{"99_leading_digit", false},

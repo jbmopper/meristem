@@ -3,9 +3,9 @@
 // a work_item in the same transaction.
 //
 // A signal is a non-human structured input (review finding, repairable
-// runtime failure, webhook report) that wayline explicitly converts into a
+// runtime failure, webhook report) that meristem explicitly converts into a
 // work_item under policy. See docs/signals.md for the full contract and
-// docs/schemas/wayline.work_spec.v1.json for the work_spec shape.
+// docs/schemas/meristem.work_spec.v1.json for the work_spec shape.
 package signals
 
 import (
@@ -17,8 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/projections"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/projections"
 )
 
 // RegisterProjectors adds the signal projection writers to registry. Mirrors

@@ -15,18 +15,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/wayline/internal/app"
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/events"
-	"github.com/jbmopper/wayline/internal/storage"
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/storage"
 )
 
 // seedNamespace is the fixed UUID under which every v1-substrate work item
 // derives its id from its slugified title (uuid.NewSHA1 in the v5 sense).
 // Two consequences:
 //
-//   - Reruns of `wayline seed v1` produce the same subject_id per item, so
+//   - Reruns of `meristem seed v1` produce the same subject_id per item, so
 //     the events writer's deterministic id collapses replays into one row.
 //   - Renaming a substrate item changes its id. Treat the title as load-
 //     bearing identity; if you want to rephrase, do so through the running
@@ -203,28 +203,28 @@ type tokenAuthenticator interface {
 	Authenticate(context.Context, string) (domain.Token, error)
 }
 
-// resolveSystemToken loads the bearer in WAYLINE_TOKEN and refuses to
+// resolveSystemToken loads the bearer in MERISTEM_TOKEN and refuses to
 // proceed unless it is a dedicated, non-root system token. docs/v0.md is
 // explicit: "The seed command uses a dedicated `system` token, not root."
 func resolveSystemToken(ctx context.Context, service tokenAuthenticator) (domain.Token, error) {
-	secret := os.Getenv("WAYLINE_TOKEN")
+	secret := os.Getenv("MERISTEM_TOKEN")
 	if secret == "" {
-		return domain.Token{}, fmt.Errorf("seed v1: WAYLINE_TOKEN with a system-source bearer is required (mint one with `wayline tokens create --source system --name seed`)")
+		return domain.Token{}, fmt.Errorf("seed v1: MERISTEM_TOKEN with a system-source bearer is required (mint one with `meristem tokens create --source system --name seed`)")
 	}
 	tok, err := service.Authenticate(ctx, secret)
 	if err != nil {
 		return domain.Token{}, err
 	}
 	if tok.Source != domain.SourceSystem {
-		return domain.Token{}, fmt.Errorf("seed v1: WAYLINE_TOKEN must be source=system, got %q (root is deliberately not accepted)", tok.Source)
+		return domain.Token{}, fmt.Errorf("seed v1: MERISTEM_TOKEN must be source=system, got %q (root is deliberately not accepted)", tok.Source)
 	}
 	if tok.IsRoot {
-		return domain.Token{}, fmt.Errorf("seed v1: WAYLINE_TOKEN must be a dedicated system token, not root")
+		return domain.Token{}, fmt.Errorf("seed v1: MERISTEM_TOKEN must be a dedicated system token, not root")
 	}
 	return tok, nil
 }
 
-// seedV1Items is the pool-driven core of `wayline seed v1`. Split out from
+// seedV1Items is the pool-driven core of `meristem seed v1`. Split out from
 // runSeedV1 so an integration test can drive it against a real pool
 // without re-parsing flags or reading env. Returns (created, replayed).
 //
@@ -324,7 +324,7 @@ func seedItemsFingerprint() string {
 
 func seedUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  WAYLINE_TOKEN=wln_<system> wayline seed v1 [--dry-run]
+  MERISTEM_TOKEN=mrs_<system> meristem seed v1 [--dry-run]
 
 Seeds the v1 substrate backlog from docs/spec.md into the running system as
 work_items, attributed to the supplied system-source token. Reruns are

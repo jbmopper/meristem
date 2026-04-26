@@ -1,4 +1,4 @@
-// `wayline feed` is the human-facing read of the activity log: a tiny
+// `meristem feed` is the human-facing read of the activity log: a tiny
 // terminal renderer for the same events /v1/feed serves to integrators.
 //
 // The subcommand exists because the system was JSON-API-first by design,
@@ -9,8 +9,8 @@
 //
 // Two modes:
 //
-//   wayline feed                snapshot of the last --limit items, exit
-//   wayline feed --watch        consume the SSE push stream at /v1/feed/stream;
+//   meristem feed                snapshot of the last --limit items, exit
+//   meristem feed --watch        consume the SSE push stream at /v1/feed/stream;
 //                               server pushes each new event as it lands,
 //                               client prints (after optional --mentions filter).
 //                               Reconnects with Last-Event-ID on disconnect
@@ -67,7 +67,7 @@ import (
 func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("feed", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	api := fs.String("api", "http://127.0.0.1:8080", "wayline API base URL")
+	api := fs.String("api", "http://127.0.0.1:8080", "meristem API base URL")
 	limit := fs.Int("limit", 20, "number of feed items to fetch (snapshot mode)")
 	watch := fs.Bool("watch", false, "consume the SSE push stream and append new items (Ctrl-C to exit)")
 	mentions := fs.String("mentions", "", "comma-separated names; in --watch mode, only print items that mention any of them")
@@ -84,7 +84,7 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
-	if source != "" && source != "WAYLINE_TOKEN" {
+	if source != "" && source != "MERISTEM_TOKEN" {
 		fmt.Fprintf(os.Stderr, "feed: using token from %s\n", source)
 	}
 
@@ -297,7 +297,7 @@ type feedItem struct {
 }
 
 // feedClient is the smallest possible HTTP client for /v1/feed. Inlined
-// (rather than going through pkg/wayline) because the SDK currently only
+// (rather than going through pkg/meristem) because the SDK currently only
 // covers the write paths integrators most need; growing it to cover GETs
 // and streaming is its own slice. If that slice lands, lift this code
 // into the SDK and have the CLI call it.
@@ -646,10 +646,10 @@ func truncate(s string, n int) string {
 // human-readable source string describing where the token came from (so the
 // caller can announce it on stderr). Resolution order:
 //
-//  1. WAYLINE_TOKEN env var (explicit always wins; CI and ephemeral shells
+//  1. MERISTEM_TOKEN env var (explicit always wins; CI and ephemeral shells
 //     should never have a file silently take precedence).
 //  2. The first existing token file in priorityTokens, searched in the
-//     nearest .wayline directory found by walking up from cwd. The walk is
+//     nearest .meristem directory found by walking up from cwd. The walk is
 //     bounded by filesystem-root convergence so it terminates on every OS.
 //
 // For /v1/feed any valid bearer works (no source restriction), so the
@@ -657,16 +657,16 @@ func truncate(s string, n int) string {
 // so it can also be reused for inbox capture). agent and seed follow as
 // fallbacks for setups that ran bootstrap with --no-root or similar.
 func resolveFeedToken() (token, source string, err error) {
-	if t := strings.TrimSpace(os.Getenv("WAYLINE_TOKEN")); t != "" {
-		return t, "WAYLINE_TOKEN", nil
+	if t := strings.TrimSpace(os.Getenv("MERISTEM_TOKEN")); t != "" {
+		return t, "MERISTEM_TOKEN", nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", "", fmt.Errorf("feed: getwd: %w", err)
 	}
-	dir := findWaylineDir(cwd)
+	dir := findMeristemDir(cwd)
 	if dir == "" {
-		return "", "", fmt.Errorf("feed: WAYLINE_TOKEN not set and no .wayline/ directory found walking up from %s", cwd)
+		return "", "", fmt.Errorf("feed: MERISTEM_TOKEN not set and no .meristem/ directory found walking up from %s", cwd)
 	}
 	for _, name := range priorityTokens {
 		path := filepath.Join(dir, name)
@@ -680,29 +680,29 @@ func resolveFeedToken() (token, source string, err error) {
 		}
 		return t, path, nil
 	}
-	return "", "", fmt.Errorf("feed: WAYLINE_TOKEN not set and no usable token found in %s (looked for %s)",
+	return "", "", fmt.Errorf("feed: MERISTEM_TOKEN not set and no usable token found in %s (looked for %s)",
 		dir, strings.Join(priorityTokens, ", "))
 }
 
 // priorityTokens is the file-discovery order resolveFeedToken uses inside a
-// .wayline/ directory. Order is most-permissive-first: root can do anything,
+// .meristem/ directory. Order is most-permissive-first: root can do anything,
 // agent-A is the standard non-root bearer minted by bootstrap, seed is the
-// system token used by `wayline seed v1` and `wayline worker --once`.
+// system token used by `meristem seed v1` and `meristem worker --once`.
 var priorityTokens = []string{
 	"root.token",
 	"agent-A.token",
 	"seed.token",
 }
 
-// findWaylineDir walks upward from start looking for a directory named
-// `.wayline`. Returns the absolute path of the .wayline directory itself,
+// findMeristemDir walks upward from start looking for a directory named
+// `.meristem`. Returns the absolute path of the .meristem directory itself,
 // or "" if none is found before the filesystem root. Termination is
 // guaranteed by the parent==current convergence check (true on POSIX and
 // Windows for the root path).
-func findWaylineDir(start string) string {
+func findMeristemDir(start string) string {
 	dir := start
 	for {
-		candidate := filepath.Join(dir, ".wayline")
+		candidate := filepath.Join(dir, ".meristem")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
 		}
@@ -716,19 +716,19 @@ func findWaylineDir(start string) string {
 
 func feedUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  wayline feed [--limit=N]
-  wayline feed --watch [--mentions=NAME[,NAME...]]
+  meristem feed [--limit=N]
+  meristem feed --watch [--mentions=NAME[,NAME...]]
 
-Prints recent activity from the wayline event feed in a human-readable
+Prints recent activity from the meristem event feed in a human-readable
 form. Without --watch, fetches the last --limit items and exits. With
 --watch, holds one long-lived connection to /v1/feed/stream (SSE) and
 prints each event the server pushes, reconnecting with Last-Event-ID
 on disconnect so events that landed during the gap are replayed.
 
 Token resolution (first match wins):
-  1. WAYLINE_TOKEN env var
-  2. .wayline/{root.token, agent-A.token, seed.token} in the nearest
-     .wayline directory found walking up from the current directory.
+  1. MERISTEM_TOKEN env var
+  2. .meristem/{root.token, agent-A.token, seed.token} in the nearest
+     .meristem directory found walking up from the current directory.
      The chosen path is announced on stderr.
 
 Flags:
@@ -740,7 +740,7 @@ Flags:
   --interval=DURATION  reconnect backoff when the SSE stream drops in --watch
                        (default 2s); only network blips and server restarts
                        reach this — the healthy path holds one connection
-  --api=URL            wayline API base URL (default http://127.0.0.1:8080)
+  --api=URL            meristem API base URL (default http://127.0.0.1:8080)
 
 Output is one line per event, in arrival order (oldest-first by events.seq).
 Format:

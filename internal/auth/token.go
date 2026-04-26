@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const tokenPrefix = "wln_"
+const tokenPrefix = "mrs_"
 
 // NewSecret returns a new random bearer token. The raw value is shown once to
 // the operator and only its SHA-256 digest is stored.
@@ -30,7 +30,7 @@ func HashSecret(secret string) []byte {
 }
 
 // ValidSecretShape performs a cheap shape check before hashing. It is not a
-// security boundary; it just avoids accepting accidental non-wayline strings.
+// security boundary; it just avoids accepting accidental non-meristem strings.
 func ValidSecretShape(secret string) bool {
 	if !strings.HasPrefix(secret, tokenPrefix) {
 		return false

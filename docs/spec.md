@@ -1,23 +1,23 @@
-# wayline Spec
+# meristem Spec
 
-This document is the single source of truth for `wayline`. It supersedes:
+This document is the single source of truth for `meristem`. It supersedes:
 
-- `wayline-proposal-archived.md`
-- `wayline-technical-spec-and-implementation-plan-archived.md`
+- `meristem-proposal-archived.md`
+- `meristem-technical-spec-and-implementation-plan-archived.md`
 
 Both are kept for historical context only and are no longer authoritative.
 
-## What wayline Is
+## What meristem Is
 
-`wayline` is a portable, editor-agnostic, single-operator coordination plane. The owner gives directions in any form. `wayline` normalizes them into a graph of work items, coordinates humans and agents, brokers actions into external systems (GCP, AWS, repos, CI, SSH, Kubernetes), and drives every work item to a terminal state without further owner intervention beyond approvals. `wayline` itself stays light and always-on; heavy compute and inference happen in the systems it orchestrates.
+`meristem` is a portable, editor-agnostic, single-operator coordination plane. The owner gives directions in any form. `meristem` normalizes them into a graph of work items, coordinates humans and agents, brokers actions into external systems (GCP, AWS, repos, CI, SSH, Kubernetes), and drives every work item to a terminal state without further owner intervention beyond approvals. `meristem` itself stays light and always-on; heavy compute and inference happen in the systems it orchestrates.
 
-## What wayline Is Not
+## What meristem Is Not
 
 - Not a workflow engine. It dispatches, waits, and records; it does not execute heavy work itself.
 - Not a multi-tenant product. One owner, no other humans.
 - Not a replacement for GitHub, the cloud consoles, or the IDE.
 - Not coupled to any one editor, model vendor, or cloud.
-- Not phased beyond v0. v0 is a bootstrap — the smallest substrate that can be used to track and coordinate its own further development. Every capability past v0 is itself a `work_item` in `wayline`.
+- Not phased beyond v0. v0 is a bootstrap — the smallest substrate that can be used to track and coordinate its own further development. Every capability past v0 is itself a `work_item` in `meristem`.
 
 ## Core Principles
 
@@ -35,8 +35,8 @@ Both are kept for historical context only and are no longer authoritative.
 
 A Go modular monolith with two runtime modes sharing one codebase and one database:
 
-- `wayline api`: HTTP, webhooks, auth, inbox ingestion, reads, command submission.
-- `wayline worker`: background jobs, connector execution, retries, polling, summaries.
+- `meristem api`: HTTP, webhooks, auth, inbox ingestion, reads, command submission.
+- `meristem worker`: background jobs, connector execution, retries, polling, summaries.
 
 ### Components
 
@@ -147,14 +147,14 @@ The owner can be unreachable for a long time and the system still terminates: no
 ### Inbound
 
 1. A message arrives (text, voice, image, webhook, agent callback) with an idempotency key.
-2. `wayline api` authenticates the token and stores the raw message and parts.
+2. `meristem api` authenticates the token and stores the raw message and parts.
 3. Coordinator classifies intent: `capture`, `query`, `command`, or `approval`. Source is always considered.
 4. A `work_item` is created or updated; events are appended; the originating token is recorded on every event.
 5. If work is needed, a job is enqueued in `job_queue` with a deterministic id.
 
 ### Outbound
 
-1. `wayline worker` leases the next ready job via `SELECT … FOR UPDATE SKIP LOCKED`.
+1. `meristem worker` leases the next ready job via `SELECT … FOR UPDATE SKIP LOCKED`.
 2. Policy checks the action: read actions proceed; write actions create an approval and the job parks until the approval resolves.
 3. The connector executes the action through the `outbox_events` discipline.
 4. Results are stored as artifacts and events.
@@ -230,7 +230,7 @@ REST is canonical. CLI and MCP are full-featured translation layers — every RE
 
 The substrate is the same wherever it runs.
 
-- **Initial host:** small Compute Engine VM on GCP, funded by remaining $200 GCP credit through June 1. `wayline api`, `wayline worker`, Postgres, reverse proxy with TLS, GCS for object overflow.
+- **Initial host:** small Compute Engine VM on GCP, funded by remaining $200 GCP credit through June 1. `meristem api`, `meristem worker`, Postgres, reverse proxy with TLS, GCS for object overflow.
 - **Eventual host:** OCI Ampere A1 with the same containers, OCI block storage for Postgres, OCI Object Storage for artifacts, triggered by a planned $300 / 1-month project. The migration is a redeploy and a DNS swap, not a feature change.
 - **Never:** depending on managed cloud primitives in the core (Firestore, Cloud Tasks, Eventarc) or building to provider APIs early.
 
@@ -265,9 +265,9 @@ If a step is not possible, it is a substrate bug, not a missing feature.
 ## Repository Shape
 
 ```text
-wayline/
+meristem/
   cmd/
-    wayline/
+    meristem/
   internal/
     api/
     auth/
@@ -285,9 +285,9 @@ wayline/
 
 ## v0 — Bootstrap
 
-v0 is the smallest version of `wayline` that can be used to build `wayline`. It ships cold (built directly, not tracked in itself). Everything past v0 is a tracked `work_item` in the running system.
+v0 is the smallest version of `meristem` that can be used to build `meristem`. It ships cold (built directly, not tracked in itself). Everything past v0 is a tracked `work_item` in the running system.
 
-The thesis: as soon as the owner can capture instructions from the iPhone, see them in a feed, and dispatch them to a Cursor agent via MCP, the rest of the substrate can be built *as* `wayline` work — by the owner, by Cursor agents, or both — flowing through the system it is building.
+The thesis: as soon as the owner can capture instructions from the iPhone, see them in a feed, and dispatch them to a Cursor agent via MCP, the rest of the substrate can be built *as* `meristem` work — by the owner, by Cursor agents, or both — flowing through the system it is building.
 
 ### v0 Scope
 
@@ -312,7 +312,7 @@ The minimum surface that satisfies the bootstrap thesis:
 
 ### What v0 Deliberately Does Not Have
 
-These are deferred and become tracked work items in `wayline` the moment v0 is up:
+These are deferred and become tracked work items in `meristem` the moment v0 is up:
 
 - Approvals, approval lifecycle, push notifications.
 - Connectors of any kind. The owner and Cursor agents are the only executors; side effects happen in their hands and are reported back as events on the work item.
@@ -327,7 +327,7 @@ These are deferred and become tracked work items in `wayline` the moment v0 is u
 
 ### v0 Acceptance
 
-- Owner can dictate "Build the approval system in `wayline`" from the iPhone, and a `work_item` exists with that text within 15 seconds.
+- Owner can dictate "Build the approval system in `meristem`" from the iPhone, and a `work_item` exists with that text within 15 seconds.
 - A Cursor agent, via MCP, can list open work items, pick one, append progress events as it works, spawn child items, and mark items `done`.
 - The same instruction submitted twice produces one `work_item`, not two.
 - All state survives a process restart.
@@ -338,9 +338,9 @@ These are deferred and become tracked work items in `wayline` the moment v0 is u
 
 Roughly five to seven focused working days. v0 is small enough to land inside a single working week.
 
-## v1 Substrate (first body of work in wayline)
+## v1 Substrate (first body of work in meristem)
 
-Once v0 is running, every item below exists as a `work_item` in `wayline` and is dispatched to the owner or to Cursor agents via MCP. v1 is the agreed-upon substrate; "What wayline Builds For Itself" below is the open-ended backlog after that.
+Once v0 is running, every item below exists as a `work_item` in `meristem` and is dispatched to the owner or to Cursor agents via MCP. v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the open-ended backlog after that.
 
 v1 is complete when every item below is true. Nothing in v1 is GCP-specific; the host happens to be GCP.
 
@@ -373,9 +373,9 @@ v1 is complete when every item below is true. Nothing in v1 is GCP-specific; the
 - The owner can rebuild the entire system from a backup and the root token.
 - The same containers run on the GCP VM today and on an OCI Ampere A1 instance with no code change.
 
-## What wayline Builds For Itself
+## What meristem Builds For Itself
 
-Beyond v1, the system itself continues to be the agent that builds further capability. Each item below is a backlog `work_item`, not a phase. The owner directs; `wayline` converges.
+Beyond v1, the system itself continues to be the agent that builds further capability. Each item below is a backlog `work_item`, not a phase. The owner directs; `meristem` converges.
 
 - Native GCP, AWS, SSH, and Kubernetes connectors with WIF and IAM Roles Anywhere.
 - CLI.

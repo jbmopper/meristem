@@ -1,4 +1,4 @@
-# Anything not needed by `go build ./cmd/wayline` is excluded from the
+# Anything not needed by `go build ./cmd/meristem` is excluded from the
 # Docker build context. Smaller context = faster `docker build` and a
 # tighter cache surface.
 

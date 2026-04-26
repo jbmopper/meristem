@@ -1,4 +1,4 @@
-// Package wayline is a small Go client for the wayline coordination
+// Package meristem is a small Go client for the meristem coordination
 // plane. It hides the bits that every integrator would otherwise have
 // to reinvent: bearer authentication, the Idempotency-Key dance,
 // idempotency-replay detection, and decoding the API's structured
@@ -7,12 +7,12 @@
 // Design choices worth knowing:
 //
 //   - This package never validates the work_spec body against the JSON
-//     Schema at docs/schemas/wayline.work_spec.v1.json. The server is
+//     Schema at docs/schemas/meristem.work_spec.v1.json. The server is
 //     the single source of truth for that contract; the client merely
 //     transports bytes. Callers pass any json-encodable shape as the
 //     WorkSpec field.
 //
-//   - The package name is "wayline". When this collides with a local
+//   - The package name is "meristem". When this collides with a local
 //     identifier in the caller's package, use an import alias.
 //
 //   - The Client is safe for concurrent use; the underlying
@@ -20,24 +20,24 @@
 //
 // Minimal example:
 //
-//	client, err := wayline.New(wayline.Config{
-//	    BaseURL: "https://wayline.example.com",
-//	    Token:   os.Getenv("WAYLINE_TOKEN"),
+//	client, err := meristem.New(meristem.Config{
+//	    BaseURL: "https://meristem.example.com",
+//	    Token:   os.Getenv("MERISTEM_TOKEN"),
 //	})
 //	if err != nil { log.Fatal(err) }
 //
-//	resp, err := client.PostSignal(ctx, wayline.SignalRequest{
+//	resp, err := client.PostSignal(ctx, meristem.SignalRequest{
 //	    Kind:      "repairable_failure",
 //	    DedupeKey: "jay:retry-budget:001",
-//	    Source: wayline.SignalSource{
+//	    Source: meristem.SignalSource{
 //	        Kind:       "system_event",
 //	        Identifier: "jay:job:42",
 //	    },
 //	    WorkSpec: workSpecJSON,
-//	}, wayline.WithIdempotencyKey("import-001"))
+//	}, meristem.WithIdempotencyKey("import-001"))
 //	if err != nil { log.Fatal(err) }
 //	log.Printf("work_item=%s replayed=%v", resp.WorkItem.ID, resp.Replayed)
-package wayline
+package meristem
 
 import (
 	"errors"
@@ -57,11 +57,11 @@ const defaultHTTPTimeout = 30 * time.Second
 // rest fall back to sensible defaults.
 type Config struct {
 	// BaseURL is the API root, with no trailing /v1. Examples:
-	// "https://wayline.example.com", "http://127.0.0.1:8080".
+	// "https://meristem.example.com", "http://127.0.0.1:8080".
 	BaseURL string
 
-	// Token is a wayline bearer token (the secret shown once at
-	// `wayline tokens create` time, not the token id). Sent as
+	// Token is a meristem bearer token (the secret shown once at
+	// `meristem tokens create` time, not the token id). Sent as
 	// "Authorization: Bearer <Token>".
 	Token string
 
@@ -75,7 +75,7 @@ type Config struct {
 	UserAgent string
 }
 
-// Client is a wayline API client. Construct one with New.
+// Client is a meristem API client. Construct one with New.
 type Client struct {
 	baseURL   string
 	token     string
@@ -85,8 +85,8 @@ type Client struct {
 
 // Errors returned by New for invalid configs.
 var (
-	ErrBaseURLRequired = errors.New("wayline: Config.BaseURL is required")
-	ErrTokenRequired   = errors.New("wayline: Config.Token is required")
+	ErrBaseURLRequired = errors.New("meristem: Config.BaseURL is required")
+	ErrTokenRequired   = errors.New("meristem: Config.Token is required")
 )
 
 // New validates cfg and returns a ready-to-use Client. Returns a
@@ -111,7 +111,7 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// APIError is returned when the wayline API responds with a 4xx or
+// APIError is returned when the meristem API responds with a 4xx or
 // 5xx and a structured error envelope. StatusCode is the HTTP status;
 // Code and Message come from the `{"error": {"code": ..., "message":
 // ...}}` envelope. If the server returned a non-2xx response without
@@ -125,12 +125,12 @@ type APIError struct {
 
 // Error implements error.
 func (e *APIError) Error() string {
-	return fmt.Sprintf("wayline: HTTP %d: %s: %s", e.StatusCode, e.Code, e.Message)
+	return fmt.Sprintf("meristem: HTTP %d: %s: %s", e.StatusCode, e.Code, e.Message)
 }
 
 // Is supports errors.Is matching by code, e.g.:
 //
-//	errors.Is(err, &wayline.APIError{Code: "duplicate_work_spec"})
+//	errors.Is(err, &meristem.APIError{Code: "duplicate_work_spec"})
 //
 // StatusCode and Message are ignored for matching.
 func (e *APIError) Is(target error) bool {

@@ -3,7 +3,7 @@ package auth
 import (
 	"context"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 type contextKey struct{}

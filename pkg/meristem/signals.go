@@ -1,4 +1,4 @@
-package wayline
+package meristem
 
 import (
 	"bytes"
@@ -34,7 +34,7 @@ type SignalRequest struct {
 	Source SignalSource `json:"source"`
 
 	// WorkSpec is the canonical work_spec payload. Must validate
-	// against docs/schemas/wayline.work_spec.v1.json. The client
+	// against docs/schemas/meristem.work_spec.v1.json. The client
 	// does not validate it locally; the server rejects malformed
 	// bodies with a 400 and a structured error.
 	WorkSpec json.RawMessage `json:"work_spec"`
@@ -145,12 +145,12 @@ func (c *Client) PostSignal(ctx context.Context, req SignalRequest, opts ...Opti
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("wayline: marshal signal request: %w", err)
+		return nil, fmt.Errorf("meristem: marshal signal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/signals", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("wayline: build request: %w", err)
+		return nil, fmt.Errorf("meristem: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
@@ -161,7 +161,7 @@ func (c *Client) PostSignal(ctx context.Context, req SignalRequest, opts ...Opti
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("wayline: post signal: %w", err)
+		return nil, fmt.Errorf("meristem: post signal: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -171,7 +171,7 @@ func (c *Client) PostSignal(ctx context.Context, req SignalRequest, opts ...Opti
 
 	var sr SignalResponse
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-		return nil, fmt.Errorf("wayline: decode signal response: %w", err)
+		return nil, fmt.Errorf("meristem: decode signal response: %w", err)
 	}
 	sr.Replayed = strings.EqualFold(resp.Header.Get("Idempotency-Replayed"), "true")
 	return &sr, nil

@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // roundtrip runs a single request through the dispatcher without going
@@ -37,7 +37,7 @@ func roundtrip(t *testing.T, s *Server, req string) rpcMessage {
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	s := New(Deps{}, ServerInfo{Name: "wayline-test", Version: "test"}, nil)
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 	s.actor = domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: false, Name: "test"}
 	return s
 }
@@ -59,7 +59,7 @@ func TestServer_Initialize_EchoesProtocolVersion(t *testing.T) {
 	if result.ProtocolVersion != "2024-11-05" {
 		t.Errorf("expected echoed protocolVersion 2024-11-05, got %q", result.ProtocolVersion)
 	}
-	if result.ServerInfo["name"] != "wayline-test" {
+	if result.ServerInfo["name"] != "meristem-test" {
 		t.Errorf("unexpected serverInfo.name: %v", result.ServerInfo["name"])
 	}
 	if _, ok := result.Capabilities["tools"]; !ok {
@@ -167,7 +167,7 @@ func TestServer_CallToolWithoutAuth_ReturnsToolError(t *testing.T) {
 	// New and Run. Verify that skipping it surfaces as an isError tool
 	// result, not a transport-level success that silently appends events
 	// without attribution.
-	s := New(Deps{}, ServerInfo{Name: "wayline-test", Version: "test"}, nil)
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"feed.read","arguments":{}}}`)
 	if resp.Error != nil {
 		t.Fatalf("expected transport success, got error %+v", resp.Error)
@@ -204,7 +204,7 @@ func TestServer_CallTool_ServiceMissing_ReturnsToolError(t *testing.T) {
 	// All Deps are nil; tool handlers should refuse with isError=true.
 	// This proves the dispatcher routes to the handler and that handlers
 	// guard against missing dependencies (which is the wiring failure
-	// mode if cmd/wayline forgets a service).
+	// mode if cmd/meristem forgets a service).
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"feed.read","arguments":{}}}`)
 	if resp.Error != nil {

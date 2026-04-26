@@ -18,7 +18,7 @@ const (
 	EventSignalReceived        = "signal.received"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
-	// that state. Recorded by `wayline worker --once` (see internal/worker).
+	// that state. Recorded by `meristem worker --once` (see internal/worker).
 	// The event is record-only in this slice: it carries the breach observation
 	// and the budget against which it was measured, but does not by itself
 	// drive any further action. Subsequent slices add the convergence behavior

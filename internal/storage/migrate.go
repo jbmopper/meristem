@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/wayline/migrations"
+	"github.com/jbmopper/meristem/migrations"
 )
 
 // MigrationDirection selects which set of files to apply. v0 only exposes Up

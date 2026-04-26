@@ -1,7 +1,7 @@
 # Operator FAQ
 
 Plain-language answers to the questions a new operator (or a new agent
-contributing to wayline) is going to hit in the first hour. Not
+contributing to meristem) is going to hit in the first hour. Not
 comprehensive; the canonical sources are `docs/spec.md` and `docs/v0.md`.
 This doc exists so you can be productive without reading either one
 first.
@@ -16,12 +16,12 @@ to the spec for the full version where it makes sense.
 
 No web UI in v0. The surfaces are:
 
-- **CLI**: `wayline tokens|seed|rebuild|migrate|api|mcp|healthcheck`.
+- **CLI**: `meristem tokens|seed|rebuild|migrate|api|mcp|healthcheck`.
 - **HTTP REST**: the `/v1/...` endpoints (see `internal/api/server.go`
   for the full list).
 - **MCP over stdio**: for Cursor, Claude Code, or any agent that speaks
   MCP. Each agent gets its own token row.
-- **Go SDK**: a tiny client at `pkg/wayline` for `POST /v1/signals`.
+- **Go SDK**: a tiny client at `pkg/meristem` for `POST /v1/signals`.
 
 Day-to-day the "UI" is `curl | jq`, an iPhone Shortcut you'd build, your
 editor's MCP integration, or a shell function. A web UI is a future
@@ -42,7 +42,7 @@ Three things, in order:
    wrote.
 3. They sit there as your audit log. You can query them directly
    (`SELECT * FROM events WHERE subject_id = ?`), replay them via
-   `wayline rebuild`, or use them to investigate "how did this thing
+   `meristem rebuild`, or use them to investigate "how did this thing
    get here?"
 
 What events do **not** do: trigger side effects. There's no event bus,
@@ -78,8 +78,8 @@ Three distinct layers; they answer different questions.
   already get recorded?" Every event id is
   `uuid(sha256(subject_kind:subject_id:kind:canonical_payload))[:16]`.
   Replays just hit a PK conflict and become no-ops. That's why
-  `wayline seed v1` re-running 5 times still produces 18 work_items
-  (not 90), and why `wayline rebuild` can fold the whole log into a
+  `meristem seed v1` re-running 5 times still produces 18 work_items
+  (not 90), and why `meristem rebuild` can fold the whole log into a
   sandbox without ghost rows.
 
 ## Should the DAG reject cycles? Isn't a fail-retry a kind of cycle?
@@ -112,13 +112,13 @@ this confusing.
 
 So every "state" table is a projection of `events`. The event log is
 the source of truth; state tables are caches the projectors maintain.
-`wayline rebuild` proves this by dropping the projections into a
+`meristem rebuild` proves this by dropping the projections into a
 sandbox schema, replaying every event, and content-hashing the rebuilt
 tables against the live ones — they have to match.
 
 Why this matters in practice:
 
-- **"Is the state correct?"** → run `wayline rebuild`. Mismatches mean
+- **"Is the state correct?"** → run `meristem rebuild`. Mismatches mean
   a projector has a bug; the events themselves are still authoritative.
 - **"Can I add a new view?"** → write a new projector, drop the table,
   replay. The data is already in events. No migration that has to

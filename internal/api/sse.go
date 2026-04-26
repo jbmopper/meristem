@@ -32,7 +32,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jbmopper/wayline/internal/feed"
+	"github.com/jbmopper/meristem/internal/feed"
 )
 
 const (

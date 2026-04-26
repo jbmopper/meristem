@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/jbmopper/wayline/internal/domain"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // TestSignalReceivedIsFeedVisible is the headline test for the

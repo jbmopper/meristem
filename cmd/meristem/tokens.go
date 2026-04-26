@@ -13,10 +13,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/internal/app"
-	"github.com/jbmopper/wayline/internal/auth"
-	"github.com/jbmopper/wayline/internal/domain"
-	"github.com/jbmopper/wayline/internal/storage"
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/storage"
 )
 
 func runTokens(ctx context.Context, logger *slog.Logger, args []string) error {
@@ -75,13 +75,13 @@ func runTokensCreate(ctx context.Context, service *auth.Service, args []string) 
 	}
 
 	// Root bootstrap intentionally has no actor. Non-root creation requires a
-	// valid root bearer in WAYLINE_TOKEN so the token.created event is
+	// valid root bearer in MERISTEM_TOKEN so the token.created event is
 	// attributed to the root token.
 	var actorPtr *domain.Token
 	if !*root {
-		secret := os.Getenv("WAYLINE_TOKEN")
+		secret := os.Getenv("MERISTEM_TOKEN")
 		if secret == "" {
-			return fmt.Errorf("tokens create: WAYLINE_TOKEN with a root bearer is required")
+			return fmt.Errorf("tokens create: MERISTEM_TOKEN with a root bearer is required")
 		}
 		tok, err := service.Authenticate(ctx, secret)
 		if err != nil {
@@ -105,7 +105,7 @@ func runTokensCreate(ctx context.Context, service *auth.Service, args []string) 
 		return err
 	}
 	fmt.Printf("id=%s\nname=%s\nroot=%t\nsource=%s\nsecret=%s\n", result.Token.ID, result.Token.Name, result.Token.IsRoot, result.Token.Source, result.Secret)
-	fmt.Fprintln(os.Stderr, "Store the secret now; wayline only stores its hash.")
+	fmt.Fprintln(os.Stderr, "Store the secret now; meristem only stores its hash.")
 	return nil
 }
 
@@ -138,9 +138,9 @@ func runTokensRevoke(ctx context.Context, service *auth.Service, args []string) 
 	if err != nil {
 		return err
 	}
-	secret := os.Getenv("WAYLINE_TOKEN")
+	secret := os.Getenv("MERISTEM_TOKEN")
 	if secret == "" {
-		return fmt.Errorf("tokens revoke: WAYLINE_TOKEN is required")
+		return fmt.Errorf("tokens revoke: MERISTEM_TOKEN is required")
 	}
 	actor, err := service.Authenticate(ctx, secret)
 	if err != nil {
@@ -173,10 +173,10 @@ func splitCSV(value string) []string {
 
 func tokensUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  wayline tokens create --root [--replace] [--name root] [--source human]
-  WAYLINE_TOKEN=wln_... wayline tokens create --name iphone [--source human] [--scopes a,b]
-  WAYLINE_TOKEN=wln_... wayline tokens create --name cursor [--source agent] [--scopes a,b]
-  wayline tokens list
-  WAYLINE_TOKEN=wln_... wayline tokens revoke --id <uuid>
+  meristem tokens create --root [--replace] [--name root] [--source human]
+  MERISTEM_TOKEN=mrs_... meristem tokens create --name iphone [--source human] [--scopes a,b]
+  MERISTEM_TOKEN=mrs_... meristem tokens create --name cursor [--source agent] [--scopes a,b]
+  meristem tokens list
+  MERISTEM_TOKEN=mrs_... meristem tokens revoke --id <uuid>
 `)
 }

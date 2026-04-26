@@ -1,39 +1,39 @@
-# wayline
+# meristem
 
 A portable, editor-agnostic, single-operator coordination plane.
 
-The owner gives directions in any form. `wayline` normalizes them into a graph of work items, coordinates humans and agents, brokers actions into external systems, and drives every work item to a terminal state without further intervention beyond approvals.
+The owner gives directions in any form. `meristem` normalizes them into a graph of work items, coordinates humans and agents, brokers actions into external systems, and drives every work item to a terminal state without further intervention beyond approvals.
 
-`wayline` itself stays light and always-on; heavy compute and inference happen in the systems it orchestrates.
+`meristem` itself stays light and always-on; heavy compute and inference happen in the systems it orchestrates.
 
 ## Status
 
-v0 in development. Once v0 is up, all further work is tracked as `work_item`s in `wayline` itself.
+v0 in development. Once v0 is up, all further work is tracked as `work_item`s in `meristem` itself.
 
 Currently shipped:
 
-- `wayline migrate` — apply embedded Postgres migrations.
-- `wayline api` — HTTP server with health/readiness plus v0 inbox, signals, feed, and work-item routes.
-- `wayline tokens {create, list, revoke}` — bearer token lifecycle.
-- `wayline mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface.
-- `wayline seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
-- `wayline healthcheck` — `/readyz` probe binary, used by the `wayline` container's HEALTHCHECK directive (the runtime image is distroless, so the probe ships as a subcommand).
+- `meristem migrate` — apply embedded Postgres migrations.
+- `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, and work-item routes.
+- `meristem tokens {create, list, revoke}` — bearer token lifecycle.
+- `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface.
+- `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
+- `meristem healthcheck` — `/readyz` probe binary, used by the `meristem` container's HEALTHCHECK directive (the runtime image is distroless, so the probe ships as a subcommand).
 - v0 schema baseline (`tokens`, `work_items`, `work_item_relations`, `messages`, `message_parts`, `events`, `idempotency_keys`, `signals`).
 - `Dockerfile` + `docker-compose.yml` profiles for in-container deploys, plus a Caddy-based TLS topology.
-- `pkg/wayline` — minimal Go client for `POST /v1/signals` (handles bearer auth, idempotency-key generation, replay detection, and structured error decoding).
+- `pkg/meristem` — minimal Go client for `POST /v1/signals` (handles bearer auth, idempotency-key generation, replay detection, and structured error decoding).
 
 ## Spec
 
-The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/wayline.work_spec.v1.json`](docs/schemas/wayline.work_spec.v1.json).
+The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
 
 ## Layout
 
 ```text
-cmd/wayline/       binary entry point
+cmd/meristem/       binary entry point
 internal/api/      HTTP surface
 internal/mcp/      MCP server (JSON-RPC over stdio)
 internal/storage/  Postgres pool and migration runner
-pkg/wayline/       public Go client SDK (importable by external projects)
+pkg/meristem/       public Go client SDK (importable by external projects)
 migrations/        SQL migrations (embedded into the binary)
 deploy/            reverse-proxy / TLS configuration (Caddy)
 examples/          worked client examples (curl)
@@ -49,19 +49,19 @@ One-shot bootstrap on the host. Requires Go 1.25+, Docker, and a POSIX shell.
 scripts/bootstrap.sh
 ```
 
-The script is idempotent at every step: it brings up the Postgres container, applies migrations, mints a root token if none exists (writing the secret to `.wayline/root.token`, mode 0600), and prints the next commands you might want to run. Re-running it is safe.
+The script is idempotent at every step: it brings up the Postgres container, applies migrations, mints a root token if none exists (writing the secret to `.meristem/root.token`, mode 0600), and prints the next commands you might want to run. Re-running it is safe.
 
 After bootstrap, start the API and post a signal:
 
 ```bash
-WAYLINE_DATABASE_URL='postgres://wayline:wayline@localhost:5432/wayline?sslmode=disable' \
-  go run ./cmd/wayline api &
+MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+  go run ./cmd/meristem api &
 
-WAYLINE_TOKEN=$(cat .wayline/root.token) \
-  go run ./cmd/wayline tokens create --name example --source agent
-# -> prints id=, name=, secret=wln_...
+MERISTEM_TOKEN=$(cat .meristem/root.token) \
+  go run ./cmd/meristem tokens create --name example --source agent
+# -> prints id=, name=, secret=mrs_...
 
-WAYLINE_TOKEN=wln_... examples/curl-signal.sh
+MERISTEM_TOKEN=mrs_... examples/curl-signal.sh
 # -> 201 Created with the signal envelope; re-run for an idempotency replay.
 ```
 
@@ -69,16 +69,16 @@ WAYLINE_TOKEN=wln_... examples/curl-signal.sh
 
 ### Host: `go run` against containerized Postgres (default)
 
-Fastest iteration loop. The wayline binary runs from your shell, only Postgres lives in Docker.
+Fastest iteration loop. The meristem binary runs from your shell, only Postgres lives in Docker.
 
 ```bash
 docker compose up -d postgres
 cp .env.example .env
 export $(grep -v '^#' .env | xargs)
 
-go run ./cmd/wayline migrate
-go run ./cmd/wayline tokens create --root          # one-time
-go run ./cmd/wayline api
+go run ./cmd/meristem migrate
+go run ./cmd/meristem tokens create --root          # one-time
+go run ./cmd/meristem api
 ```
 
 In another shell:
@@ -91,112 +91,144 @@ curl -s http://localhost:8080/readyz    # readiness, pings Postgres
 To roll back the most recently applied migration (development only):
 
 ```bash
-go run ./cmd/wayline migrate down
+go run ./cmd/meristem migrate down
 ```
 
-### Container: `wayline` in Docker (compose profile `app`)
+### Container: `meristem` in Docker (compose profile `app`)
 
-Use this when another project on the same host needs a stable, always-on endpoint. Builds the wayline image from the local source and runs `wayline migrate` once as an init container before bringing up the api.
+Use this when another project on the same host needs a stable, always-on endpoint. Builds the meristem image from the local source and runs `meristem migrate` once as an init container before bringing up the api.
+
+If you have an **older** local compose volume from before the Postgres role/database were renamed, drop the old named volume (for example `wayline-pgdata` or `maristem-pgdata`) or `docker volume prune` the stale data so Postgres re-initializes with the `meristem` user and database from `docker-compose.yml`.
 
 ```bash
 docker compose --profile app up -d
-docker compose run --rm wayline tokens create --root --name root
+docker compose run --rm meristem tokens create --root --name root
 # -> copy the printed secret somewhere safe; this is the only time it is shown.
 ```
 
 The api is then reachable at `http://127.0.0.1:8080`. Logs:
 
 ```bash
-docker compose logs -f wayline
+docker compose logs -f meristem
 ```
 
-### Production: `wayline` behind Caddy (compose profile `production`)
+### Production: `meristem` behind Caddy (compose profile `production`)
 
-Adds TLS termination via Caddy. Caddy fetches a Let's Encrypt certificate for `WAYLINE_HOSTNAME` on first start and renews it automatically.
+Adds TLS termination via Caddy. Caddy fetches a Let's Encrypt certificate for `MERISTEM_HOSTNAME` on first start and renews it automatically.
 
 ```bash
-WAYLINE_HOSTNAME=wayline.example.com \
+MERISTEM_HOSTNAME=meristem.example.com \
   docker compose --profile production up -d
 ```
 
-The Caddyfile lives at [`deploy/Caddyfile`](deploy/Caddyfile); edit in place to add additional sites or tighter security headers. Postgres remains bound to loopback inside the compose network; the only public-facing ports are 80 (Caddy ACME challenge + redirect) and 443 (wayline).
+The Caddyfile lives at [`deploy/Caddyfile`](deploy/Caddyfile); edit in place to add additional sites or tighter security headers. Postgres remains bound to loopback inside the compose network; the only public-facing ports are 80 (Caddy ACME challenge + redirect) and 443 (meristem).
 
 ## Integration smoke test
 
-The canonical "did the deploy work?" smoke test for any integrator (jay, ns_obv, clinical-demo, your-project) is in [`examples/curl-signal.sh`](examples/curl-signal.sh). It posts a real `wayline.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both the HTTP-level idempotency replay and the semantic dedupe behavior.
+The canonical "did the deploy work?" smoke test for any integrator (jay, ns_obv, clinical-demo, your-project) is in [`examples/curl-signal.sh`](examples/curl-signal.sh). It posts a real `meristem.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both the HTTP-level idempotency replay and the semantic dedupe behavior.
 
 ```bash
-WAYLINE_TOKEN=wln_... examples/curl-signal.sh        # 201, work_item created
-WAYLINE_TOKEN=wln_... examples/curl-signal.sh        # 201 + Idempotency-Replayed: true
-WAYLINE_IDEMPOTENCY_KEY=$(uuidgen) \
-  WAYLINE_TOKEN=wln_... examples/curl-signal.sh      # 201, links to existing work_item via dedupe_key
+MERISTEM_TOKEN=mrs_... examples/curl-signal.sh        # 201, work_item created
+MERISTEM_TOKEN=mrs_... examples/curl-signal.sh        # 201 + Idempotency-Replayed: true
+MERISTEM_IDEMPOTENCY_KEY=$(uuidgen) \
+  MERISTEM_TOKEN=mrs_... examples/curl-signal.sh      # 201, links to existing work_item via dedupe_key
 ```
 
 ## Go client
 
-Go projects can import [`pkg/wayline`](pkg/wayline) instead of hand-rolling the bearer + idempotency-key + JSON dance:
+Go projects can import [`pkg/meristem`](pkg/meristem) instead of hand-rolling the bearer + idempotency-key + JSON dance:
 
 ```bash
-go get github.com/jbmopper/wayline/pkg/wayline
+go get github.com/jbmopper/meristem/pkg/meristem
 ```
 
 ```go
-import "github.com/jbmopper/wayline/pkg/wayline"
+import "github.com/jbmopper/meristem/pkg/meristem"
 
-client, err := wayline.New(wayline.Config{
-    BaseURL: "https://wayline.example.com",
-    Token:   os.Getenv("WAYLINE_TOKEN"),
+client, err := meristem.New(meristem.Config{
+    BaseURL: "https://meristem.example.com",
+    Token:   os.Getenv("MERISTEM_TOKEN"),
 })
 if err != nil { log.Fatal(err) }
 
-resp, err := client.PostSignal(ctx, wayline.SignalRequest{
+resp, err := client.PostSignal(ctx, meristem.SignalRequest{
     Kind:      "human_request",
     DedupeKey: "your-app:retry-budget:001",
-    Source:    wayline.SignalSource{Kind: "system_event", Identifier: "your-app:job:42"},
+    Source:    meristem.SignalSource{Kind: "system_event", Identifier: "your-app:job:42"},
     WorkSpec:  workSpecJSON,
-}, wayline.WithIdempotencyKey("import-001"))
+}, meristem.WithIdempotencyKey("import-001"))
 if err != nil {
-    var apiErr *wayline.APIError
+    var apiErr *meristem.APIError
     if errors.As(err, &apiErr) {
-        log.Fatalf("wayline rejected: %s (HTTP %d)", apiErr.Code, apiErr.StatusCode)
+        log.Fatalf("meristem rejected: %s (HTTP %d)", apiErr.Code, apiErr.StatusCode)
     }
     log.Fatal(err)
 }
 log.Printf("work_item=%s replayed=%v", resp.WorkItem.ID, resp.Replayed)
 ```
 
-The client is intentionally thin: it does not validate `WorkSpec` against [`docs/schemas/wayline.work_spec.v1.json`](docs/schemas/wayline.work_spec.v1.json). The server is the single source of truth for that contract; the client transports bytes and surfaces the structured error envelope when validation fails.
+The client is intentionally thin: it does not validate `WorkSpec` against [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json). The server is the single source of truth for that contract; the client transports bytes and surfaces the structured error envelope when validation fails.
 
 ## Tests
 
 The default test suite is unit-level and does not require Postgres:
 
 ```bash
-GOCACHE=/tmp/wayline-go-cache go test ./...
+GOCACHE=/tmp/meristem-go-cache go test ./...
 ```
 
-Postgres integration tests are opt-in. They create a temporary database on the same server as `WAYLINE_DATABASE_URL`, apply migrations, exercise the HTTP API through `httptest`, then drop the temporary database.
+Postgres integration tests are opt-in. They create a temporary database on the same server as `MERISTEM_DATABASE_URL`, apply migrations, exercise the HTTP API through `httptest`, then drop the temporary database.
 
 ```bash
 docker compose up -d postgres
-export WAYLINE_DATABASE_URL='postgres://wayline:wayline@localhost:5432/wayline?sslmode=disable'
-WAYLINE_INTEGRATION=1 GOCACHE=/tmp/wayline-go-cache \
+export MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable'
+MERISTEM_INTEGRATION=1 GOCACHE=/tmp/meristem-go-cache \
   go test ./internal/api -run TestSignalsEndpointIntegration -count=1 -v
 ```
 
-Use `WAYLINE_TEST_DATABASE_URL` instead of `WAYLINE_DATABASE_URL` if you want integration tests to target a different Postgres server.
+Use `MERISTEM_TEST_DATABASE_URL` instead of `MERISTEM_DATABASE_URL` if you want integration tests to target a different Postgres server.
 
 ## Configuration
 
 | Variable                    | Required | Default | Notes                                                              |
 |-----------------------------|----------|---------|--------------------------------------------------------------------|
-| `WAYLINE_DATABASE_URL`      | yes      | —       | Postgres DSN.                                                      |
-| `WAYLINE_HTTP_ADDR`         | no       | `:8080` | Listen address for `wayline api`.                                  |
-| `WAYLINE_TOKEN`             | varies   | —       | Bearer token used by `wayline tokens` (non-root ops) and `wayline mcp`. |
-| `WAYLINE_HOSTNAME`          | no       | —       | Hostname Caddy issues a Let's Encrypt cert for (production profile only). |
-| `WAYLINE_VERSION`           | no       | `dev`   | Version string baked into the docker image and `wayline version`.  |
-| `WAYLINE_BIN`               | no       | `go run ./cmd/wayline` | Override the binary used by `scripts/bootstrap.sh`. |
-| `WAYLINE_INTEGRATION`       | no       | —       | Set to `1` to run opt-in integration tests.                        |
-| `WAYLINE_TEST_DATABASE_URL` | no       | —       | Optional Postgres DSN just for integration tests.                  |
+| `MERISTEM_DATABASE_URL`      | yes      | —       | Postgres DSN.                                                      |
+| `MERISTEM_HTTP_ADDR`         | no       | `:8080` | Listen address for `meristem api`.                                  |
+| `MERISTEM_TOKEN`             | varies   | —       | Bearer token used by `meristem tokens` (non-root ops) and `meristem mcp`. |
+| `MERISTEM_HOSTNAME`          | no       | —       | Hostname Caddy issues a Let's Encrypt cert for (production profile only). |
+| `MERISTEM_VERSION`           | no       | `dev`   | Version string baked into the docker image and `meristem version`.  |
+| `MERISTEM_BIN`               | no       | `go run ./cmd/meristem` | Override the binary used by `scripts/bootstrap.sh`. |
+| `MERISTEM_INTEGRATION`       | no       | —       | Set to `1` to run opt-in integration tests.                        |
+| `MERISTEM_TEST_DATABASE_URL` | no       | —       | Optional Postgres DSN just for integration tests.                  |
 
 Production secrets live in the host cloud's KMS. v1 wraps per-connection credentials with envelope encryption; v0 reads them from the environment.
+
+## GitHub repository
+
+The Go module path is `github.com/jbmopper/meristem`. The Git remote should match (e.g. `https://github.com/jbmopper/meristem.git`).
+
+**Publish to a new empty repository** (after you create `jbmopper/meristem` on GitHub with no README/license, or use a different owner/name and adjust the URL):
+
+```bash
+# Option A — point `origin` at the new repo only (replaces wayline as default push target)
+git remote set-url origin https://github.com/jbmopper/meristem.git
+git push -u origin main
+# add other branches/tags as needed
+```
+
+**Keep the old repo as a second remote** (duplicate / mirror until you archive `wayline`):
+
+```bash
+git remote rename origin wayline
+git remote add origin https://github.com/jbmopper/meristem.git
+git push -u origin main
+# push updates to both: git push wayline main && git push origin main
+```
+
+**Rename the local clone** (optional; do this with the IDE closed, or reopen the folder after):
+
+```bash
+cd /path/to/Dev && mv wayline meristem && cd meristem
+```
+
+On GitHub you can **archive** `jbmopper/wayline` or leave it with a note redirecting to `meristem` once clients have switched imports and remotes.

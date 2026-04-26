@@ -1,4 +1,4 @@
-package wayline_test
+package meristem_test
 
 import (
 	"context"
@@ -12,17 +12,17 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/wayline/pkg/wayline"
+	"github.com/jbmopper/meristem/pkg/meristem"
 )
 
 func TestNewValidatesConfig(t *testing.T) {
-	if _, err := wayline.New(wayline.Config{Token: "t"}); !errors.Is(err, wayline.ErrBaseURLRequired) {
+	if _, err := meristem.New(meristem.Config{Token: "t"}); !errors.Is(err, meristem.ErrBaseURLRequired) {
 		t.Fatalf("missing BaseURL: got %v want ErrBaseURLRequired", err)
 	}
-	if _, err := wayline.New(wayline.Config{BaseURL: "https://x"}); !errors.Is(err, wayline.ErrTokenRequired) {
+	if _, err := meristem.New(meristem.Config{BaseURL: "https://x"}); !errors.Is(err, meristem.ErrTokenRequired) {
 		t.Fatalf("missing Token: got %v want ErrTokenRequired", err)
 	}
-	if _, err := wayline.New(wayline.Config{BaseURL: "https://x", Token: "t"}); err != nil {
+	if _, err := meristem.New(meristem.Config{BaseURL: "https://x", Token: "t"}); err != nil {
 		t.Fatalf("valid config returned err: %v", err)
 	}
 }
@@ -83,25 +83,25 @@ func TestPostSignalHappyPath(t *testing.T) {
 		})
 	})
 
-	c, err := wayline.New(wayline.Config{
+	c, err := meristem.New(meristem.Config{
 		BaseURL:    fs.srv.URL + "/", // trailing slash should be trimmed
-		Token:      "wln_test",
+		Token:      "mrs_test",
 		HTTPClient: fs.srv.Client(),
-		UserAgent:  "wayline-test/1.0",
+		UserAgent:  "meristem-test/1.0",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	resp, err := c.PostSignal(context.Background(), wayline.SignalRequest{
+	resp, err := c.PostSignal(context.Background(), meristem.SignalRequest{
 		Kind:      "human_request",
 		DedupeKey: "k",
-		Source: wayline.SignalSource{
+		Source: meristem.SignalSource{
 			Kind:       "system_event",
 			Identifier: "id",
 		},
 		WorkSpec: json.RawMessage(`{"hello":"world"}`),
-	}, wayline.WithIdempotencyKey("client-pinned"))
+	}, meristem.WithIdempotencyKey("client-pinned"))
 	if err != nil {
 		t.Fatalf("PostSignal: %v", err)
 	}
@@ -140,8 +140,8 @@ func TestPostSignalHappyPath(t *testing.T) {
 	if got.path != "/v1/signals" {
 		t.Errorf("path = %q; want /v1/signals", got.path)
 	}
-	if got.headers.Get("Authorization") != "Bearer wln_test" {
-		t.Errorf("Authorization = %q; want Bearer wln_test", got.headers.Get("Authorization"))
+	if got.headers.Get("Authorization") != "Bearer mrs_test" {
+		t.Errorf("Authorization = %q; want Bearer mrs_test", got.headers.Get("Authorization"))
 	}
 	if got.headers.Get("Idempotency-Key") != "client-pinned" {
 		t.Errorf("Idempotency-Key = %q; want client-pinned", got.headers.Get("Idempotency-Key"))
@@ -149,8 +149,8 @@ func TestPostSignalHappyPath(t *testing.T) {
 	if got.headers.Get("Content-Type") != "application/json" {
 		t.Errorf("Content-Type = %q; want application/json", got.headers.Get("Content-Type"))
 	}
-	if got.headers.Get("User-Agent") != "wayline-test/1.0" {
-		t.Errorf("User-Agent = %q; want wayline-test/1.0", got.headers.Get("User-Agent"))
+	if got.headers.Get("User-Agent") != "meristem-test/1.0" {
+		t.Errorf("User-Agent = %q; want meristem-test/1.0", got.headers.Get("User-Agent"))
 	}
 
 	// Body round-trip: the WorkSpec rawmessage made it through verbatim.
@@ -171,15 +171,15 @@ func TestPostSignalAutoGeneratesIdempotencyKey(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	})
 
-	c, err := wayline.New(wayline.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
+	c, err := meristem.New(meristem.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	if _, err := c.PostSignal(context.Background(), wayline.SignalRequest{}); err != nil {
+	if _, err := c.PostSignal(context.Background(), meristem.SignalRequest{}); err != nil {
 		t.Fatalf("PostSignal: %v", err)
 	}
-	if _, err := c.PostSignal(context.Background(), wayline.SignalRequest{}); err != nil {
+	if _, err := c.PostSignal(context.Background(), meristem.SignalRequest{}); err != nil {
 		t.Fatalf("PostSignal #2: %v", err)
 	}
 
@@ -206,11 +206,11 @@ func TestPostSignalSurfacesReplayHeader(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	})
 
-	c, err := wayline.New(wayline.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
+	c, err := meristem.New(meristem.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	resp, err := c.PostSignal(context.Background(), wayline.SignalRequest{})
+	resp, err := c.PostSignal(context.Background(), meristem.SignalRequest{})
 	if err != nil {
 		t.Fatalf("PostSignal: %v", err)
 	}
@@ -226,15 +226,15 @@ func TestPostSignalDecodesAPIError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"code":"work_spec_invalid","message":"missing acceptance_criteria"}}`))
 	})
 
-	c, err := wayline.New(wayline.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
+	c, err := meristem.New(meristem.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = c.PostSignal(context.Background(), wayline.SignalRequest{})
+	_, err = c.PostSignal(context.Background(), meristem.SignalRequest{})
 	if err == nil {
 		t.Fatal("PostSignal returned nil err on 400")
 	}
-	var apiErr *wayline.APIError
+	var apiErr *meristem.APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("err is not *APIError: %v (%T)", err, err)
 	}
@@ -249,10 +249,10 @@ func TestPostSignalDecodesAPIError(t *testing.T) {
 	}
 
 	// errors.Is matches on Code.
-	if !errors.Is(err, &wayline.APIError{Code: "work_spec_invalid"}) {
+	if !errors.Is(err, &meristem.APIError{Code: "work_spec_invalid"}) {
 		t.Error("errors.Is on Code did not match")
 	}
-	if errors.Is(err, &wayline.APIError{Code: "other"}) {
+	if errors.Is(err, &meristem.APIError{Code: "other"}) {
 		t.Error("errors.Is matched the wrong code")
 	}
 }
@@ -263,15 +263,15 @@ func TestPostSignalAPIErrorWithoutEnvelope(t *testing.T) {
 		_, _ = w.Write([]byte("upstream timeout\n"))
 	})
 
-	c, err := wayline.New(wayline.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
+	c, err := meristem.New(meristem.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = c.PostSignal(context.Background(), wayline.SignalRequest{})
+	_, err = c.PostSignal(context.Background(), meristem.SignalRequest{})
 	if err == nil {
 		t.Fatal("PostSignal returned nil err on 502")
 	}
-	var apiErr *wayline.APIError
+	var apiErr *meristem.APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("err is not *APIError: %v", err)
 	}
@@ -292,13 +292,13 @@ func TestPostSignalRespectsContextCancellation(t *testing.T) {
 		<-r.Context().Done()
 	})
 
-	c, err := wayline.New(wayline.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
+	c, err := meristem.New(meristem.Config{BaseURL: fs.srv.URL, Token: "t", HTTPClient: fs.srv.Client()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = c.PostSignal(ctx, wayline.SignalRequest{})
+	_, err = c.PostSignal(ctx, meristem.SignalRequest{})
 	if err == nil {
 		t.Fatal("PostSignal succeeded against canceled context")
 	}

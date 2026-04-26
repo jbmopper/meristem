@@ -1,7 +1,7 @@
-# Operator-local state. .wayline/ holds the bootstrap-minted root and
+# Operator-local state. .meristem/ holds the bootstrap-minted root and
 # seed token secrets (and any agent tokens minted from this host); the
 # files are mode 0600 on disk and must never reach a remote repo.
-.wayline/
+.meristem/
 
 # Per-host config. .env.example is the public template (committed);
 # .env and .env.<profile> are local secrets.
@@ -25,8 +25,8 @@ terminals/
 *.test
 *.out
 coverage.*
-/wayline
-/cmd/wayline/wayline
+/meristem
+/cmd/meristem/meristem
 
 # Local snapshot binaries we sometimes drop in /tmp during dev are not
 # in-tree, but if a developer builds at the repo root they should not

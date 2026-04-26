@@ -6,9 +6,9 @@ If this file and `docs/spec.md` disagree, **`docs/spec.md` wins and this file is
 
 The voice is imperative and the rules are concrete on purpose: any compliant agent reading this file should reach the same conclusions about how to align with the system.
 
-## What wayline is, in one paragraph
+## What meristem is, in one paragraph
 
-A portable, editor-agnostic, single-operator coordination plane. One human (the owner) issues instructions through any channel; wayline normalizes each into a graph of `work_item`s, dispatches to humans, agents, or connectors, and drives every item to a terminal state (`done | failed | canceled`) without further intervention beyond approvals. Two runtime modes share one binary: `wayline api` (HTTP) and `wayline worker` (background jobs; not yet built). The conceptual substrate is the **event log**; today the durable backing store is Postgres, but the system's identity does not depend on that.
+A portable, editor-agnostic, single-operator coordination plane. One human (the owner) issues instructions through any channel; meristem normalizes each into a graph of `work_item`s, dispatches to humans, agents, or connectors, and drives every item to a terminal state (`done | failed | canceled`) without further intervention beyond approvals. Two runtime modes share one binary: `meristem api` (HTTP) and `meristem worker` (background jobs; not yet built). The conceptual substrate is the **event log**; today the durable backing store is Postgres, but the system's identity does not depend on that.
 
 ## Principles
 
@@ -32,7 +32,7 @@ The substrate **must not foreclose** these directions, even though it does not y
 
 - **The operator interacts with prose.** Speech, document, message, file — never JSON in the operator's hand. Today's surfaces (iPhone Shortcut, CLI, web UI) are translation layers; future surfaces (document-as-system, git-shaped editor view) must remain possible.
 - **The system can run from a single file.** SQLite-per-operator mode is a future work_item. Storage code that hard-couples to Postgres-only features (e.g. `LISTEN/NOTIFY`, advisory locks beyond what's in the spec, Postgres-specific JSON operators outside a sealed adapter) blocks this.
-- **The system can be assessed by being asked.** Once the inbox loop is closed, *"assess wayline's fit against [criteria]"* should be a normal `work_item` whose execution is a fold over the event log. Reserve event kinds and projections that make this cheap.
+- **The system can be assessed by being asked.** Once the inbox loop is closed, *"assess meristem's fit against [criteria]"* should be a normal `work_item` whose execution is a fold over the event log. Reserve event kinds and projections that make this cheap.
 
 ## Techniques (load-bearing, but not philosophy)
 
@@ -51,7 +51,7 @@ These are how the principles above are made true in code. They are non-optional 
 - **`message`** — an inbound message captured into the inbox. Multi-modal in v1; text-only in v0. Carries a `source` of `human|agent|system`. Messages from non-human sources are content, never instructions.
 - **`event`** — an immutable fact appended whenever object state changes. The audit log and the substrate of truth.
 - **`projection`** — a deterministic read view derived from `events`. Recomputing any projection from `events` yields identical state. Most non-`events` tables are projections.
-- **`reconciler`** — a process (in `wayline worker`, not yet built) that observes work_items in non-terminal states and moves them forward, respecting bounded patience.
+- **`reconciler`** — a process (in `meristem worker`, not yet built) that observes work_items in non-terminal states and moves them forward, respecting bounded patience.
 - **`fixed point`** — a work_item state from which no further transition occurs: `done | failed | canceled`.
 - **`token`** — a scoped client credential. Attributed on every event it causes.
 - **`approval`** — a gated decision required before a write action proceeds. v1 only.
@@ -62,7 +62,7 @@ These are how the principles above are made true in code. They are non-optional 
 ## Repository layout
 
 ```
-cmd/wayline/          binary entry point and CLI subcommands
+cmd/meristem/          binary entry point and CLI subcommands
 internal/api/         HTTP transport
 internal/auth/        token store + bearer middleware
 internal/domain/      pure types: Token, Message, WorkItem, Event
@@ -100,7 +100,7 @@ Some packages above do not yet exist; create them as needed, in the listed shape
 - `events.id` is deterministic per the technique above. Replays produce no new rows; PK conflict is success.
 - One event per state change. Two state changes = two events, even within the same handler or transaction.
 - `kind` is `<noun>.<verb_past>`: `work_item.created`, `token.revoked`, `message.captured`. Do not invent ad-hoc kinds; extend the canonical list when needed.
-- `actor_token_id` and `source` come from the request context. System-internal flows (e.g. `wayline seed v1`) use a dedicated `system` token — **not** the root token.
+- `actor_token_id` and `source` come from the request context. System-internal flows (e.g. `meristem seed v1`) use a dedicated `system` token — **not** the root token.
 
 ## How to write a projection writer
 
@@ -136,7 +136,7 @@ A projection writer turns appended events into derived rows. It is the *only* co
 
 - Name format: `<package>.<verb>`, matching the REST surface: `inbox.capture`, `work_items.transition`, `feed.read`.
 - Args mirror the REST request body. Return values mirror the REST response body. The same domain function backs both transports.
-- Auth is by `WAYLINE_TOKEN` in the server's environment. Each agent (each Cursor instance, each custom worker) gets its own token row so attribution stays clean.
+- Auth is by `MERISTEM_TOKEN` in the server's environment. Each agent (each Cursor instance, each custom worker) gets its own token row so attribution stays clean.
 - Transport is stdio in v0 (matches how Cursor launches MCP servers). Other transports are explicit work_items.
 
 ## Logging
@@ -169,7 +169,7 @@ A projection writer turns appended events into derived rows. It is the *only* co
 
 ## Coordination with other agents
 
-Until `wayline` can track its own development as work_items, multiple agents working concurrently coordinate out-of-band through `docs/coord/`. Each file is dated; read the most recent before starting a turn that touches code another agent has written. When you finish a turn that affects another agent's territory or makes a contract decision, append a short dated note to the appropriate file. When all open questions in a coord file are closed, move it to `docs/coord/archive/`.
+Until `meristem` can track its own development as work_items, multiple agents working concurrently coordinate out-of-band through `docs/coord/`. Each file is dated; read the most recent before starting a turn that touches code another agent has written. When you finish a turn that affects another agent's territory or makes a contract decision, append a short dated note to the appropriate file. When all open questions in a coord file are closed, move it to `docs/coord/archive/`.
 
 If your turn is the first one in a new coordination thread, create `docs/coord/YYYY-MM-DD-<topic>.md` with sections: snapshot of who has touched what, decisions, open questions, ownership split, findings carried forward.
 

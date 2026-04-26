@@ -1,6 +1,6 @@
 # Signals
 
-Signals are wayline's bridge from non-human structured input — review findings, repairable runtime failures, webhook reports — into the work-item graph. They are the canonical answer to "how does my CI / my linter / my critic agent / my external monitor get something into wayline without pretending to be a human."
+Signals are meristem's bridge from non-human structured input — review findings, repairable runtime failures, webhook reports — into the work-item graph. They are the canonical answer to "how does my CI / my linter / my critic agent / my external monitor get something into meristem without pretending to be a human."
 
 This document is the contract. It is the source of truth for client implementers. If it conflicts with `docs/spec.md`, that file wins; if it conflicts with `AGENTS.md`, raise the drift.
 
@@ -45,7 +45,7 @@ Auth: any non-revoked client token.
 
 Headers:
 
-- `Authorization: Bearer wln_…` (required)
+- `Authorization: Bearer mrs_…` (required)
 - `Idempotency-Key: …` (required; per `docs/spec.md` every POST requires one)
 - `Content-Type: application/json; charset=utf-8`
 
@@ -61,7 +61,7 @@ Request body:
     "external_ref": "logs/system_events.jsonl#L4291"
   },
   "work_spec": {
-    "schema_version": "wayline.work_spec.v1",
+    "schema_version": "meristem.work_spec.v1",
     "kind": "repair",
     "title": "Worker retry budget is exhausted too early",
     "priority": "P1",
@@ -87,7 +87,7 @@ Field rules:
 - `kind` (required): one of `review_finding`, `repairable_failure`, `webhook`, `manual`, or any other string the source defines. Reservation is non-exclusive in v1.
 - `dedupe_key` (optional but strongly recommended): if present, two signals with the same value link to the same live work_item. If the latest matching work_item is terminal (`done`, `failed`, or `canceled`), the next signal is treated as a recurrence and creates a fresh work_item. If absent, every signal creates a fresh work_item.
 - `source` (optional): origin metadata. Required when known so audits can reconstruct provenance.
-- `work_spec` (required): the proposed work, conforming to `docs/schemas/wayline.work_spec.v1.json`. The handler validates against the schema and rejects with `400` on failure.
+- `work_spec` (required): the proposed work, conforming to `docs/schemas/meristem.work_spec.v1.json`. The handler validates against the schema and rejects with `400` on failure. The server also accepts legacy `work_spec.schema_version` values `maristem.work_spec.v1` (misspelling era) and `wayline.work_spec.v1` (pre-migration); new traffic should use `meristem.work_spec.v1`.
 
 Response envelope (success):
 
@@ -168,7 +168,7 @@ Per `AGENTS.md`: this row exists *because the event was appended*. There is no o
 
 ## Translators
 
-Three nearby projects already produce signal-shaped data in their own formats. The mappings below let any of them become a wayline client without inventing a new convention. Each mapping uses the work_spec.v1 schema as the canonical normalized form.
+Three nearby projects already produce signal-shaped data in their own formats. The mappings below let any of them become a meristem client without inventing a new convention. Each mapping uses the work_spec.v1 schema as the canonical normalized form.
 
 ### From `jay` UnifiedLogger.emit(repair=…) to a signal
 
@@ -181,7 +181,7 @@ signal.source.kind   = "system_event"
 signal.source.identifier   = jay.event_id (the UnifiedLogger event id)
 signal.source.external_ref = "system_events.jsonl#" + line_number  (optional)
 
-signal.work_spec.schema_version       = "wayline.work_spec.v1"
+signal.work_spec.schema_version       = "meristem.work_spec.v1"
 signal.work_spec.kind                 = "repair"
 signal.work_spec.title                = jay.issue_payload.title
 signal.work_spec.priority             = jay.issue_payload.priority
@@ -199,7 +199,7 @@ signal.work_spec.labels               = jay.issue_payload.labels
 
 `repair=False` events produce no signal; nothing else from a system-event row is signal-worthy.
 
-The wayline-side `Idempotency-Key` should be `"jay:" + jay.event_id` so that retries from a single `UnifiedLogger.emit` call collapse at the HTTP layer. The wayline-side `dedupe_key` should be `"jay:repair:" + repair.issue_key` so that the same logical problem from any later emission collapses at the work_item layer.
+The meristem-side `Idempotency-Key` should be `"jay:" + jay.event_id` so that retries from a single `UnifiedLogger.emit` call collapse at the HTTP layer. The meristem-side `dedupe_key` should be `"jay:repair:" + repair.issue_key` so that the same logical problem from any later emission collapses at the work_item layer.
 
 ### From `clinical-demo` review finding to a signal
 
@@ -212,7 +212,7 @@ signal.source.kind = "review_finding"
 signal.source.identifier   = run_label + ":" + finding_number
 signal.source.external_ref = path of the source markdown file
 
-signal.work_spec.schema_version       = "wayline.work_spec.v1"
+signal.work_spec.schema_version       = "meristem.work_spec.v1"
 signal.work_spec.kind                 = "review_finding"
 signal.work_spec.title                = ReviewFinding.title
 signal.work_spec.priority             = ReviewFinding.priority
@@ -226,7 +226,7 @@ signal.work_spec.constraints          = derived via _constraints_for(finding)
 signal.work_spec.labels               = derived via _build_labels(...)
 ```
 
-The recursive `--dispatch-agents` / `--until-converged` loop in `clinical-demo`'s runner becomes wayline's eventual review endpoint (`POST /v1/work-items/{id}/review`, planned), not part of the signals contract.
+The recursive `--dispatch-agents` / `--until-converged` loop in `clinical-demo`'s runner becomes meristem's eventual review endpoint (`POST /v1/work-items/{id}/review`, planned), not part of the signals contract.
 
 ### From `ns_obv` issue-record to a signal
 
@@ -239,7 +239,7 @@ signal.source.kind = "review_finding"
 signal.source.identifier   = record.source.review_file + ":" + str(record.source.finding_number)
 signal.source.external_ref = record.source.review_file
 
-signal.work_spec.schema_version       = "wayline.work_spec.v1"
+signal.work_spec.schema_version       = "meristem.work_spec.v1"
 signal.work_spec.kind                 = "review_finding"
 signal.work_spec.title                = record.title
 signal.work_spec.priority             = record.priority
@@ -252,7 +252,7 @@ signal.work_spec.validation.commands  = record.verification.commands
 signal.work_spec.validation.notes     = record.verification.notes
 ```
 
-Statuses other than `open` (`prompted`, `agent_running`, `agent_complete`, `failed`) belong to `ns_obv`'s execution layer, not the signal layer; they map to wayline's run/review endpoints once those exist.
+Statuses other than `open` (`prompted`, `agent_running`, `agent_complete`, `failed`) belong to `ns_obv`'s execution layer, not the signal layer; they map to meristem's run/review endpoints once those exist.
 
 ## Attribution and policy
 
@@ -265,10 +265,10 @@ Per `AGENTS.md` principle 6 ("default deny on side effects"), signals do not aut
 
 ## Worked example
 
-`examples/curl-signal.sh` is the canonical client smoke test: it posts a real `wayline.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both HTTP-level idempotency replay (same `Idempotency-Key`) and semantic dedupe (fresh `Idempotency-Key`, same `dedupe_key`). Integrators that prefer to read shell over prose should start there.
+`examples/curl-signal.sh` is the canonical client smoke test: it posts a real `meristem.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both HTTP-level idempotency replay (same `Idempotency-Key`) and semantic dedupe (fresh `Idempotency-Key`, same `dedupe_key`). Integrators that prefer to read shell over prose should start there.
 
 ```bash
-WAYLINE_TOKEN=wln_… examples/curl-signal.sh
+MERISTEM_TOKEN=mrs_… examples/curl-signal.sh
 ```
 
 ## Related specs
@@ -276,7 +276,7 @@ WAYLINE_TOKEN=wln_… examples/curl-signal.sh
 - `docs/spec.md` — system spec; final authority on the events table, idempotency rules, and the work-item lifecycle this slots into.
 - `docs/v0.md` — v0 implementation contract; signals are a v1 endpoint built on the v0 substrate.
 - `docs/self-building-api-synthesis.md` — the synthesis that proposed this endpoint and the four-identity distinction.
-- `docs/schemas/wayline.work_spec.v1.json` — the canonical work_spec schema this endpoint validates against.
+- `docs/schemas/meristem.work_spec.v1.json` — the canonical work_spec schema this endpoint validates against.
 - `AGENTS.md` — the rules every contributor implementing this endpoint must follow.
 - `internal/signals/signals.go` — the signal projector (event kind constant, payload type, projector that writes to the `signals` table).
 - `migrations/0003_signals.up.sql` — the projection table schema.

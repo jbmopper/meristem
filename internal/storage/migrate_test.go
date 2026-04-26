@@ -3,7 +3,7 @@ package storage
 import (
 	"testing"
 
-	"github.com/jbmopper/wayline/migrations"
+	"github.com/jbmopper/meristem/migrations"
 )
 
 // TestEmbeddedMigrationsLoad validates that the embedded migration FS is
