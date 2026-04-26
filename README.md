@@ -59,9 +59,9 @@ MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslm
 
 MERISTEM_TOKEN=$(cat .meristem/root.token) \
   go run ./cmd/meristem tokens create --name example --source agent
-# -> prints id=, name=, secret=wln_...
+# -> prints id=, name=, secret=mrs_...
 
-MERISTEM_TOKEN=wln_... examples/curl-signal.sh
+MERISTEM_TOKEN=mrs_... examples/curl-signal.sh
 # -> 201 Created with the signal envelope; re-run for an idempotency replay.
 ```
 
@@ -98,6 +98,8 @@ go run ./cmd/meristem migrate down
 
 Use this when another project on the same host needs a stable, always-on endpoint. Builds the meristem image from the local source and runs `meristem migrate` once as an init container before bringing up the api.
 
+If you have an **older** local compose volume from before the Postgres role/database were renamed, drop the old named volume (for example `meristem-pgdata` or `maristem-pgdata`) or `docker volume prune` the stale data so Postgres re-initializes with the `meristem` user and database from `docker-compose.yml`.
+
 ```bash
 docker compose --profile app up -d
 docker compose run --rm meristem tokens create --root --name root
@@ -123,13 +125,13 @@ The Caddyfile lives at [`deploy/Caddyfile`](deploy/Caddyfile); edit in place to 
 
 ## Integration smoke test
 
-The canonical "did the deploy work?" smoke test for any integrator (jay, ns_obv, clinical-demo, your-project) is in [`examples/curl-signal.sh`](examples/curl-signal.sh). It posts a real `legacy.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both the HTTP-level idempotency replay and the semantic dedupe behavior.
+The canonical "did the deploy work?" smoke test for any integrator (jay, ns_obv, clinical-demo, your-project) is in [`examples/curl-signal.sh`](examples/curl-signal.sh). It posts a real `meristem.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both the HTTP-level idempotency replay and the semantic dedupe behavior.
 
 ```bash
-MERISTEM_TOKEN=wln_... examples/curl-signal.sh        # 201, work_item created
-MERISTEM_TOKEN=wln_... examples/curl-signal.sh        # 201 + Idempotency-Replayed: true
+MERISTEM_TOKEN=mrs_... examples/curl-signal.sh        # 201, work_item created
+MERISTEM_TOKEN=mrs_... examples/curl-signal.sh        # 201 + Idempotency-Replayed: true
 MERISTEM_IDEMPOTENCY_KEY=$(uuidgen) \
-  MERISTEM_TOKEN=wln_... examples/curl-signal.sh      # 201, links to existing work_item via dedupe_key
+  MERISTEM_TOKEN=mrs_... examples/curl-signal.sh      # 201, links to existing work_item via dedupe_key
 ```
 
 ## Go client
@@ -200,3 +202,33 @@ Use `MERISTEM_TEST_DATABASE_URL` instead of `MERISTEM_DATABASE_URL` if you want 
 | `MERISTEM_TEST_DATABASE_URL` | no       | —       | Optional Postgres DSN just for integration tests.                  |
 
 Production secrets live in the host cloud's KMS. v1 wraps per-connection credentials with envelope encryption; v0 reads them from the environment.
+
+## GitHub repository
+
+The Go module path is `github.com/jbmopper/meristem`. The Git remote should match (e.g. `https://github.com/jbmopper/meristem.git`).
+
+**Publish to a new empty repository** (after you create `jbmopper/meristem` on GitHub with no README/license, or use a different owner/name and adjust the URL):
+
+```bash
+# Option A — point `origin` at the new repo only (replaces meristem as default push target)
+git remote set-url origin https://github.com/jbmopper/meristem.git
+git push -u origin main
+# add other branches/tags as needed
+```
+
+**Keep the old repo as a second remote** (duplicate / mirror until you archive `meristem`):
+
+```bash
+git remote rename origin meristem
+git remote add origin https://github.com/jbmopper/meristem.git
+git push -u origin main
+# push updates to both: git push meristem main && git push origin main
+```
+
+**Rename the local clone** (optional; do this with the IDE closed, or reopen the folder after):
+
+```bash
+cd /path/to/Dev && mv meristem meristem && cd meristem
+```
+
+On GitHub you can **archive** `jbmopper/meristem` or leave it with a note redirecting to `meristem` once clients have switched imports and remotes.

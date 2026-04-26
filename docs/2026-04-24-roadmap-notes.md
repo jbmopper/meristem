@@ -247,7 +247,7 @@ process; they do not help two `codex exec` invocations both editing
 
 The realistic options to keep open (without committing to one yet):
 
-- Per-target serialization. meristem schedules at most one writer per
+- Per-target serialization. Meristem schedules at most one writer per
   `(repo, branch)` at a time. Simple; lowest parallelism.
 - Worktree-per-task. Each run gets its own working directory on its own
   branch; merge happens as a follow-on work_item under approval.
@@ -347,23 +347,23 @@ relevant to meristem:
 - **Malformed agent output is the norm, not the exception.** The first
   finder iteration emitted prose where the template demanded structured
   markdown. The parser treated the result as zero findings and
-  converged. meristem's `signals` parser must be similarly forgiving —
+  converged. Meristem's `signals` parser must be similarly forgiving —
   or, better, the prompt template + parser must be co-designed so that
   *"the agent didn't follow the format"* produces a recordable failure
   rather than a silent zero. The latter is more honest.
 - **Closed dispatch table = no triage.** clinical-demo had two
   hardcoded findings as input, two issues as output, no decisions to
-  make. meristem cannot have a closed dispatch table because pre-issues
+  make. Meristem cannot have a closed dispatch table because pre-issues
   are open-ended; this is one of the load-bearing differences and the
   reason (1) above is the headline item.
 - **Manifest as the only on-disk record; everything else gitignored.**
   clinical-demo's run produced a `manifest.json` plus a tree of
-  gitignored intermediates. meristem gets this for free via `events` +
+  gitignored intermediates. Meristem gets this for free via `events` +
   `artifacts`. Do not add a parallel manifest concept to meristem; the
   event log + artifact references already are it.
 - **HITL caching is non-trivial.** clinical-demo's HITL resume bug fix
   was to cache the compiled langgraph by `thread_id` so the
-  `InMemorySaver` survived across the pause/resume boundary. meristem's
+  `InMemorySaver` survived across the pause/resume boundary. Meristem's
   analogous concern is *"what state must persist across a worker
   restart vs. across a worker hand-off."* The answer is consistent
   with `AGENTS.md` "Things not to do": anything not in Postgres is

@@ -1,6 +1,9 @@
 package api
 
 // Schema/validator parity guard for docs/schemas/meristem.work_spec.v1.json.
+// The JSON Schema lists only the canonical schema_version; the HTTP validator
+// additionally accepts legacy maristem.work_spec.v1 and legacy.work_spec.v1
+// (see internal/api/signals.go).
 //
 // The hand-rolled validator in signals.go is a faithful but separate
 // transcription of the JSON Schema. Without a guard, the two drift: a

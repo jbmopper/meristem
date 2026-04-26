@@ -45,7 +45,7 @@ Auth: any non-revoked client token.
 
 Headers:
 
-- `Authorization: Bearer wln_…` (required)
+- `Authorization: Bearer mrs_…` (required)
 - `Idempotency-Key: …` (required; per `docs/spec.md` every POST requires one)
 - `Content-Type: application/json; charset=utf-8`
 
@@ -61,7 +61,7 @@ Request body:
     "external_ref": "logs/system_events.jsonl#L4291"
   },
   "work_spec": {
-    "schema_version": "legacy.work_spec.v1",
+    "schema_version": "meristem.work_spec.v1",
     "kind": "repair",
     "title": "Worker retry budget is exhausted too early",
     "priority": "P1",
@@ -87,7 +87,7 @@ Field rules:
 - `kind` (required): one of `review_finding`, `repairable_failure`, `webhook`, `manual`, or any other string the source defines. Reservation is non-exclusive in v1.
 - `dedupe_key` (optional but strongly recommended): if present, two signals with the same value link to the same live work_item. If the latest matching work_item is terminal (`done`, `failed`, or `canceled`), the next signal is treated as a recurrence and creates a fresh work_item. If absent, every signal creates a fresh work_item.
 - `source` (optional): origin metadata. Required when known so audits can reconstruct provenance.
-- `work_spec` (required): the proposed work, conforming to `docs/schemas/meristem.work_spec.v1.json`. The handler validates against the schema and rejects with `400` on failure.
+- `work_spec` (required): the proposed work, conforming to `docs/schemas/meristem.work_spec.v1.json`. The handler validates against the schema and rejects with `400` on failure. The server also accepts legacy `work_spec.schema_version` values `maristem.work_spec.v1` (misspelling era) and `legacy.work_spec.v1` (pre-migration); new traffic should use `meristem.work_spec.v1`.
 
 Response envelope (success):
 
@@ -181,7 +181,7 @@ signal.source.kind   = "system_event"
 signal.source.identifier   = jay.event_id (the UnifiedLogger event id)
 signal.source.external_ref = "system_events.jsonl#" + line_number  (optional)
 
-signal.work_spec.schema_version       = "legacy.work_spec.v1"
+signal.work_spec.schema_version       = "meristem.work_spec.v1"
 signal.work_spec.kind                 = "repair"
 signal.work_spec.title                = jay.issue_payload.title
 signal.work_spec.priority             = jay.issue_payload.priority
@@ -212,7 +212,7 @@ signal.source.kind = "review_finding"
 signal.source.identifier   = run_label + ":" + finding_number
 signal.source.external_ref = path of the source markdown file
 
-signal.work_spec.schema_version       = "legacy.work_spec.v1"
+signal.work_spec.schema_version       = "meristem.work_spec.v1"
 signal.work_spec.kind                 = "review_finding"
 signal.work_spec.title                = ReviewFinding.title
 signal.work_spec.priority             = ReviewFinding.priority
@@ -239,7 +239,7 @@ signal.source.kind = "review_finding"
 signal.source.identifier   = record.source.review_file + ":" + str(record.source.finding_number)
 signal.source.external_ref = record.source.review_file
 
-signal.work_spec.schema_version       = "legacy.work_spec.v1"
+signal.work_spec.schema_version       = "meristem.work_spec.v1"
 signal.work_spec.kind                 = "review_finding"
 signal.work_spec.title                = record.title
 signal.work_spec.priority             = record.priority
@@ -265,10 +265,10 @@ Per `AGENTS.md` principle 6 ("default deny on side effects"), signals do not aut
 
 ## Worked example
 
-`examples/curl-signal.sh` is the canonical client smoke test: it posts a real `legacy.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both HTTP-level idempotency replay (same `Idempotency-Key`) and semantic dedupe (fresh `Idempotency-Key`, same `dedupe_key`). Integrators that prefer to read shell over prose should start there.
+`examples/curl-signal.sh` is the canonical client smoke test: it posts a real `meristem.work_spec.v1` body, demonstrates the bearer + idempotency-key dance, and re-running it shows both HTTP-level idempotency replay (same `Idempotency-Key`) and semantic dedupe (fresh `Idempotency-Key`, same `dedupe_key`). Integrators that prefer to read shell over prose should start there.
 
 ```bash
-MERISTEM_TOKEN=wln_… examples/curl-signal.sh
+MERISTEM_TOKEN=mrs_… examples/curl-signal.sh
 ```
 
 ## Related specs

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const tokenPrefix = "wln_"
+const tokenPrefix = "mrs_"
 
 // NewSecret returns a new random bearer token. The raw value is shown once to
 // the operator and only its SHA-256 digest is stored.

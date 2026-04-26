@@ -141,7 +141,7 @@ func resolveWorkerSystemToken(ctx context.Context, service tokenAuthenticator) (
 
 func workerUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  MERISTEM_TOKEN=wln_<system> meristem worker --once [--budget=DURATION]
+  MERISTEM_TOKEN=mrs_<system> meristem worker --once [--budget=DURATION]
 
 Runs a single bounded-patience scan. Reads every non-terminal work_item,
 compares dwell time to the per-state budget, and appends one

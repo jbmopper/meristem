@@ -664,7 +664,7 @@ func resolveFeedToken() (token, source string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("feed: getwd: %w", err)
 	}
-	dir := findmeristemDir(cwd)
+	dir := findMeristemDir(cwd)
 	if dir == "" {
 		return "", "", fmt.Errorf("feed: MERISTEM_TOKEN not set and no .meristem/ directory found walking up from %s", cwd)
 	}
@@ -694,12 +694,12 @@ var priorityTokens = []string{
 	"seed.token",
 }
 
-// findmeristemDir walks upward from start looking for a directory named
+// findMeristemDir walks upward from start looking for a directory named
 // `.meristem`. Returns the absolute path of the .meristem directory itself,
 // or "" if none is found before the filesystem root. Termination is
 // guaranteed by the parent==current convergence check (true on POSIX and
 // Windows for the root path).
-func findmeristemDir(start string) string {
+func findMeristemDir(start string) string {
 	dir := start
 	for {
 		candidate := filepath.Join(dir, ".meristem")

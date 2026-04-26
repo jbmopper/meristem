@@ -253,7 +253,8 @@ func (s *Service) lookupLiveWorkItem(ctx context.Context, tx pgx.Tx, dedupeKey s
 
 // workSpecHeader is the small slice of work_spec the service reads to
 // populate the work_item.created event. Full schema validation against
-// meristem.work_spec.v1.json is the handler's responsibility; the service
+// meristem.work_spec.v1 (and legacy maristem.work_spec.v1, legacy.work_spec.v1) is the handler's
+// responsibility; the service
 // only needs enough to write the projection row honestly.
 type workSpecHeader struct {
 	Title     string `json:"title"`

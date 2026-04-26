@@ -12,7 +12,7 @@ func TestLooksLikeIdentifier(t *testing.T) {
 	}{
 		{"", false},
 		{"meristem_rebuild", true},
-		{"meristemRebuild", true},
+		{"MeristemRebuild", true},
 		{"_underscore_lead", true},
 		{"trailing_digits_99", true},
 		{"99_leading_digit", false},

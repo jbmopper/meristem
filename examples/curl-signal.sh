@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Worked example: post a legacy.work_spec.v1 signal.
+# Worked example: post a meristem.work_spec.v1 signal.
 #
 # Treat this as the canonical "did the deploy work?" smoke test that any
 # integrator can run without writing code. It demonstrates:
 #
 #   - Bearer auth (Authorization header).
 #   - Idempotency-Key header (required on every POST per docs/v0.md).
-#   - The legacy.work_spec.v1 schema (the contract jay, ns_obv, and
+#   - The meristem.work_spec.v1 schema (the contract jay, ns_obv, and
 #     clinical-demo all target).
 #   - The dedupe_key field, which collapses repeated signals about the
 #     same logical work into one work_item.
 #
 # Usage:
-#   MERISTEM_TOKEN=wln_... examples/curl-signal.sh
-#   MERISTEM_TOKEN=wln_... MERISTEM_URL=http://localhost:8080 examples/curl-signal.sh
+#   MERISTEM_TOKEN=mrs_... examples/curl-signal.sh
+#   MERISTEM_TOKEN=mrs_... MERISTEM_URL=http://localhost:8080 examples/curl-signal.sh
 #
 # Re-running the script with the same Idempotency-Key returns the
 # original 201 response with header `Idempotency-Replayed: true`.
@@ -37,7 +37,7 @@ Mint one against your local stack:
     go run ./cmd/meristem tokens create --name example --source agent
 
 Then re-run:
-  MERISTEM_TOKEN=wln_... \$0
+  MERISTEM_TOKEN=mrs_... \$0
 EOF
     exit 2
 fi
@@ -51,7 +51,7 @@ read -r -d '' BODY <<'JSON' || true
     "identifier": "example:smoke-test:001"
   },
   "work_spec": {
-    "schema_version": "legacy.work_spec.v1",
+    "schema_version": "meristem.work_spec.v1",
     "kind": "repair",
     "dedupe_key": "__DEDUPE__",
     "title": "Honor worker retry budget",

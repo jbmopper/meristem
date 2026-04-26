@@ -169,13 +169,13 @@ func TestFeedClientFetchHonorsAuthAndLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &feedClient{baseURL: srv.URL, token: "wln_secret", http: srv.Client()}
+	c := &feedClient{baseURL: srv.URL, token: "mrs_secret", http: srv.Client()}
 	items, err := c.fetch(context.Background(), 33)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if gotAuth != "Bearer wln_secret" {
-		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer wln_secret")
+	if gotAuth != "Bearer mrs_secret" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer mrs_secret")
 	}
 	if gotLimit != "33" {
 		t.Errorf("limit query = %q, want %q", gotLimit, "33")
@@ -786,7 +786,7 @@ func TestConsumeStreamSendsLastEventIDAndAuth(t *testing.T) {
 	defer srv.Close()
 
 	c := &feedClient{
-		baseURL: srv.URL, token: "wln_secret",
+		baseURL: srv.URL, token: "mrs_secret",
 		http:       srv.Client(),
 		streamHTTP: srv.Client(),
 	}
@@ -799,8 +799,8 @@ func TestConsumeStreamSendsLastEventIDAndAuth(t *testing.T) {
 		return nil
 	})
 
-	if gotAuth != "Bearer wln_secret" {
-		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer wln_secret")
+	if gotAuth != "Bearer mrs_secret" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer mrs_secret")
 	}
 	if gotLEI != "PRIORCURSOR" {
 		t.Errorf("Last-Event-ID = %q, want %q", gotLEI, "PRIORCURSOR")

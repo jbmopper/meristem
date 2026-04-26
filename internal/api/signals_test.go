@@ -12,7 +12,7 @@ import (
 
 func validSignalWorkSpec() json.RawMessage {
 	return json.RawMessage(`{
-		"schema_version": "legacy.work_spec.v1",
+		"schema_version": "meristem.work_spec.v1",
 		"kind": "repair",
 		"title": "Worker retry budget is exhausted too early",
 		"priority": "P1",
@@ -48,8 +48,34 @@ func TestValidateWorkSpecAcceptsSchemaSubset(t *testing.T) {
 	}
 }
 
+func TestValidateWorkSpecAcceptsLegacySchemaVersion(t *testing.T) {
+	legacy := json.RawMessage(`{
+		"schema_version": "legacy.work_spec.v1",
+		"kind": "repair",
+		"title": "x",
+		"priority": "P1",
+		"acceptance_criteria": ["x"]
+	}`)
+	if err := validateWorkSpec(legacy); err != nil {
+		t.Fatalf("legacy schema_version should validate: %v", err)
+	}
+}
+
+func TestValidateWorkSpecAcceptsMaristemTypoSchemaVersion(t *testing.T) {
+	typo := json.RawMessage(`{
+		"schema_version": "maristem.work_spec.v1",
+		"kind": "repair",
+		"title": "x",
+		"priority": "P1",
+		"acceptance_criteria": ["x"]
+	}`)
+	if err := validateWorkSpec(typo); err != nil {
+		t.Fatalf("maristem misspelling schema_version should still validate: %v", err)
+	}
+}
+
 func TestValidateWorkSpecRejectsMissingRequiredFields(t *testing.T) {
-	raw := json.RawMessage(`{"schema_version":"legacy.work_spec.v1","kind":"repair","title":"x","priority":"P1"}`)
+	raw := json.RawMessage(`{"schema_version":"meristem.work_spec.v1","kind":"repair","title":"x","priority":"P1"}`)
 	if err := validateWorkSpec(raw); err == nil || !strings.Contains(err.Error(), "acceptance_criteria") {
 		t.Fatalf("expected acceptance_criteria error, got %v", err)
 	}
@@ -63,14 +89,14 @@ func TestValidateWorkSpecRejectsWrongSchemaVersion(t *testing.T) {
 }
 
 func TestValidateWorkSpecRejectsInvalidPriority(t *testing.T) {
-	raw := json.RawMessage(`{"schema_version":"legacy.work_spec.v1","kind":"repair","title":"x","priority":"P9","acceptance_criteria":["x"]}`)
+	raw := json.RawMessage(`{"schema_version":"meristem.work_spec.v1","kind":"repair","title":"x","priority":"P9","acceptance_criteria":["x"]}`)
 	if err := validateWorkSpec(raw); err == nil || !strings.Contains(err.Error(), "priority") {
 		t.Fatalf("expected priority error, got %v", err)
 	}
 }
 
 func TestValidateWorkSpecRejectsUnknownTopLevelField(t *testing.T) {
-	raw := json.RawMessage(`{"schema_version":"legacy.work_spec.v1","kind":"repair","title":"x","priority":"P1","acceptance_criteria":["x"],"surprise":true}`)
+	raw := json.RawMessage(`{"schema_version":"meristem.work_spec.v1","kind":"repair","title":"x","priority":"P1","acceptance_criteria":["x"],"surprise":true}`)
 	if err := validateWorkSpec(raw); err == nil || !strings.Contains(err.Error(), "surprise") {
 		t.Fatalf("expected unknown field error, got %v", err)
 	}
@@ -78,7 +104,7 @@ func TestValidateWorkSpecRejectsUnknownTopLevelField(t *testing.T) {
 
 func TestValidateWorkSpecRejectsNestedShapeErrors(t *testing.T) {
 	raw := json.RawMessage(`{
-		"schema_version":"legacy.work_spec.v1",
+		"schema_version":"meristem.work_spec.v1",
 		"kind":"repair",
 		"title":"x",
 		"priority":"P1",
@@ -92,7 +118,7 @@ func TestValidateWorkSpecRejectsNestedShapeErrors(t *testing.T) {
 	}
 
 	raw = json.RawMessage(`{
-		"schema_version":"legacy.work_spec.v1",
+		"schema_version":"meristem.work_spec.v1",
 		"kind":"repair",
 		"title":"x",
 		"priority":"P1",

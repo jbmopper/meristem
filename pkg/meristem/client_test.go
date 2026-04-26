@@ -85,7 +85,7 @@ func TestPostSignalHappyPath(t *testing.T) {
 
 	c, err := meristem.New(meristem.Config{
 		BaseURL:    fs.srv.URL + "/", // trailing slash should be trimmed
-		Token:      "wln_test",
+		Token:      "mrs_test",
 		HTTPClient: fs.srv.Client(),
 		UserAgent:  "meristem-test/1.0",
 	})
@@ -140,8 +140,8 @@ func TestPostSignalHappyPath(t *testing.T) {
 	if got.path != "/v1/signals" {
 		t.Errorf("path = %q; want /v1/signals", got.path)
 	}
-	if got.headers.Get("Authorization") != "Bearer wln_test" {
-		t.Errorf("Authorization = %q; want Bearer wln_test", got.headers.Get("Authorization"))
+	if got.headers.Get("Authorization") != "Bearer mrs_test" {
+		t.Errorf("Authorization = %q; want Bearer mrs_test", got.headers.Get("Authorization"))
 	}
 	if got.headers.Get("Idempotency-Key") != "client-pinned" {
 		t.Errorf("Idempotency-Key = %q; want client-pinned", got.headers.Get("Idempotency-Key"))

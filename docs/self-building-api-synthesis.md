@@ -72,7 +72,7 @@ Example:
 
 ```json
 {
-  "schema_version": "legacy.work_spec.v1",
+  "schema_version": "meristem.work_spec.v1",
   "kind": "repair",
   "dedupe_key": "repo:clinical-demo:review:2026-04-22:finding-001",
   "title": "Public HITL entry point cannot resume a paused run",

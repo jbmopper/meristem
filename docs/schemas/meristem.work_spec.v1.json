@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "meristem Work Spec v1",
+  "title": "Meristem Work Spec v1",
   "description": "Canonical normalized specification of one unit of work. Attached to a work_item as an artifact and used to render prompts, dispatch agents, dedupe repeated signals, and validate outcomes. Synthesized from jay/issue_workflow/issue_spec_schema.json (AgentFixIssueSpecification), ns_obv/docs/issue-automation/issue-record.schema.json (Issue Record), and clinical-demo/src/clinical_demo/issues/workflow.py (IssueSpecification). v1 is additive; new optional fields may appear without bumping schema_version. Breaking changes ship as meristem.work_spec.v2.",
   "type": "object",
   "additionalProperties": false,
@@ -14,7 +14,7 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "legacy.work_spec.v1"
+      "const": "meristem.work_spec.v1"
     },
     "kind": {
       "type": "string",

@@ -324,7 +324,7 @@ func seedItemsFingerprint() string {
 
 func seedUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  MERISTEM_TOKEN=wln_<system> meristem seed v1 [--dry-run]
+  MERISTEM_TOKEN=mrs_<system> meristem seed v1 [--dry-run]
 
 Seeds the v1 substrate backlog from docs/spec.md into the running system as
 work_items, attributed to the supplied system-source token. Reruns are

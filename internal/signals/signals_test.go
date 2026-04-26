@@ -18,7 +18,7 @@ func validRawPayload() map[string]any {
 		"signal_kind":       "review_finding",
 		"dedupe_key":        "repo:jay:repair:worker-retry-budget",
 		"fingerprint":       "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-		"work_spec":         json.RawMessage(`{"schema_version":"legacy.work_spec.v1","kind":"repair","title":"x","priority":"P1","acceptance_criteria":["x"]}`),
+		"work_spec":         json.RawMessage(`{"schema_version":"meristem.work_spec.v1","kind":"repair","title":"x","priority":"P1","acceptance_criteria":["x"]}`),
 		"work_item_id":      "11111111-1111-1111-1111-111111111111",
 		"created_work_item": true,
 	}
@@ -104,7 +104,7 @@ func TestDecodeAcceptsNestedMapWorkSpec(t *testing.T) {
 	// rebuild-safe per AGENTS.md.
 	raw := validRawPayload()
 	raw["work_spec"] = map[string]any{
-		"schema_version":      "legacy.work_spec.v1",
+		"schema_version":      "meristem.work_spec.v1",
 		"kind":                "repair",
 		"title":               "x",
 		"priority":            "P1",

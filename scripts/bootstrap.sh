@@ -90,7 +90,7 @@ seed_token_exists() {
     $MERISTEM_BIN tokens list 2>/dev/null | awk -F'\t' -v name="$SEED_TOKEN_NAME" '$2 == name { print "yes" }' | grep -q yes
 }
 
-# Parse `secret=wln_...` out of a `tokens create` capture file and
+# Parse `secret=mrs_...` out of a `tokens create` capture file and
 # write it to the destination with mode 0600. The token files are the
 # only secrets bootstrap.sh persists; we keep them in $TOKEN_DIR which
 # is itself mode 0700.
@@ -134,7 +134,7 @@ if root_token_exists; then
     fi
 else
     log "minting root token"
-    # `tokens create --root` prints `secret=wln_...` on stdout among
+    # `tokens create --root` prints `secret=mrs_...` on stdout among
     # other key=value pairs.
     tmp_root="$(mktemp)"
     trap 'rm -f "$tmp_root" "${tmp_seed:-}"' EXIT
@@ -194,7 +194,7 @@ Next steps:
     $MERISTEM_BIN tokens create --name jay --source agent
 
   # Then post a real signal:
-  MERISTEM_TOKEN=wln_... examples/curl-signal.sh
+  MERISTEM_TOKEN=mrs_... examples/curl-signal.sh
 
   # Confirm the v1 backlog is live:
   curl -sS -H "Authorization: Bearer \$(cat $ROOT_TOKEN_FILE)" \\

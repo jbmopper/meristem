@@ -174,9 +174,9 @@ func splitCSV(value string) []string {
 func tokensUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
   meristem tokens create --root [--replace] [--name root] [--source human]
-  MERISTEM_TOKEN=wln_... meristem tokens create --name iphone [--source human] [--scopes a,b]
-  MERISTEM_TOKEN=wln_... meristem tokens create --name cursor [--source agent] [--scopes a,b]
+  MERISTEM_TOKEN=mrs_... meristem tokens create --name iphone [--source human] [--scopes a,b]
+  MERISTEM_TOKEN=mrs_... meristem tokens create --name cursor [--source agent] [--scopes a,b]
   meristem tokens list
-  MERISTEM_TOKEN=wln_... meristem tokens revoke --id <uuid>
+  MERISTEM_TOKEN=mrs_... meristem tokens revoke --id <uuid>
 `)
 }

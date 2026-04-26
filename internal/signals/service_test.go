@@ -12,13 +12,13 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 )
 
-// validWorkSpec is the smallest legacy.work_spec.v1 payload that satisfies
+// validWorkSpec is the smallest meristem.work_spec.v1 payload that satisfies
 // the schema's required fields. It is deliberately separate from
 // validRawPayload (in signals_test.go) so changes to one do not silently
 // drift the other.
 func validWorkSpec() json.RawMessage {
 	return json.RawMessage(`{
-		"schema_version": "legacy.work_spec.v1",
+		"schema_version": "meristem.work_spec.v1",
 		"kind": "repair",
 		"title": "Worker retry budget exhausted",
 		"priority": "P1",
