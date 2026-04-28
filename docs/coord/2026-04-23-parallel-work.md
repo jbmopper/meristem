@@ -9,6 +9,10 @@ Roles in this doc:
 
 ## Status updates
 
+### 2026-04-28 Codex — deterministic error reporting slice
+
+Added a deterministic-layer error reporting substrate without touching the dirty MCP/CLI work already in the tree. The new contract is: deterministic subsystem failures append `deterministic_error.reported`, `deterministic_error.masked`, and `deterministic_error.unmasked` events; `deterministic_errors` is the replayable projection; masking hides reports from active views but never mutates or deletes audit events. Projectors are registered in `internal/app`, rebuild coverage includes the new projection table, feed policy classifies the new events as narrative, and `docs/spec.md`/`AGENTS.md` now name the deterministic/probabilistic split. Verification: `GOCACHE=/tmp/meristem-go-cache go test ./...` and `GOCACHE=/tmp/meristem-go-cache go vet ./...` are green. Boundary: this did not intentionally edit the pre-existing dirty `cmd/meristem/{main,mcp}.go`, `internal/mcp/*`, `docs/v0.md`, `cmd/meristem/git.go`, `examples/cursor-mcp.json.example`, or `migrations/0007_job_queue.*` work.
+
 ### 2026-04-24 Agent A — coordination moves into the running system
 
 This file freezes here as historical record. Subsequent A↔B coordination lives on the meristem coord work_item:

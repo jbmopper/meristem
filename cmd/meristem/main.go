@@ -11,6 +11,7 @@
 //   meristem seed     - seed substrate backlogs into the running system
 //   meristem rebuild  - rebuild projections from events into a sandbox schema and diff
 //   meristem safety   - validate deterministic resource-safety controls
+//   meristem git      - run git(1) (passes through all arguments)
 //   meristem version  - print build info
 package main
 
@@ -67,6 +68,8 @@ func main() {
 		err = runFeed(ctx, logger, args)
 	case "safety":
 		err = runSafety(ctx, logger, args)
+	case "git":
+		err = runGit(ctx, logger, args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":

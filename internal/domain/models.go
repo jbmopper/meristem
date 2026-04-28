@@ -7,15 +7,18 @@ import (
 )
 
 const (
-	EventTokenCreated          = "token.created"
-	EventTokenRevoked          = "token.revoked"
-	EventIdempotencyRecorded   = "idempotency.recorded"
-	EventMessageCaptured       = "message.captured"
-	EventWorkItemCreated       = "work_item.created"
-	EventWorkItemTransitioned  = "work_item.transitioned"
-	EventWorkItemEventAppended = "work_item.event_appended"
-	EventWorkItemRelationAdded = "work_item.relation_added"
-	EventSignalReceived        = "signal.received"
+	EventTokenCreated               = "token.created"
+	EventTokenRevoked               = "token.revoked"
+	EventIdempotencyRecorded        = "idempotency.recorded"
+	EventMessageCaptured            = "message.captured"
+	EventWorkItemCreated            = "work_item.created"
+	EventWorkItemTransitioned       = "work_item.transitioned"
+	EventWorkItemEventAppended      = "work_item.event_appended"
+	EventWorkItemRelationAdded      = "work_item.relation_added"
+	EventSignalReceived             = "signal.received"
+	EventDeterministicErrorReported = "deterministic_error.reported"
+	EventDeterministicErrorMasked   = "deterministic_error.masked"
+	EventDeterministicErrorUnmasked = "deterministic_error.unmasked"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
 	// that state. Recorded by `meristem worker --once` (see internal/worker).
@@ -50,15 +53,19 @@ var AllEventKinds = []string{
 	EventWorkItemEventAppended,
 	EventWorkItemRelationAdded,
 	EventSignalReceived,
+	EventDeterministicErrorReported,
+	EventDeterministicErrorMasked,
+	EventDeterministicErrorUnmasked,
 	EventPatienceBreached,
 }
 
 const (
-	SubjectToken          = "token"
-	SubjectIdempotencyKey = "idempotency_key"
-	SubjectMessage        = "message"
-	SubjectWorkItem       = "work_item"
-	SubjectSignal         = "signal"
+	SubjectToken              = "token"
+	SubjectIdempotencyKey     = "idempotency_key"
+	SubjectMessage            = "message"
+	SubjectWorkItem           = "work_item"
+	SubjectSignal             = "signal"
+	SubjectDeterministicError = "deterministic_error"
 )
 
 // Token is the active client credential projection. The raw bearer secret is
@@ -161,4 +168,44 @@ type Signal struct {
 	WorkSpec        []byte
 	WorkItemID      *uuid.UUID
 	CreatedWorkItem bool
+}
+
+// DeterministicErrorSeverity is the operator-facing priority of a
+// deterministic-layer error report.
+type DeterministicErrorSeverity string
+
+const (
+	DeterministicErrorInfo     DeterministicErrorSeverity = "info"
+	DeterministicErrorWarning  DeterministicErrorSeverity = "warning"
+	DeterministicErrorError    DeterministicErrorSeverity = "error"
+	DeterministicErrorCritical DeterministicErrorSeverity = "critical"
+)
+
+// Valid reports whether s is one of the accepted deterministic error
+// severities.
+func (s DeterministicErrorSeverity) Valid() bool {
+	switch s {
+	case DeterministicErrorInfo, DeterministicErrorWarning, DeterministicErrorError, DeterministicErrorCritical:
+		return true
+	}
+	return false
+}
+
+// DeterministicError is the current-state projection for deterministic-layer
+// error reports. Masking hides a report from active error views without
+// deleting or mutating the underlying events.
+type DeterministicError struct {
+	ID         uuid.UUID
+	Component  string
+	Code       string
+	Message    string
+	Severity   DeterministicErrorSeverity
+	Details    []byte
+	ReportedBy *uuid.UUID
+	ReportedAt time.Time
+	UpdatedAt  time.Time
+	Masked     bool
+	MaskReason *string
+	MaskedBy   *uuid.UUID
+	MaskedAt   *time.Time
 }

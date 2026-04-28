@@ -51,6 +51,7 @@ var projectionTables = []string{
 	"message_parts",
 	"idempotency_keys",
 	"signals",
+	"deterministic_errors",
 }
 
 func runRebuild(ctx context.Context, logger *slog.Logger, args []string) error {

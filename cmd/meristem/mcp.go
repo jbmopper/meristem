@@ -23,7 +23,8 @@ import (
 // Stdout is reserved for JSON-RPC traffic; structured logs go to stderr
 // so launching clients can pipe stdio cleanly.
 func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
-	if _, _, err := validateStartupSafety(logger); err != nil {
+	policy, _, err := validateStartupSafety(logger)
+	if err != nil {
 		return err
 	}
 
@@ -44,10 +45,11 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 
 	writer := app.NewEventWriter()
 	deps := mcp.Deps{
-		Auth:      auth.NewService(pool, writer),
-		Inbox:     inbox.NewService(pool, writer),
-		WorkItems: workitems.NewService(pool, writer),
-		Feed:      feed.NewService(pool),
+		Auth:        auth.NewService(pool, writer),
+		Inbox:       inbox.NewService(pool, writer),
+		WorkItems:   workitems.NewService(pool, writer),
+		Feed:        feed.NewService(pool),
+		MaxFeedWait: policy.MaxFeedWait,
 	}
 
 	server := mcp.New(deps, mcp.ServerInfo{Name: "meristem", Version: version}, logger)

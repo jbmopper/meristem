@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
@@ -25,6 +26,9 @@ type Deps struct {
 	Inbox     *inbox.Service
 	WorkItems *workitems.Service
 	Feed      *feed.Service
+	// MaxFeedWait caps feed.read watcher wait (mirrors GET /v1/feed). Zero
+	// falls back to safety.DefaultPolicy().MaxFeedWait in the tool.
+	MaxFeedWait time.Duration
 }
 
 // ServerInfo identifies this server to clients in the initialize

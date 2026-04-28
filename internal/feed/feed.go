@@ -34,6 +34,9 @@ var IncludedKinds = []string{
 	domain.EventWorkItemEventAppended,
 	domain.EventWorkItemRelationAdded,
 	domain.EventSignalReceived,
+	domain.EventDeterministicErrorReported,
+	domain.EventDeterministicErrorMasked,
+	domain.EventDeterministicErrorUnmasked,
 	domain.EventPatienceBreached,
 }
 

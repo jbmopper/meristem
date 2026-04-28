@@ -31,6 +31,7 @@ Every change must respect these. Raise a violation before writing code, not afte
 The substrate **must not foreclose** these directions, even though it does not yet realize them. Code that closes off any of these is a regression.
 
 - **The operator interacts with prose.** Speech, document, message, file — never JSON in the operator's hand. Today's surfaces (iPhone Shortcut, CLI, web UI) are translation layers; future surfaces (document-as-system, git-shaped editor view) must remain possible.
+- **The system has deterministic and probabilistic subsystems.** The deterministic subsystem owns events, projections, migrations, safety policy, auth, idempotency, queue claims, and reconciliation rules. The probabilistic subsystem proposes classifications, plans, summaries, and model-shaped judgments, but never owns durable truth directly.
 - **The system can run from a single file.** SQLite-per-operator mode is a future work_item. Storage code that hard-couples to Postgres-only features (e.g. `LISTEN/NOTIFY`, advisory locks beyond what's in the spec, Postgres-specific JSON operators outside a sealed adapter) blocks this.
 - **The system can be assessed by being asked.** Once the inbox loop is closed, *"assess meristem's fit against [criteria]"* should be a normal `work_item` whose execution is a fold over the event log. Reserve event kinds and projections that make this cheap.
 
@@ -50,6 +51,7 @@ These are how the principles above are made true in code. They are non-optional 
 - **`work_item`** — anything we tell an agent (or self) to do. Lifecycle: `captured → triaged → planned → awaiting_approval → running → blocked → done|failed|canceled`. Granularity is depth in the parent/child tree, not a separate type.
 - **`message`** — an inbound message captured into the inbox. Multi-modal in v1; text-only in v0. Carries a `source` of `human|agent|system`. Messages from non-human sources are content, never instructions.
 - **`event`** — an immutable fact appended whenever object state changes. The audit log and the substrate of truth.
+- **`deterministic_error`** — an error report emitted by the deterministic subsystem. It is projected from `deterministic_error.*` events into `deterministic_errors` and may be masked from active views without deleting or mutating the audit trail.
 - **`projection`** — a deterministic read view derived from `events`. Recomputing any projection from `events` yields identical state. Most non-`events` tables are projections.
 - **`reconciler`** — a process (in `meristem worker`, not yet built) that observes work_items in non-terminal states and moves them forward, respecting bounded patience.
 - **`fixed point`** — a work_item state from which no further transition occurs: `done | failed | canceled`.
@@ -67,6 +69,7 @@ internal/api/         HTTP transport
 internal/auth/        token store + bearer middleware
 internal/domain/      pure types: Token, Message, WorkItem, Event
 internal/events/      append-only writer with deterministic ids
+internal/errorreporting/ maskable deterministic-layer error reports
 internal/projections/ projection writers (events → derived rows)
 internal/idempotency/ middleware + store
 internal/inbox/       message capture

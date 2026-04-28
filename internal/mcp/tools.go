@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -79,26 +82,67 @@ func (s *Server) toolInboxCapture() Tool {
 
 func (s *Server) toolFeedRead() Tool {
 	return Tool{
-		Name:        "feed.read",
-		Description: "Read the most recent feed-visible events, newest first.",
+		Name: "feed.read",
+		Description: "Read feed-visible events. Default: snapshot (newest first). " +
+			"Pass cursor and/or wait (Go duration, e.g. 30s) for watcher mode — same contract as GET /v1/feed (oldest-first page, next_cursor, has_more).",
 		InputSchema: schemaObject(nil, map[string]any{
-			"limit": schemaInt("Max items to return (1-200). Defaults to 50."),
+			"limit":  schemaInt("Max items (1-200). Defaults to 50."),
+			"cursor": schemaString("Opaque cursor from a prior next_cursor or SSE id. Omit for snapshot mode."),
+			"wait":   schemaString("Long-poll cap as a Go duration (e.g. 10s). Use with watcher semantics; server-capped."),
 		}),
 		Handler: func(ctx context.Context, _ domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.Feed == nil {
 				return nil, errors.New("feed service not configured")
 			}
 			var args struct {
-				Limit int `json:"limit"`
+				Limit  int    `json:"limit"`
+				Cursor string `json:"cursor"`
+				Wait   string `json:"wait"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
-			items, err := s.deps.Feed.List(ctx, args.Limit)
+			if args.Cursor == "" && args.Wait == "" {
+				items, err := s.deps.Feed.List(ctx, args.Limit)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"items": items}, nil
+			}
+			var wait time.Duration
+			if args.Wait != "" {
+				parsed, err := time.ParseDuration(args.Wait)
+				if err != nil {
+					return nil, fmt.Errorf("feed.read: invalid wait: %w", err)
+				}
+				if parsed < 0 {
+					return nil, fmt.Errorf("feed.read: wait must be non-negative")
+				}
+				wait = parsed
+			}
+			maxWait := s.deps.MaxFeedWait
+			if maxWait == 0 {
+				maxWait = safety.DefaultPolicy().MaxFeedWait
+			}
+			if wait > maxWait {
+				return nil, fmt.Errorf("feed.read: wait exceeds server limit (%s)", maxWait)
+			}
+			page, err := s.deps.Feed.Page(ctx, feed.ListOptions{
+				Cursor: args.Cursor,
+				Wait:   wait,
+				Limit:  args.Limit,
+			})
 			if err != nil {
+				if errors.Is(err, feed.ErrInvalidCursor) {
+					return nil, fmt.Errorf("feed.read: invalid_cursor: %w", err)
+				}
 				return nil, err
 			}
-			return map[string]any{"items": items}, nil
+			return map[string]any{
+				"items":       page.Items,
+				"next_cursor": page.NextCursor,
+				"has_more":    page.HasMore,
+			}, nil
 		},
 	}
 }
