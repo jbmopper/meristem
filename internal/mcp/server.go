@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,17 @@ import (
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/workitems"
+)
+
+// ToolNameMode controls the names advertised through tools/list. Canonical
+// names stay dot-namespaced per docs/v0.md; Cursor currently filters tools
+// containing dots, so Cursor compatibility mode advertises underscore aliases
+// while still accepting canonical calls.
+type ToolNameMode string
+
+const (
+	ToolNameModeCanonical ToolNameMode = "canonical"
+	ToolNameModeCursor    ToolNameMode = "cursor"
 )
 
 // Deps bundles the domain services the MCP tools wrap. They are the same
@@ -48,8 +60,9 @@ type Server struct {
 	mu    sync.RWMutex
 	actor domain.Token
 
-	tools   []Tool
-	toolsByName map[string]Tool
+	toolNameMode ToolNameMode
+	tools        []Tool
+	toolsByName  map[string]Tool
 }
 
 // New builds an unauthenticated server. Authenticate must be called before
@@ -73,8 +86,21 @@ func New(deps Deps, info ServerInfo, logger *slog.Logger) *Server {
 	s.tools = s.buildTools()
 	for _, t := range s.tools {
 		s.toolsByName[t.Name] = t
+		s.toolsByName[cursorToolName(t.Name)] = t
 	}
 	return s
+}
+
+// SetToolNameMode changes only the names advertised in tools/list. Dispatch
+// accepts both canonical names and compatibility aliases either way, so a
+// client changing modes mid-session does not break in-flight calls.
+func (s *Server) SetToolNameMode(mode ToolNameMode) {
+	switch mode {
+	case ToolNameModeCursor:
+		s.toolNameMode = mode
+	default:
+		s.toolNameMode = ToolNameModeCanonical
+	}
 }
 
 // Authenticate resolves the bearer secret to a token row and stores it as
@@ -240,12 +266,23 @@ func (s *Server) handleListTools() (any, *rpcError) {
 	descs := make([]toolDescriptor, 0, len(s.tools))
 	for _, t := range s.tools {
 		descs = append(descs, toolDescriptor{
-			Name:        t.Name,
+			Name:        s.advertisedToolName(t.Name),
 			Description: t.Description,
 			InputSchema: t.InputSchema,
 		})
 	}
 	return map[string]any{"tools": descs}, nil
+}
+
+func (s *Server) advertisedToolName(canonical string) string {
+	if s.toolNameMode == ToolNameModeCursor {
+		return cursorToolName(canonical)
+	}
+	return canonical
+}
+
+func cursorToolName(canonical string) string {
+	return strings.ReplaceAll(canonical, ".", "_")
 }
 
 type callToolParams struct {

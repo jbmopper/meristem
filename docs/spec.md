@@ -55,6 +55,29 @@ The system has two cooperating subsystems. The deterministic subsystem owns the 
 
 Deterministic-layer failures are reported as `deterministic_error.*` events and projected into `deterministic_errors`. Error reports are maskable: masking hides a report from active operator views without deleting or changing the immutable events that explain when it was reported, masked, or unmasked. Error payloads must be safe for durable audit storage; secrets and raw message content do not belong in them.
 
+### Convergence Patterns
+
+Convergence is how a `work_item` reaches a terminal state. In every pattern the probabilistic subsystem may *propose and judge* — sample at high temperature, fan out across models, draft a plan, write a patch, grade another model's patch — but a deterministic *reduction* is what disposes. Without a deterministic side, retrying is a random walk and bounded patience has nothing to escalate on.
+
+The deterministic side is not required to be a hand-coded checker. It is required to be a deterministic *reducer over the signals it has*. The signals may themselves be probabilistic (a model's grade of another model's output, a confidence score, an LLM-emitted JSON verdict). What is deterministic — and what is logged — is the reduction: majority vote across N graders, a fixed threshold, an `all-pass` over a list of probabilistic checks. Given the same inputs, the reducer always produces the same verdict.
+
+Every convergence pattern must satisfy three rules:
+
+1. **A deterministic reduction.** A pure function over the available signals decides whether the candidate is accepted, rejected, or escalated. The signals may be model outputs treated as opaque text or as parsed JSON; the reducer is hand-coded and replayable. The verdict, not the candidate, advances the lifecycle.
+2. **The verdict is an event.** Acceptance and rejection append events that record the reducer's identity and version, the inputs digest, and — when a probabilistic signal informed the reduction — the signal's source (model, prompt version, sample id) and the raw output. "We accepted output X because reducer Y had three of four graders pass at commit Z" must be reconstructable from `events` alone, so a stricter future reducer can re-fold the log.
+3. **Bounded patience.** The pattern declares a maximum number of attempts (or a wall-clock budget) and an escalation rule when exhausted: terminate `failed`, request approval, or hand to a human. New patterns ship with their escalation rule or they do not ship.
+
+The recurring shapes — none of them privileged, all reducible to "propose N signals, deterministically combine them":
+
+- **Resample.** Same model, same prompt, varied seed or temperature. Cheapest pattern. The reducer is typically a strict checker plus a retry budget; useful when the checker is strict and the model is mostly right.
+- **Multi-model.** Different models or different prompts produce N candidates; the deterministic reducer selects (vote, schema-match, run-to-green, score-and-take-best). Useful when failure modes are model-specific.
+- **Generate-and-validate.** A `generate` child (probabilistic) produces a candidate; a `validate` child (which may itself be a model run, "loaded" into grader mode by being asked to grade its pair's output) emits a probabilistic verdict. The deterministic reducer combines validator verdicts — for a single grader, threshold its score; for multiple, take a vote or require unanimity. Pure-deterministic validators (schema checks, type checks, test suites, linters, parsers, fuzzers, replay-equality against the event log) are still preferred when available, because they make the reducer trivial.
+- **External signal.** A connector or human action provides the verdict (CI passed, approval granted, file landed). The reducer is the projection that observed the signal. Bounded patience here is a timeout that escalates to a different pattern, not infinite waiting.
+
+These shapes compose: a generate-and-validate child can use multi-model internally; a multi-model selector can itself feed a generate-and-validate. They do not compose into a new mechanism — every layer still owes a deterministic reduction, an event, and a patience budget.
+
+The deterministic reducer should be the smallest thing that does the job. A vote, a threshold, an `all` over a checklist, a regex over a model's verdict text — these are fine, *as long as the reducer is fixed and logged*. What is not fine is letting a model's free-form judgment directly drive the lifecycle: the reducer is then unspecified and the verdict is not replayable.
+
 ## Domain Model
 
 ### Objects
@@ -290,9 +313,11 @@ meristem/
   docs/
 ```
 
-## v0 — Bootstrap
+## v0 — Bootstrap (shipped)
 
-v0 is the smallest version of `meristem` that can be used to build `meristem`. It ships cold (built directly, not tracked in itself). Everything past v0 is a tracked `work_item` in the running system.
+> **Status: shipped.** v0 acceptance is met by the current binary. This section is retained as the historical contract; the implementation details are in `docs/v0.md`. Current substrate state: v0 plus the in-flight v1 items called out below.
+
+v0 is the smallest version of `meristem` that can be used to build `meristem`. It shipped cold (built directly, not tracked in itself). Everything past v0 is a tracked `work_item` in the running system.
 
 The thesis: as soon as the owner can capture instructions from the iPhone, see them in a feed, and dispatch them to a Cursor agent via MCP, the rest of the substrate can be built *as* `meristem` work — by the owner, by Cursor agents, or both — flowing through the system it is building.
 
@@ -345,30 +370,32 @@ These are deferred and become tracked work items in `meristem` the moment v0 is 
 
 Roughly five to seven focused working days. v0 is small enough to land inside a single working week.
 
-## v1 Substrate (first body of work in meristem)
+## v1 Substrate (in flight — current body of work)
 
-Once v0 is running, every item below exists as a `work_item` in `meristem` and is dispatched to the owner or to Cursor agents via MCP. v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the open-ended backlog after that.
+> **Status: in flight.** v0 has shipped; v1 is the current substrate work. Each item below either lives in code today (marked ✅ done or 🚧 partial) or is open work (◻︎). Open items exist as `work_item`s in the running system per `meristem seed v1`; this list and the seeded backlog must not drift.
 
-v1 is complete when every item below is true. Nothing in v1 is GCP-specific; the host happens to be GCP.
+v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the open-ended backlog after that. v1 is complete when every item below is ✅. Nothing in v1 is GCP-specific; the host happens to be GCP.
 
-- Go repo, Docker-based local dev, Postgres migrations.
-- Token model: root token, scoped client tokens, separation of duties, panic-revoke.
-- All security primitives listed above.
-- `work_item`, `message`, `artifact`, `approval`, `event`, `token` tables and projections.
-- Append-only `events` with full attribution.
-- Idempotency at every layer per the **Idempotency** section.
-- `POST /v1/inbox/messages` accepting multi-modal parts; `GET /v1/feed`.
-- Worker with `job_queue` and `SELECT … FOR UPDATE SKIP LOCKED`.
-- Convergence loop that drives every work item to a terminal state without owner babysitting.
-- Generic HTTP connector with read/write declaration, approval gate on writes, retries, and dead-lettering.
-- Webhook verification.
-- Approvals with expiry, re-prompt cadence, and the convergence semantics above.
-- APNs (or Web Push) for approval requests, with email/SMS fallback.
-- Minimal web UI: feed, work-item detail, approve/deny, dead-letter view.
-- iPhone Shortcut posting to `/v1/inbox/messages`.
-- Full-featured MCP server with parity to REST, including write paths and approval requests.
-- Nightly Postgres dumps to object storage; documented and rehearsed restore.
-- Single-VM deploy with TLS, disk encryption, and object overflow.
+- ✅ Go repo, Docker-based local dev, Postgres migrations.
+- 🚧 Token model: root token ✅, client tokens ✅; scoped client tokens, separation of duties, and panic-revoke still open.
+- 🚧 Security primitives listed above (basic bearer + SHA-256 + append-only triggers in place; KMS-wrapped envelope encryption open).
+- 🚧 `work_item`, `message`, `event`, `token` tables and projections ✅; `artifact` and `approval` tables open.
+- ✅ Append-only `events` with full attribution.
+- ✅ Idempotency at every POST per the **Idempotency** section.
+- 🚧 `POST /v1/inbox/messages` ✅ (text only); multi-modal parts open. `GET /v1/feed` ✅, with SSE push.
+- 🚧 Worker with `job_queue` and `SELECT … FOR UPDATE SKIP LOCKED` — package and migration in place; reconciler rules open.
+- ◻︎ Convergence loop that drives every work item to a terminal state without owner babysitting.
+- ◻︎ Generic HTTP connector with read/write declaration, approval gate on writes, retries, and dead-lettering.
+- ◻︎ Webhook verification.
+- ◻︎ Approvals with expiry, re-prompt cadence, and the convergence semantics above.
+- ◻︎ APNs (or Web Push) for approval requests, with email/SMS fallback.
+- ◻︎ Minimal web UI: feed, work-item detail, approve/deny, dead-letter view.
+- ✅ iPhone Shortcut posting to `/v1/inbox/messages`.
+- 🚧 MCP server with REST parity ✅ for read/triage paths; write paths with approval requests open.
+- ◻︎ Nightly Postgres dumps to object storage; documented and rehearsed restore.
+- 🚧 Single-VM deploy with TLS, disk encryption, and object overflow.
+
+Items that landed beyond the original v0 scope and are now part of the substrate: `internal/signals` (non-human structured input), `internal/errorreporting` (`deterministic_error.*` events + maskable projection), `internal/safety` (deterministic resource limits), and the resumable feed cursor with monotonic `events.seq`. They are folded into v1 because they ship the load-bearing properties this section requires.
 
 ### Acceptance
 

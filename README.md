@@ -25,7 +25,7 @@ Currently shipped:
 
 ## Spec
 
-The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
+The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The copy/paste bootstrap text for MCP-connected workers is in [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
 
 ## Layout
 
@@ -139,6 +139,19 @@ MERISTEM_TOKEN=mrs_... examples/curl-signal.sh        # 201 + Idempotency-Replay
 MERISTEM_IDEMPOTENCY_KEY=$(uuidgen) \
   MERISTEM_TOKEN=mrs_... examples/curl-signal.sh      # 201, links to existing work_item via dedupe_key
 ```
+
+## Assistant access
+
+Use [`scripts/provision-assistant-access.sh`](scripts/provision-assistant-access.sh) to mint per-assistant agent tokens, store them under `.meristem/*.token` with mode 0600, and generate secret-free MCP config snippets. The script can also harden Cursor's local MCP config and register meristem with Claude Code when the `claude` CLI is installed.
+
+```bash
+MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+  scripts/provision-assistant-access.sh --apply-cursor --apply-claude-code --print-remote
+```
+
+When spinning up a worker manually, paste the streamlined MCP instructions from
+[`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md) after filling in
+the assigned work item, scope, and allowed areas.
 
 ## Go client
 

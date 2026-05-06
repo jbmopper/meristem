@@ -53,6 +53,9 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 	}
 
 	server := mcp.New(deps, mcp.ServerInfo{Name: "meristem", Version: version}, logger)
+	if os.Getenv("MERISTEM_MCP_TOOL_NAMES") == string(mcp.ToolNameModeCursor) {
+		server.SetToolNameMode(mcp.ToolNameModeCursor)
+	}
 	if err := server.Authenticate(ctx, secret); err != nil {
 		return fmt.Errorf("mcp: authenticate MERISTEM_TOKEN: %w", err)
 	}

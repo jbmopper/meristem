@@ -137,6 +137,70 @@ func TestServer_ToolsList_AdvertisesAllEightTools(t *testing.T) {
 	}
 }
 
+func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
+	s := newTestServer(t)
+	s.SetToolNameMode(ToolNameModeCursor)
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if resp.Error != nil {
+		t.Fatalf("tools/list returned error: %+v", resp.Error)
+	}
+	var result struct {
+		Tools []toolDescriptor `json:"tools"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tools/list: %v", err)
+	}
+
+	expected := []string{
+		"inbox_capture",
+		"feed_read",
+		"work_items_list",
+		"work_items_get",
+		"work_items_create",
+		"work_items_spawn_child",
+		"work_items_append_event",
+		"work_items_transition",
+	}
+	if len(result.Tools) != len(expected) {
+		t.Fatalf("expected %d tools, got %d (%v)", len(expected), len(result.Tools), toolNames(result.Tools))
+	}
+	got := make(map[string]bool, len(result.Tools))
+	for _, tool := range result.Tools {
+		got[tool.Name] = true
+		if strings.Contains(tool.Name, ".") {
+			t.Errorf("Cursor-compatible tool name still contains dot: %q", tool.Name)
+		}
+	}
+	for _, name := range expected {
+		if !got[name] {
+			t.Errorf("missing Cursor-compatible tool %q", name)
+		}
+	}
+}
+
+func TestServer_CallTool_AcceptsCursorAlias(t *testing.T) {
+	s := newTestServer(t)
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"feed_read","arguments":{}}}`)
+	if resp.Error != nil {
+		t.Fatalf("expected transport success, got error %+v", resp.Error)
+	}
+	var result struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tool result: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected service-missing tool error after alias dispatch, got %+v", result)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "feed service not configured") {
+		t.Errorf("alias did not route to feed.read handler: %+v", result.Content)
+	}
+}
+
 func TestServer_UnknownMethod_ReturnsMethodNotFound(t *testing.T) {
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":3,"method":"does/not/exist"}`)

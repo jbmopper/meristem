@@ -25,6 +25,7 @@ Every change must respect these. Raise a violation before writing code, not afte
 9. **REST is canonical.** CLI and MCP are translation layers. Every REST operation has an MCP tool and (where useful) a CLI surface. Transports never own business logic.
 10. **Minimum viable security; the rest the system later does for itself.** Do not pre-build critic agents, redaction policies, formal threat models, or audit attestations. They are tracked work_items in the running system once v0 is up.
 11. **Bootstrap discipline.** v0 is the minimum substrate that can track its own further development. After v0 ships, every new capability is a `work_item` in the running system. Capabilities do not arrive as "phases" or "milestones"; they arrive as items the running system converges.
+12. **Convergence has a deterministic reduction.** Every convergence pattern — resample, multi-model, generate-and-validate, external signal — pairs probabilistic proposers and judges with a deterministic reducer (vote, threshold, `all`-over-checklist, schema-match, run-to-green). The signals may be probabilistic, including a model grading its pair's output; the reduction over those signals must be a pure, replayable function whose verdict is itself an event recording reducer identity, inputs, and the raw signals. Patterns ship with a patience budget and an escalation rule. Letting a model's free-form judgment directly drive the lifecycle is forbidden — the reducer must be specified. See `docs/spec.md` → Architecture → **Convergence Patterns**.
 
 ## Direction (not yet enforced principle)
 
@@ -173,6 +174,12 @@ A projection writer turns appended events into derived rows. It is the *only* co
 - Do not add a typed `agent` object or `agent_kind` enum. Agent identity is `token.source = 'agent'` plus the tools the bearer has access to. Agent specialization lives in artifacts and prompts, never in the schema.
 
 ## Coordination with other agents
+
+For a new MCP-connected worker, the operator may paste
+[`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md) after filling in
+the assigned work_item, scope, and allowed areas. Treat that bootstrap text as
+an entry prompt; the rules in this file and `docs/spec.md` still govern the
+work.
 
 Until `meristem` can track its own development as work_items, multiple agents working concurrently coordinate out-of-band through `docs/coord/`. Each file is dated; read the most recent before starting a turn that touches code another agent has written. When you finish a turn that affects another agent's territory or makes a contract decision, append a short dated note to the appropriate file. When all open questions in a coord file are closed, move it to `docs/coord/archive/`.
 

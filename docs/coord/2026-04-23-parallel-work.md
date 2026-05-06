@@ -9,6 +9,31 @@ Roles in this doc:
 
 ## Status updates
 
+### 2026-04-28 Codex — MCP worker bootstrap text
+
+Added `docs/mcp-worker-bootstrap.md`, a short copy/paste prompt for manually
+spinning up MCP-connected workers with an assigned work_item, scope, allowed
+areas, and handoff rules. Linked it from `README.md` and `AGENTS.md`. The text
+keeps `AGENTS.md` and `docs/spec.md` as governing instructions while making
+meristem MCP the live coordination plane. Dogfood work_item:
+`94ebcb8b-d4cb-5bcc-bc7a-898278f13487`.
+
+### 2026-04-28 Codex — Cursor MCP compatibility repair
+
+Cursor accepted the meristem MCP server but filtered every tool because its
+current tool-name policy only allows alphanumeric characters and underscores.
+The canonical MCP surface remains dot-namespaced per `docs/v0.md`
+(`feed.read`, `work_items.list`, etc.), but `meristem mcp` now supports
+`MERISTEM_MCP_TOOL_NAMES=cursor`, which advertises underscore aliases while
+dispatch still accepts both canonical names and aliases. The assistant access
+provisioning script sets this mode only for Cursor-generated config. Also
+backed up and repaired the malformed user-level Cursor MCP JSON at
+`~/.cursor/mcp.json`, removing a stale global meristem entry because this
+workspace owns meristem via `.cursor/mcp.json`. Verification:
+`GOCACHE=/tmp/meristem-go-cache go test ./...`, JSON validation for the
+workspace/user/slack MCP configs, and a live stdio `tools/list` showing
+`inbox_capture`, `feed_read`, and `work_items_*`.
+
 ### 2026-04-28 Codex — deterministic error reporting slice
 
 Added a deterministic-layer error reporting substrate without touching the dirty MCP/CLI work already in the tree. The new contract is: deterministic subsystem failures append `deterministic_error.reported`, `deterministic_error.masked`, and `deterministic_error.unmasked` events; `deterministic_errors` is the replayable projection; masking hides reports from active views but never mutates or deletes audit events. Projectors are registered in `internal/app`, rebuild coverage includes the new projection table, feed policy classifies the new events as narrative, and `docs/spec.md`/`AGENTS.md` now name the deterministic/probabilistic split. Verification: `GOCACHE=/tmp/meristem-go-cache go test ./...` and `GOCACHE=/tmp/meristem-go-cache go vet ./...` are green. Boundary: this did not intentionally edit the pre-existing dirty `cmd/meristem/{main,mcp}.go`, `internal/mcp/*`, `docs/v0.md`, `cmd/meristem/git.go`, `examples/cursor-mcp.json.example`, or `migrations/0007_job_queue.*` work.
