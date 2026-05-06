@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -36,6 +37,8 @@ func (s *Server) buildTools() []Tool {
 	return []Tool{
 		s.toolInboxCapture(),
 		s.toolFeedRead(),
+		s.toolDeterministicErrorsList(),
+		s.toolDeterministicErrorsGet(),
 		s.toolWorkItemsList(),
 		s.toolWorkItemsGet(),
 		s.toolWorkItemsCreate(),
@@ -144,6 +147,80 @@ func (s *Server) toolFeedRead() Tool {
 				"next_cursor": page.NextCursor,
 				"has_more":    page.HasMore,
 			}, nil
+		},
+	}
+}
+
+func (s *Server) toolDeterministicErrorsList() Tool {
+	return Tool{
+		Name:        "deterministic_errors.list",
+		Description: "List deterministic log/error records visible to this token. Details are filtered by logs.* scopes.",
+		InputSchema: schemaObject(nil, map[string]any{
+			"include_masked": schemaBool("Include masked records. Requires logs.read_masked or root."),
+			"limit":          schemaInt("Max items to return (1-200). Defaults to 50."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.DeterministicErrors == nil {
+				return nil, errors.New("deterministic error service not configured")
+			}
+			var args struct {
+				IncludeMasked bool `json:"include_masked"`
+				Limit         int  `json:"limit"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			items, err := s.deps.DeterministicErrors.ListForAccessor(ctx, errorreporting.ListOptions{
+				IncludeMasked: args.IncludeMasked,
+				Limit:         args.Limit,
+			}, actor)
+			if err != nil {
+				if errors.Is(err, errorreporting.ErrAccessDenied) {
+					return nil, fmt.Errorf("insufficient_scope: token lacks deterministic log visibility scope")
+				}
+				return nil, err
+			}
+			out := make([]deterministicErrorDTO, 0, len(items))
+			for _, item := range items {
+				out = append(out, toDeterministicErrorDTO(item))
+			}
+			return map[string]any{"items": out}, nil
+		},
+	}
+}
+
+func (s *Server) toolDeterministicErrorsGet() Tool {
+	return Tool{
+		Name:        "deterministic_errors.get",
+		Description: "Fetch one deterministic log/error record visible to this token. Details are filtered by logs.* scopes.",
+		InputSchema: schemaObject([]string{"id"}, map[string]any{
+			"id": schemaString("Deterministic error uuid."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.DeterministicErrors == nil {
+				return nil, errors.New("deterministic error service not configured")
+			}
+			var args struct {
+				ID string `json:"id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			item, err := s.deps.DeterministicErrors.GetForAccessor(ctx, id, actor)
+			if err != nil {
+				if errors.Is(err, errorreporting.ErrAccessDenied) {
+					return nil, fmt.Errorf("insufficient_scope: token lacks deterministic log visibility scope")
+				}
+				if errors.Is(err, errorreporting.ErrNotFound) {
+					return nil, fmt.Errorf("deterministic error %s not found", id)
+				}
+				return nil, err
+			}
+			return map[string]any{"deterministic_error": toDeterministicErrorDTO(item)}, nil
 		},
 	}
 }
@@ -461,6 +538,49 @@ type workItemDTO struct {
 	UpdatedAt                  string                   `json:"updated_at"`
 }
 
+type deterministicErrorDTO struct {
+	ID         uuid.UUID                         `json:"id"`
+	Component  string                            `json:"component"`
+	Code       string                            `json:"code"`
+	Message    string                            `json:"message"`
+	Severity   domain.DeterministicErrorSeverity `json:"severity"`
+	Details    json.RawMessage                   `json:"details"`
+	ReportedBy *uuid.UUID                        `json:"reported_by,omitempty"`
+	ReportedAt string                            `json:"reported_at"`
+	UpdatedAt  string                            `json:"updated_at"`
+	Masked     bool                              `json:"masked"`
+	MaskReason *string                           `json:"mask_reason,omitempty"`
+	MaskedBy   *uuid.UUID                        `json:"masked_by,omitempty"`
+	MaskedAt   *string                           `json:"masked_at,omitempty"`
+}
+
+func toDeterministicErrorDTO(item domain.DeterministicError) deterministicErrorDTO {
+	details := json.RawMessage(item.Details)
+	if len(details) == 0 {
+		details = json.RawMessage(`{}`)
+	}
+	var maskedAt *string
+	if item.MaskedAt != nil {
+		formatted := item.MaskedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
+		maskedAt = &formatted
+	}
+	return deterministicErrorDTO{
+		ID:         item.ID,
+		Component:  item.Component,
+		Code:       item.Code,
+		Message:    item.Message,
+		Severity:   item.Severity,
+		Details:    details,
+		ReportedBy: item.ReportedBy,
+		ReportedAt: item.ReportedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		UpdatedAt:  item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		Masked:     item.Masked,
+		MaskReason: item.MaskReason,
+		MaskedBy:   item.MaskedBy,
+		MaskedAt:   maskedAt,
+	}
+}
+
 func toWorkItemDTO(item domain.WorkItem) workItemDTO {
 	return workItemDTO{
 		ID:                         item.ID,
@@ -522,6 +642,10 @@ func schemaStringArray(description string) map[string]any {
 
 func schemaInt(description string) map[string]any {
 	return map[string]any{"type": "integer", "description": description}
+}
+
+func schemaBool(description string) map[string]any {
+	return map[string]any{"type": "boolean", "description": description}
 }
 
 func schemaAny(description string) map[string]any {

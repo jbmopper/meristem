@@ -14,6 +14,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -34,10 +35,11 @@ const (
 // services the HTTP transport calls into; MCP is one more translation
 // layer per docs/v0.md, never an alternate execution path.
 type Deps struct {
-	Auth      *auth.Service
-	Inbox     *inbox.Service
-	WorkItems *workitems.Service
-	Feed      *feed.Service
+	Auth                *auth.Service
+	Inbox               *inbox.Service
+	WorkItems           *workitems.Service
+	DeterministicErrors *errorreporting.Service
+	Feed                *feed.Service
 	// MaxFeedWait caps feed.read watcher wait (mirrors GET /v1/feed). Zero
 	// falls back to safety.DefaultPolicy().MaxFeedWait in the tool.
 	MaxFeedWait time.Duration

@@ -53,7 +53,7 @@ Artifacts and audit are not components. They are tables plus thin interfaces.
 
 The system has two cooperating subsystems. The deterministic subsystem owns the event log, projections, migrations, safety policy, auth, idempotency, queue claims, and all reconciliation rules that must replay byte-for-byte. The probabilistic subsystem proposes classifications, plans, summaries, and other model-shaped judgments; it never owns durable truth directly.
 
-Deterministic-layer failures are reported as `deterministic_error.*` events and projected into `deterministic_errors`. Error reports are maskable: masking hides a report from active operator views without deleting or changing the immutable events that explain when it was reported, masked, or unmasked. Error payloads must be safe for durable audit storage; secrets and raw message content do not belong in them.
+Deterministic-layer failures are reported as `deterministic_error.*` events and projected into `deterministic_errors`. Error reports are maskable: masking hides a report from active operator views without deleting or changing the immutable events that explain when it was reported, masked, or unmasked. Masking is attention policy, not privacy redaction. Error payloads must be safe for durable audit storage; secrets and raw message content do not belong in them. Read surfaces apply deterministic token-scope visibility (`logs.read*`) to details fields, and future encrypted payload envelopes are an explicit work item rather than an excuse to store plaintext sensitive content.
 
 ### Convergence Patterns
 

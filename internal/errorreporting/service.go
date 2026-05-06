@@ -32,6 +32,7 @@ var (
 	ErrMessageRequired   = errors.New("errorreporting: message is required")
 	ErrInvalidSeverity   = errors.New("errorreporting: invalid severity")
 	ErrInvalidDetails    = errors.New("errorreporting: details must be a JSON object")
+	ErrAccessDenied      = errors.New("errorreporting: access denied")
 )
 
 // Service is the deterministic error-report write/read surface. All state
@@ -161,6 +162,21 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (domain.DeterministicEr
 	return scanDeterministicError(ctx, s.pool, id)
 }
 
+func (s *Service) GetForAccessor(ctx context.Context, id uuid.UUID, accessor domain.Token) (domain.DeterministicError, error) {
+	policy := PolicyForToken(accessor)
+	if !policy.CanRead {
+		return domain.DeterministicError{}, ErrAccessDenied
+	}
+	item, err := s.Get(ctx, id)
+	if err != nil {
+		return domain.DeterministicError{}, err
+	}
+	if item.Masked && !policy.CanReadMasked {
+		return domain.DeterministicError{}, ErrNotFound
+	}
+	return policy.Filter(item), nil
+}
+
 func (s *Service) List(ctx context.Context, opts ListOptions) ([]domain.DeterministicError, error) {
 	limit := opts.Limit
 	if limit <= 0 || limit > 200 {
@@ -187,6 +203,24 @@ func (s *Service) List(ctx context.Context, opts ListOptions) ([]domain.Determin
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (s *Service) ListForAccessor(ctx context.Context, opts ListOptions, accessor domain.Token) ([]domain.DeterministicError, error) {
+	policy := PolicyForToken(accessor)
+	if !policy.CanRead {
+		return nil, ErrAccessDenied
+	}
+	if opts.IncludeMasked && !policy.CanReadMasked {
+		return nil, ErrAccessDenied
+	}
+	items, err := s.List(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i] = policy.Filter(items[i])
+	}
+	return items, nil
 }
 
 type queryer interface {

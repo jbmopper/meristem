@@ -8,6 +8,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
@@ -45,11 +46,12 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 
 	writer := app.NewEventWriter()
 	deps := mcp.Deps{
-		Auth:        auth.NewService(pool, writer),
-		Inbox:       inbox.NewService(pool, writer),
-		WorkItems:   workitems.NewService(pool, writer),
-		Feed:        feed.NewService(pool),
-		MaxFeedWait: policy.MaxFeedWait,
+		Auth:                auth.NewService(pool, writer),
+		Inbox:               inbox.NewService(pool, writer),
+		WorkItems:           workitems.NewService(pool, writer),
+		DeterministicErrors: errorreporting.NewService(pool, writer),
+		Feed:                feed.NewService(pool),
+		MaxFeedWait:         policy.MaxFeedWait,
 	}
 
 	server := mcp.New(deps, mcp.ServerInfo{Name: "meristem", Version: version}, logger)

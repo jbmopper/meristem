@@ -23,6 +23,11 @@ A deterministic error report has three layers:
 
 The important distinction is that masking is not deletion. A masked report is still in the event log, still replayable, and still visible when a caller asks to include masked errors. Masking only says: "do not treat this as an active error right now."
 
+Masking is also not privacy redaction. Payloads must be safe enough to store in
+`events` before they are reported. Read-time privacy filtering controls which
+fields an accessor can see; it does not remove unsafe facts from the durable
+audit log after the fact.
+
 ## Event flow
 
 The deterministic error system uses three event kinds:
@@ -59,6 +64,35 @@ Each report stores:
 
 Details must be a JSON object. Keep details small and durable. Include identifiers, event kinds, table names, counts, or stable diagnostic facts. Do not include bearer tokens, raw message content, credentials, connection secrets, or large blobs.
 
+Details may carry field-level visibility metadata with a top-level
+`_visibility` object:
+
+```json
+{
+  "event_kind": "work_item.created",
+  "table": "work_items",
+  "raw_payload": "...",
+  "_visibility": {
+    "event_kind": "public",
+    "table": "internal",
+    "raw_payload": "restricted"
+  }
+}
+```
+
+The `_visibility` object is policy metadata. It is part of the canonical
+stored report, but filtered read views do not return it as diagnostic data.
+Unlabelled fields default to `internal`. Unknown explicit labels fail closed
+and require restricted visibility.
+
+Current labels:
+
+| Label | Visible with |
+|-------|--------------|
+| `public` | `logs.read` |
+| `internal` or unlabelled | `logs.read_details` |
+| `restricted`, `private`, `sensitive`, `encrypted` | `logs.read_restricted` |
+
 ## Masking semantics
 
 Masking answers an operator-attention question, not a truth question.
@@ -88,10 +122,37 @@ The package currently provides:
 - `Unmask(ctx, id, MaskInput)`
 - `Get(ctx, id)`
 - `List(ctx, ListOptions)`
+- `GetForAccessor(ctx, id, token)`
+- `ListForAccessor(ctx, ListOptions, token)`
 
 `ListOptions.IncludeMasked` defaults the system toward active errors. Callers that are doing audit, replay, or history views should include masked reports explicitly.
 
-There is not yet a dedicated REST or MCP surface for deterministic errors. When that surface is added, it should be a transport wrapper over the same service, following the existing rule that REST and MCP translate request shapes and do not own business logic.
+Transport read surfaces call the accessor-aware methods above. They do not read
+`deterministic_errors` directly or reimplement filtering.
+
+Current read scopes:
+
+| Scope | Meaning |
+|-------|---------|
+| `logs.read` | List/get active deterministic log records and public detail fields. |
+| `logs.read_details` | Also see internal/unlabelled detail fields. Implies `logs.read`. |
+| `logs.read_restricted` | Also see restricted/private/sensitive/encrypted detail fields. Implies `logs.read_details`. |
+| `logs.read_masked` | May request masked records with `include_masked=true`. |
+| `logs.read_all` | Convenience scope for all read visibility. Root tokens get equivalent access automatically. |
+
+Current REST surface:
+
+- `GET /v1/deterministic-errors?limit=N&include_masked=false`
+- `GET /v1/deterministic-errors/{id}`
+
+Current MCP surface:
+
+- `deterministic_errors.list`
+- `deterministic_errors.get`
+
+Mask/unmask/report transports are intentionally still separate follow-up work;
+the first exposed surface is read-only so the privacy/access reducer is in the
+path whenever logs are examined.
 
 ## Relationship to work items
 
@@ -101,7 +162,8 @@ Some reports should lead to work items, especially if repair is needed. That lin
 
 ## Operator workflow
 
-For now, the visible surfaces are the feed and any code that reads `deterministic_errors` directly:
+The visible surfaces are the feed, the deterministic-errors REST/MCP read
+surfaces, and trusted internal code that reads `deterministic_errors` directly:
 
 1. A deterministic component reports an error.
 2. The event appears in `/v1/feed`.
@@ -109,7 +171,9 @@ For now, the visible surfaces are the feed and any code that reads `deterministi
 4. If the report is noise or intentionally deferred, mask it with a reason.
 5. If the report needs repair, create a work item and leave the report active until the repair path is clear.
 
-When REST or MCP tools are added, they should support the same basic actions: list active, list including masked, get, mask, and unmask.
+When write transports are added, they should support the same basic actions:
+report, mask, and unmask. They must call the service rather than writing
+projection rows directly.
 
 ## Implementation landmarks
 
@@ -119,6 +183,8 @@ When REST or MCP tools are added, they should support the same basic actions: li
 - Projector registration: `internal/app/projectors.go`
 - Rebuild coverage: `cmd/meristem/rebuild.go`
 - Feed visibility: `internal/feed/feed.go`
+- REST read surface: `internal/api/deterministic_errors.go`
+- MCP read tools: `internal/mcp/tools.go`
 - System-level contract: `docs/spec.md`
 
 ## Invariants
@@ -126,5 +192,7 @@ When REST or MCP tools are added, they should support the same basic actions: li
 - Never write `deterministic_errors` directly outside a projector.
 - Never record secrets or raw private content in error details.
 - Masking must not delete or rewrite the original report event.
+- Privacy filtering happens at read time from token scopes; do not create
+  per-accessor truth projections.
 - Rebuild from `events` must reproduce the projection.
 - Transports added later must call the service rather than duplicating business logic.

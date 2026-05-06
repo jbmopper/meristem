@@ -19,6 +19,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/idempotency"
@@ -56,6 +57,7 @@ type Server struct {
 	inbox                 *inbox.Service
 	signals               *signals.Service
 	workItems             *workitems.Service
+	deterministicErrors   *errorreporting.Service
 	feed                  *feed.Service
 	policy                safety.Policy
 }
@@ -85,6 +87,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.inbox = inbox.NewService(pool, s.writer)
 		s.signals = signals.NewService(pool, s.writer)
 		s.workItems = workitems.NewService(pool, s.writer)
+		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.feed = feed.NewService(pool)
 	}
 	s.routes()
@@ -105,6 +108,8 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("GET /v1/feed", s.protected(http.HandlerFunc(s.handleFeed)))
 	s.mux.Handle("GET /v1/feed/stream", s.protected(http.HandlerFunc(s.handleFeedStream)))
+	s.mux.Handle("GET /v1/deterministic-errors", s.protected(http.HandlerFunc(s.handleListDeterministicErrors)))
+	s.mux.Handle("GET /v1/deterministic-errors/{id}", s.protected(http.HandlerFunc(s.handleGetDeterministicError)))
 	s.mux.Handle("GET /v1/work-items", s.protected(http.HandlerFunc(s.handleListWorkItems)))
 	s.mux.Handle("POST /v1/work-items", s.command(http.HandlerFunc(s.handleCreateWorkItem)))
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))

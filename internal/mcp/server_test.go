@@ -107,6 +107,8 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 	expected := []string{
 		"inbox.capture",
 		"feed.read",
+		"deterministic_errors.list",
+		"deterministic_errors.get",
 		"work_items.list",
 		"work_items.get",
 		"work_items.create",
@@ -154,6 +156,8 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	expected := []string{
 		"inbox_capture",
 		"feed_read",
+		"deterministic_errors_list",
+		"deterministic_errors_get",
 		"work_items_list",
 		"work_items_get",
 		"work_items_create",
