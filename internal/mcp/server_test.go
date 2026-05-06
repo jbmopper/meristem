@@ -91,7 +91,7 @@ func TestServer_NotificationsProduceNoResponse(t *testing.T) {
 	}
 }
 
-func TestServer_ToolsList_AdvertisesAllEightTools(t *testing.T) {
+func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if resp.Error != nil {
@@ -104,7 +104,6 @@ func TestServer_ToolsList_AdvertisesAllEightTools(t *testing.T) {
 		t.Fatalf("decode tools/list: %v", err)
 	}
 
-	// docs/v0.md "MCP Tool Surface" pins exactly these eight names.
 	expected := []string{
 		"inbox.capture",
 		"feed.read",
@@ -113,6 +112,7 @@ func TestServer_ToolsList_AdvertisesAllEightTools(t *testing.T) {
 		"work_items.create",
 		"work_items.spawn_child",
 		"work_items.append_event",
+		"work_items.update_metadata",
 		"work_items.transition",
 	}
 	if len(result.Tools) != len(expected) {
@@ -159,6 +159,7 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		"work_items_create",
 		"work_items_spawn_child",
 		"work_items_append_event",
+		"work_items_update_metadata",
 		"work_items_transition",
 	}
 	if len(result.Tools) != len(expected) {

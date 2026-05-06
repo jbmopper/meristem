@@ -67,6 +67,8 @@ Every convergence pattern must satisfy three rules:
 2. **The verdict is an event.** Acceptance and rejection append events that record the reducer's identity and version, the inputs digest, and — when a probabilistic signal informed the reduction — the signal's source (model, prompt version, sample id) and the raw output. "We accepted output X because reducer Y had three of four graders pass at commit Z" must be reconstructable from `events` alone, so a stricter future reducer can re-fold the log.
 3. **Bounded patience.** The pattern declares a maximum number of attempts (or a wall-clock budget) and an escalation rule when exhausted: terminate `failed`, request approval, or hand to a human. New patterns ship with their escalation rule or they do not ship.
 
+Each `work_item` may carry `suggested_convergence_checks`, a human-readable checklist of signals a worker should try to satisfy before claiming convergence. The list is advisory until a reducer consumes it, but it is durable projection state sourced from events so workers, reviewers, and future reconcilers see the same checklist. A `work_item` also carries `human_review_status`: `blocked`, `waved_through`, or `approved`. `waved_through` is the default for ordinary project work; `blocked` means human review must be resolved before the item should be treated as converged; `approved` records explicit human clearance. This field is not a replacement for approval rows: external writes still use the approval system and default deny.
+
 The recurring shapes — none of them privileged, all reducible to "propose N signals, deterministically combine them":
 
 - **Resample.** Same model, same prompt, varied seed or temperature. Cheapest pattern. The reducer is typically a strict checker plus a retry budget; useful when the checker is strict and the model is mostly right.
@@ -83,7 +85,7 @@ The deterministic reducer should be the smallest thing that does the job. A vote
 ### Objects
 
 - `project`: top-level grouping.
-- `work_item`: anything we tell an agent (or self) to do. Can have a parent and children. Granularity ("Make this production-ready" vs "run this script") is depth in the tree, not a separate type.
+- `work_item`: anything we tell an agent (or self) to do. Can have a parent and children, suggested convergence checks, and a human review status. Granularity ("Make this production-ready" vs "run this script") is depth in the tree, not a separate type.
 - `message`: an inbound message captured into the inbox. Multi-modal.
 - `artifact`: a persisted output (log, transcript, patch, screenshot, audio).
 - `connection`: a configured integration to an external system.

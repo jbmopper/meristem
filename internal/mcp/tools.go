@@ -41,6 +41,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolWorkItemsCreate(),
 		s.toolWorkItemsSpawnChild(),
 		s.toolWorkItemsAppendEvent(),
+		s.toolWorkItemsUpdateMetadata(),
 		s.toolWorkItemsTransition(),
 	}
 }
@@ -220,24 +221,34 @@ func (s *Server) toolWorkItemsCreate() Tool {
 			"title": schemaString("Short title. Required, non-empty."),
 			"body":  schemaString("Optional long-form body."),
 			"state": schemaString("Optional initial lifecycle state. Defaults to captured."),
+			"suggested_convergence_checks": schemaStringArray(
+				"Optional list of deterministic checks a worker should satisfy before claiming convergence.",
+			),
+			"human_review_status": schemaString(
+				"Optional human review status (blocked, waved_through, approved). Defaults to waved_through.",
+			),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
 				return nil, errors.New("workitems service not configured")
 			}
 			var args struct {
-				Title string `json:"title"`
-				Body  string `json:"body"`
-				State string `json:"state"`
+				Title                      string   `json:"title"`
+				Body                       string   `json:"body"`
+				State                      string   `json:"state"`
+				SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
+				HumanReviewStatus          string   `json:"human_review_status"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
 			item, err := s.deps.WorkItems.Create(ctx, workitems.CreateInput{
-				Title: args.Title,
-				Body:  args.Body,
-				State: domain.WorkItemState(args.State),
-				Actor: actor,
+				Title:                      args.Title,
+				Body:                       args.Body,
+				State:                      domain.WorkItemState(args.State),
+				SuggestedConvergenceChecks: args.SuggestedConvergenceChecks,
+				HumanReviewStatus:          domain.HumanReviewStatus(args.HumanReviewStatus),
+				Actor:                      actor,
 			})
 			if err != nil {
 				return nil, err
@@ -259,16 +270,24 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 			"title":     schemaString("Short title. Required, non-empty."),
 			"body":      schemaString("Optional long-form body."),
 			"state":     schemaString("Optional initial lifecycle state. Defaults to captured."),
+			"suggested_convergence_checks": schemaStringArray(
+				"Optional list of deterministic checks a worker should satisfy before claiming convergence.",
+			),
+			"human_review_status": schemaString(
+				"Optional human review status (blocked, waved_through, approved). Defaults to waved_through.",
+			),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
 				return nil, errors.New("workitems service not configured")
 			}
 			var args struct {
-				ParentID string `json:"parent_id"`
-				Title    string `json:"title"`
-				Body     string `json:"body"`
-				State    string `json:"state"`
+				ParentID                   string   `json:"parent_id"`
+				Title                      string   `json:"title"`
+				Body                       string   `json:"body"`
+				State                      string   `json:"state"`
+				SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
+				HumanReviewStatus          string   `json:"human_review_status"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -278,10 +297,12 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 				return nil, err
 			}
 			item, err := s.deps.WorkItems.SpawnChild(ctx, parent, workitems.CreateInput{
-				Title: args.Title,
-				Body:  args.Body,
-				State: domain.WorkItemState(args.State),
-				Actor: actor,
+				Title:                      args.Title,
+				Body:                       args.Body,
+				State:                      domain.WorkItemState(args.State),
+				SuggestedConvergenceChecks: args.SuggestedConvergenceChecks,
+				HumanReviewStatus:          domain.HumanReviewStatus(args.HumanReviewStatus),
+				Actor:                      actor,
 			})
 			if err != nil {
 				if errors.Is(err, workitems.ErrNotFound) {
@@ -343,6 +364,51 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 	}
 }
 
+func (s *Server) toolWorkItemsUpdateMetadata() Tool {
+	return Tool{
+		Name:        "work_items.update_metadata",
+		Description: "Set suggested convergence checks and human review status on a work item.",
+		InputSchema: schemaObject([]string{"id", "suggested_convergence_checks", "human_review_status"}, map[string]any{
+			"id": schemaString("Work item uuid."),
+			"suggested_convergence_checks": schemaStringArray(
+				"Complete list of deterministic checks a worker should satisfy before claiming convergence.",
+			),
+			"human_review_status": schemaString(
+				"Human review status: blocked, waved_through, or approved.",
+			),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.WorkItems == nil {
+				return nil, errors.New("workitems service not configured")
+			}
+			var args struct {
+				ID                         string   `json:"id"`
+				SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
+				HumanReviewStatus          string   `json:"human_review_status"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			item, err := s.deps.WorkItems.UpdateMetadata(ctx, id, workitems.UpdateMetadataInput{
+				SuggestedConvergenceChecks: args.SuggestedConvergenceChecks,
+				HumanReviewStatus:          domain.HumanReviewStatus(args.HumanReviewStatus),
+				Actor:                      actor,
+			})
+			if err != nil {
+				if errors.Is(err, workitems.ErrNotFound) {
+					return nil, fmt.Errorf("work item %s not found", id)
+				}
+				return nil, err
+			}
+			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
+		},
+	}
+}
+
 func (s *Server) toolWorkItemsTransition() Tool {
 	return Tool{
 		Name:        "work_items.transition",
@@ -383,26 +449,30 @@ func (s *Server) toolWorkItemsTransition() Tool {
 // workItemDTO is the JSON shape returned by tools. It mirrors the HTTP
 // response so MCP clients see the same fields as REST clients.
 type workItemDTO struct {
-	ID          uuid.UUID            `json:"id"`
-	Title       string               `json:"title"`
-	Body        string               `json:"body"`
-	State       domain.WorkItemState `json:"state"`
-	StateReason *string              `json:"state_reason,omitempty"`
-	CreatedBy   *uuid.UUID           `json:"created_by,omitempty"`
-	CreatedAt   string               `json:"created_at"`
-	UpdatedAt   string               `json:"updated_at"`
+	ID                         uuid.UUID                `json:"id"`
+	Title                      string                   `json:"title"`
+	Body                       string                   `json:"body"`
+	State                      domain.WorkItemState     `json:"state"`
+	StateReason                *string                  `json:"state_reason,omitempty"`
+	SuggestedConvergenceChecks []string                 `json:"suggested_convergence_checks"`
+	HumanReviewStatus          domain.HumanReviewStatus `json:"human_review_status"`
+	CreatedBy                  *uuid.UUID               `json:"created_by,omitempty"`
+	CreatedAt                  string                   `json:"created_at"`
+	UpdatedAt                  string                   `json:"updated_at"`
 }
 
 func toWorkItemDTO(item domain.WorkItem) workItemDTO {
 	return workItemDTO{
-		ID:          item.ID,
-		Title:       item.Title,
-		Body:        item.Body,
-		State:       item.State,
-		StateReason: item.StateReason,
-		CreatedBy:   item.CreatedBy,
-		CreatedAt:   item.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
-		UpdatedAt:   item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		ID:                         item.ID,
+		Title:                      item.Title,
+		Body:                       item.Body,
+		State:                      item.State,
+		StateReason:                item.StateReason,
+		SuggestedConvergenceChecks: item.SuggestedConvergenceChecks,
+		HumanReviewStatus:          item.HumanReviewStatus,
+		CreatedBy:                  item.CreatedBy,
+		CreatedAt:                  item.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		UpdatedAt:                  item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
 }
 
@@ -440,6 +510,14 @@ func schemaObject(required []string, properties map[string]any) map[string]any {
 
 func schemaString(description string) map[string]any {
 	return map[string]any{"type": "string", "description": description}
+}
+
+func schemaStringArray(description string) map[string]any {
+	return map[string]any{
+		"type":        "array",
+		"description": description,
+		"items":       map[string]any{"type": "string"},
+	}
 }
 
 func schemaInt(description string) map[string]any {

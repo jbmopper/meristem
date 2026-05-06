@@ -161,9 +161,11 @@ func (s *Service) Receive(ctx context.Context, actor domain.Token, in ReceiveInp
 			Source:       actorSource,
 			ActorTokenID: &actor.ID,
 			Payload: map[string]any{
-				"title": strings.TrimSpace(header.Title),
-				"body":  workItemBodyFrom(header),
-				"state": domain.WorkItemCaptured,
+				"title":                        strings.TrimSpace(header.Title),
+				"body":                         workItemBodyFrom(header),
+				"state":                        domain.WorkItemCaptured,
+				"suggested_convergence_checks": header.AcceptanceCriteria,
+				"human_review_status":          domain.HumanReviewWavedThrough,
 			},
 		})
 		if err != nil {
@@ -256,9 +258,10 @@ func (s *Service) lookupLiveWorkItem(ctx context.Context, tx pgx.Tx, dedupeKey s
 // accepted legacy schema_version strings in internal/api) is the handler's
 // responsibility; the service only needs enough to write the projection row honestly.
 type workSpecHeader struct {
-	Title     string `json:"title"`
-	Objective string `json:"objective"`
-	Details   string `json:"details"`
+	Title              string   `json:"title"`
+	Objective          string   `json:"objective"`
+	Details            string   `json:"details"`
+	AcceptanceCriteria []string `json:"acceptance_criteria"`
 }
 
 func decodeWorkSpecHeader(raw json.RawMessage) (workSpecHeader, error) {

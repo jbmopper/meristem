@@ -19,14 +19,16 @@ import (
 )
 
 type workItemResponse struct {
-	ID          uuid.UUID            `json:"id"`
-	Title       string               `json:"title"`
-	Body        string               `json:"body"`
-	State       domain.WorkItemState `json:"state"`
-	StateReason *string              `json:"state_reason,omitempty"`
-	CreatedBy   *uuid.UUID           `json:"created_by,omitempty"`
-	CreatedAt   time.Time            `json:"created_at"`
-	UpdatedAt   time.Time            `json:"updated_at"`
+	ID                         uuid.UUID                `json:"id"`
+	Title                      string                   `json:"title"`
+	Body                       string                   `json:"body"`
+	State                      domain.WorkItemState     `json:"state"`
+	StateReason                *string                  `json:"state_reason,omitempty"`
+	SuggestedConvergenceChecks []string                 `json:"suggested_convergence_checks"`
+	HumanReviewStatus          domain.HumanReviewStatus `json:"human_review_status"`
+	CreatedBy                  *uuid.UUID               `json:"created_by,omitempty"`
+	CreatedAt                  time.Time                `json:"created_at"`
+	UpdatedAt                  time.Time                `json:"updated_at"`
 }
 
 func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
@@ -158,18 +160,22 @@ func (s *Server) handleCreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
-		State string `json:"state"`
+		Title                      string   `json:"title"`
+		Body                       string   `json:"body"`
+		State                      string   `json:"state"`
+		SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
+		HumanReviewStatus          string   `json:"human_review_status"`
 	}
 	if !decodeJSONRequest(w, r, &req) {
 		return
 	}
 	item, err := s.workItems.Create(r.Context(), workitems.CreateInput{
-		Title: req.Title,
-		Body:  req.Body,
-		State: domain.WorkItemState(req.State),
-		Actor: actor,
+		Title:                      req.Title,
+		Body:                       req.Body,
+		State:                      domain.WorkItemState(req.State),
+		SuggestedConvergenceChecks: req.SuggestedConvergenceChecks,
+		HumanReviewStatus:          domain.HumanReviewStatus(req.HumanReviewStatus),
+		Actor:                      actor,
 	})
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "work_item_create_failed", err.Error())
@@ -204,18 +210,22 @@ func (s *Server) handleSpawnChild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
-		State string `json:"state"`
+		Title                      string   `json:"title"`
+		Body                       string   `json:"body"`
+		State                      string   `json:"state"`
+		SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
+		HumanReviewStatus          string   `json:"human_review_status"`
 	}
 	if !decodeJSONRequest(w, r, &req) {
 		return
 	}
 	item, err := s.workItems.SpawnChild(r.Context(), parentID, workitems.CreateInput{
-		Title: req.Title,
-		Body:  req.Body,
-		State: domain.WorkItemState(req.State),
-		Actor: actor,
+		Title:                      req.Title,
+		Body:                       req.Body,
+		State:                      domain.WorkItemState(req.State),
+		SuggestedConvergenceChecks: req.SuggestedConvergenceChecks,
+		HumanReviewStatus:          domain.HumanReviewStatus(req.HumanReviewStatus),
+		Actor:                      actor,
 	})
 	if err != nil {
 		writeWorkItemError(w, err)
@@ -249,6 +259,38 @@ func (s *Server) handleAppendWorkItemEvent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"work_item_id": id, "appended": true})
+}
+
+func (s *Server) handleUpdateWorkItemMetadata(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		SuggestedConvergenceChecks *[]string `json:"suggested_convergence_checks"`
+		HumanReviewStatus          *string   `json:"human_review_status"`
+	}
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	if req.SuggestedConvergenceChecks == nil || req.HumanReviewStatus == nil {
+		writeAPIError(w, http.StatusBadRequest, "metadata_required", "suggested_convergence_checks and human_review_status are required")
+		return
+	}
+	item, err := s.workItems.UpdateMetadata(r.Context(), id, workitems.UpdateMetadataInput{
+		SuggestedConvergenceChecks: *req.SuggestedConvergenceChecks,
+		HumanReviewStatus:          domain.HumanReviewStatus(*req.HumanReviewStatus),
+		Actor:                      actor,
+	})
+	if err != nil {
+		writeWorkItemError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"work_item": toWorkItemResponse(item)})
 }
 
 func (s *Server) handleTransitionWorkItem(w http.ResponseWriter, r *http.Request) {
@@ -332,14 +374,16 @@ func pathUUID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, b
 
 func toWorkItemResponse(item domain.WorkItem) workItemResponse {
 	return workItemResponse{
-		ID:          item.ID,
-		Title:       item.Title,
-		Body:        item.Body,
-		State:       item.State,
-		StateReason: item.StateReason,
-		CreatedBy:   item.CreatedBy,
-		CreatedAt:   item.CreatedAt,
-		UpdatedAt:   item.UpdatedAt,
+		ID:                         item.ID,
+		Title:                      item.Title,
+		Body:                       item.Body,
+		State:                      item.State,
+		StateReason:                item.StateReason,
+		SuggestedConvergenceChecks: item.SuggestedConvergenceChecks,
+		HumanReviewStatus:          item.HumanReviewStatus,
+		CreatedBy:                  item.CreatedBy,
+		CreatedAt:                  item.CreatedAt,
+		UpdatedAt:                  item.UpdatedAt,
 	}
 }
 

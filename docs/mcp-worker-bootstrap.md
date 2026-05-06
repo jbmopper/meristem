@@ -24,6 +24,7 @@ Before changing anything:
 4. Fetch your assigned work_item through MCP.
 5. Append a short work_items.append_event note with kind "worker.started".
 6. If the item is not terminal and it is appropriate to begin, transition it to "running".
+7. Read `suggested_convergence_checks` and `human_review_status` from the work_item. Treat `blocked` as requiring human input before claiming convergence; treat `waved_through` as normal permission to proceed within scope; treat `approved` as explicit human clearance.
 
 While working:
 - Stay inside the assigned scope and allowed areas. If you need to touch anything outside them, append a note and transition the item to "blocked" with the reason.
@@ -35,12 +36,13 @@ While working:
 
 At handoff or finish:
 1. Run the relevant checks for your change.
-2. Append a concise summary event with kind "worker.summary" including changed files, verification, and any remaining risk.
-3. Transition the work_item to "done" if complete, "blocked" if waiting on input, or "failed" if you cannot complete it.
+2. Compare the result against the work_item's `suggested_convergence_checks`; if you cannot satisfy one, say which one and why in the summary event.
+3. Append a concise summary event with kind "worker.summary" including changed files, verification, and any remaining risk.
+4. Transition the work_item to "done" if complete, "blocked" if waiting on input, or "failed" if you cannot complete it.
 
 MCP tool names:
-- Canonical clients expose: feed.read, work_items.get, work_items.list, work_items.append_event, work_items.spawn_child, work_items.transition, work_items.create, inbox.capture.
-- Cursor may expose underscore aliases instead: feed_read, work_items_get, work_items_list, work_items_append_event, work_items_spawn_child, work_items_transition, work_items_create, inbox_capture.
+- Canonical clients expose: feed.read, work_items.get, work_items.list, work_items.append_event, work_items.update_metadata, work_items.spawn_child, work_items.transition, work_items.create, inbox.capture.
+- Cursor may expose underscore aliases instead: feed_read, work_items_get, work_items_list, work_items_append_event, work_items_update_metadata, work_items_spawn_child, work_items_transition, work_items_create, inbox_capture.
 - Use whichever spelling the MCP client advertises; they route to the same meristem operations.
 ```
 

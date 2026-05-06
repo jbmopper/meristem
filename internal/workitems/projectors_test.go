@@ -30,6 +30,50 @@ func TestCreatedProjector_RejectsBlankTitle(t *testing.T) {
 	}
 }
 
+func TestCreatedProjector_RejectsInvalidMetadata(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{
+			name: "blank convergence check",
+			payload: map[string]any{
+				"title": "x",
+				"suggested_convergence_checks": []string{
+					"go test ./...",
+					" ",
+				},
+			},
+			want: "suggested_convergence_checks[1] is blank",
+		},
+		{
+			name: "invalid human review status",
+			payload: map[string]any{
+				"title":               "x",
+				"human_review_status": "rubber_stamped",
+			},
+			want: "invalid human_review_status",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := domain.Event{
+				ID:          uuid.New(),
+				SubjectKind: domain.SubjectWorkItem,
+				SubjectID:   uuid.New(),
+				Kind:        domain.EventWorkItemCreated,
+				Source:      domain.SourceHuman,
+				Payload:     tc.payload,
+				OccurredAt:  time.Unix(0, 0),
+			}
+			if err := (createdProjector{}).Apply(context.Background(), nil, ev); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestTransitionedProjector_RejectsBlankTo(t *testing.T) {
 	ev := domain.Event{
 		ID:          uuid.New(),
@@ -42,6 +86,50 @@ func TestTransitionedProjector_RejectsBlankTo(t *testing.T) {
 	}
 	if err := (transitionedProjector{}).Apply(context.Background(), nil, ev); err == nil || !strings.Contains(err.Error(), "to is required") {
 		t.Errorf("expected to-required error, got %v", err)
+	}
+}
+
+func TestMetadataUpdatedProjector_RejectsInvalidMetadata(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{
+			name: "blank convergence check",
+			payload: map[string]any{
+				"to": map[string]any{
+					"suggested_convergence_checks": []string{"ok", "\t"},
+					"human_review_status":          "waved_through",
+				},
+			},
+			want: "suggested_convergence_checks[1] is blank",
+		},
+		{
+			name: "invalid human review status",
+			payload: map[string]any{
+				"to": map[string]any{
+					"human_review_status": "looks_good",
+				},
+			},
+			want: "invalid human_review_status",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := domain.Event{
+				ID:          uuid.New(),
+				SubjectKind: domain.SubjectWorkItem,
+				SubjectID:   uuid.New(),
+				Kind:        domain.EventWorkItemMetadataUpdated,
+				Source:      domain.SourceHuman,
+				Payload:     tc.payload,
+				OccurredAt:  time.Unix(0, 0),
+			}
+			if err := (metadataUpdatedProjector{}).Apply(context.Background(), nil, ev); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
 	}
 }
 

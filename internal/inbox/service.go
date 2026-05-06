@@ -51,9 +51,11 @@ func (s *Service) CaptureText(ctx context.Context, actor domain.Token, text stri
 		Source:       sourceForActor(actor),
 		ActorTokenID: &actor.ID,
 		Payload: map[string]any{
-			"title": title,
-			"body":  text,
-			"state": domain.WorkItemCaptured,
+			"title":                        title,
+			"body":                         text,
+			"state":                        domain.WorkItemCaptured,
+			"suggested_convergence_checks": []string{},
+			"human_review_status":          domain.HumanReviewWavedThrough,
 		},
 	}); err != nil {
 		return CaptureResult{}, err

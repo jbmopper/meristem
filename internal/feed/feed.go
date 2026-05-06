@@ -33,6 +33,7 @@ var IncludedKinds = []string{
 	domain.EventWorkItemTransitioned,
 	domain.EventWorkItemEventAppended,
 	domain.EventWorkItemRelationAdded,
+	domain.EventWorkItemMetadataUpdated,
 	domain.EventSignalReceived,
 	domain.EventDeterministicErrorReported,
 	domain.EventDeterministicErrorMasked,

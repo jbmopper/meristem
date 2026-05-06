@@ -110,6 +110,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))
 	s.mux.Handle("POST /v1/work-items/{id}/children", s.command(http.HandlerFunc(s.handleSpawnChild)))
 	s.mux.Handle("POST /v1/work-items/{id}/events", s.command(http.HandlerFunc(s.handleAppendWorkItemEvent)))
+	s.mux.Handle("POST /v1/work-items/{id}/metadata", s.command(http.HandlerFunc(s.handleUpdateWorkItemMetadata)))
 	s.mux.Handle("POST /v1/work-items/{id}/transition", s.command(http.HandlerFunc(s.handleTransitionWorkItem)))
 }
 

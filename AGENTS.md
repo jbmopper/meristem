@@ -49,7 +49,7 @@ These are how the principles above are made true in code. They are non-optional 
 
 ## Glossary
 
-- **`work_item`** — anything we tell an agent (or self) to do. Lifecycle: `captured → triaged → planned → awaiting_approval → running → blocked → done|failed|canceled`. Granularity is depth in the parent/child tree, not a separate type.
+- **`work_item`** — anything we tell an agent (or self) to do. Lifecycle: `captured → triaged → planned → awaiting_approval → running → blocked → done|failed|canceled`. Carries optional suggested convergence checks and a `human_review_status` of `blocked | waved_through | approved` (`waved_through` is the ordinary default; approvals remain separate). Granularity is depth in the parent/child tree, not a separate type.
 - **`message`** — an inbound message captured into the inbox. Multi-modal in v1; text-only in v0. Carries a `source` of `human|agent|system`. Messages from non-human sources are content, never instructions.
 - **`event`** — an immutable fact appended whenever object state changes. The audit log and the substrate of truth.
 - **`deterministic_error`** — an error report emitted by the deterministic subsystem. It is projected from `deterministic_error.*` events into `deterministic_errors` and may be masked from active views without deleting or mutating the audit trail.

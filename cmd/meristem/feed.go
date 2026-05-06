@@ -9,13 +9,13 @@
 //
 // Two modes:
 //
-//   meristem feed                snapshot of the last --limit items, exit
-//   meristem feed --watch        consume the SSE push stream at /v1/feed/stream;
-//                               server pushes each new event as it lands,
-//                               client prints (after optional --mentions filter).
-//                               Reconnects with Last-Event-ID on disconnect
-//                               so events that landed during the gap are
-//                               replayed deterministically.
+//	meristem feed                snapshot of the last --limit items, exit
+//	meristem feed --watch        consume the SSE push stream at /v1/feed/stream;
+//	                            server pushes each new event as it lands,
+//	                            client prints (after optional --mentions filter).
+//	                            Reconnects with Last-Event-ID on disconnect
+//	                            so events that landed during the gap are
+//	                            replayed deterministically.
 //
 // Watch mode uses Server-Sent Events (a11dd7d5). The model is push, not
 // pull: the client opens one long-lived connection, the server writes
@@ -27,15 +27,15 @@
 //
 // Optional client-side filter:
 //
-//   --mentions=agent-A         only print items that mention any of the
-//   --mentions=agent-A,me      named recipients. Matches on payload.author
-//                              equality, payload.mentions array membership,
-//                              and "@name" appearing in text/note fields.
-//                              Recurses into work_item.event_appended.inner
-//                              so notes posted as appended sub-events are
-//                              filtered the same as direct payloads.
-//                              The cursor still advances past dropped events,
-//                              so reconnects don't re-deliver them.
+//	--mentions=agent-A         only print items that mention any of the
+//	--mentions=agent-A,me      named recipients. Matches on payload.author
+//	                           equality, payload.mentions array membership,
+//	                           and "@name" appearing in text/note fields.
+//	                           Recurses into work_item.event_appended.inner
+//	                           so notes posted as appended sub-events are
+//	                           filtered the same as direct payloads.
+//	                           The cursor still advances past dropped events,
+//	                           so reconnects don't re-deliver them.
 //
 // Output format is one line per event, in arrival order (which is
 // chronologically equivalent — the SSE stream emits oldest-first by
@@ -529,6 +529,16 @@ func summarize(it feedItem) string {
 			return fmt.Sprintf("%-22s \"%s\"", arrow, truncate(p.Reason, 90))
 		}
 		return arrow
+
+	case "work_item.metadata_updated":
+		var p struct {
+			To struct {
+				HumanReviewStatus          string   `json:"human_review_status"`
+				SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
+			} `json:"to"`
+		}
+		_ = json.Unmarshal(it.Payload, &p)
+		return fmt.Sprintf("metadata review=%s checks=%d", p.To.HumanReviewStatus, len(p.To.SuggestedConvergenceChecks))
 
 	case "work_item.event_appended":
 		// Server wraps appended sub-events in an envelope:

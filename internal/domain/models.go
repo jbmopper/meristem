@@ -15,6 +15,7 @@ const (
 	EventWorkItemTransitioned       = "work_item.transitioned"
 	EventWorkItemEventAppended      = "work_item.event_appended"
 	EventWorkItemRelationAdded      = "work_item.relation_added"
+	EventWorkItemMetadataUpdated    = "work_item.metadata_updated"
 	EventSignalReceived             = "signal.received"
 	EventDeterministicErrorReported = "deterministic_error.reported"
 	EventDeterministicErrorMasked   = "deterministic_error.masked"
@@ -52,6 +53,7 @@ var AllEventKinds = []string{
 	EventWorkItemTransitioned,
 	EventWorkItemEventAppended,
 	EventWorkItemRelationAdded,
+	EventWorkItemMetadataUpdated,
 	EventSignalReceived,
 	EventDeterministicErrorReported,
 	EventDeterministicErrorMasked,
@@ -132,16 +134,38 @@ func CanTransition(from, to WorkItemState) bool {
 	return true
 }
 
+// HumanReviewStatus records the owner's review disposition for a work item.
+// It is metadata used by reconcilers and worker scaffolding; it is distinct
+// from the lifecycle state and from future approval rows.
+type HumanReviewStatus string
+
+const (
+	HumanReviewBlocked      HumanReviewStatus = "blocked"
+	HumanReviewWavedThrough HumanReviewStatus = "waved_through"
+	HumanReviewApproved     HumanReviewStatus = "approved"
+)
+
+// Valid reports whether s is one of the accepted human review statuses.
+func (s HumanReviewStatus) Valid() bool {
+	switch s {
+	case HumanReviewBlocked, HumanReviewWavedThrough, HumanReviewApproved:
+		return true
+	}
+	return false
+}
+
 // WorkItem is the current-state projection for work_items.
 type WorkItem struct {
-	ID          uuid.UUID
-	Title       string
-	Body        string
-	State       WorkItemState
-	StateReason *string
-	CreatedBy   *uuid.UUID
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID                         uuid.UUID
+	Title                      string
+	Body                       string
+	State                      WorkItemState
+	StateReason                *string
+	SuggestedConvergenceChecks []string
+	HumanReviewStatus          HumanReviewStatus
+	CreatedBy                  *uuid.UUID
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 // Message is the v0 text-only inbox projection.
