@@ -17,6 +17,7 @@ Currently shipped:
 - `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, and work-item routes.
 - `meristem tokens {create, list, revoke}` — bearer token lifecycle.
 - `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface.
+- `meristem provider cursor-cli scaffold` — secret-free handoff packet for Cursor CLI worker agents.
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
 - `meristem healthcheck` — `/readyz` probe binary, used by the `meristem` container's HEALTHCHECK directive (the runtime image is distroless, so the probe ships as a subcommand).
 - v0 schema baseline (`tokens`, `work_items`, `work_item_relations`, `messages`, `message_parts`, `events`, `idempotency_keys`, `signals`).
@@ -25,7 +26,7 @@ Currently shipped:
 
 ## Spec
 
-The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The copy/paste bootstrap text for MCP-connected workers is in [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
+The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The copy/paste bootstrap text for MCP-connected workers is in [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md); Cursor CLI handoff details are in [`docs/providers/cursor-cli.md`](docs/providers/cursor-cli.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
 
 ## Layout
 
@@ -34,6 +35,7 @@ cmd/meristem/       binary entry point
 internal/api/      HTTP surface
 internal/mcp/      MCP server (JSON-RPC over stdio)
 internal/safety/   deterministic resource limits (startup gate + HTTP enforcement)
+internal/providers/ provider-specific handoff/scaffold helpers
 internal/storage/  Postgres pool and migration runner
 pkg/meristem/       public Go client SDK (importable by external projects)
 migrations/        SQL migrations (embedded into the binary)
@@ -152,6 +154,20 @@ MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslm
 When spinning up a worker manually, paste the streamlined MCP instructions from
 [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md) after filling in
 the assigned work item, scope, and allowed areas.
+
+For Cursor CLI workers, generate a filled handoff packet from live meristem
+state:
+
+```bash
+MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+  go run ./cmd/meristem provider cursor-cli scaffold \
+    --work-item <uuid> \
+    --scope 'Implement one narrow change.' \
+    --allowed-area internal/example
+```
+
+The generated packet references `.meristem/cursor-cli.token` by path and does
+not print bearer secrets.
 
 ## Go client
 

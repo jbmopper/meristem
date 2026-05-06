@@ -78,6 +78,7 @@ internal/workitems/   lifecycle, transitions, relations
 internal/feed/        chronological projection
 internal/signals/     non-human structured input → work_items (see docs/signals.md)
 internal/safety/      deterministic resource limits (request bodies, feed wait, patience budgets)
+internal/providers/   provider-specific handoff/scaffold helpers; never provider-specific durable identity
 internal/storage/     pgx pool + migration runner
 internal/worker/      bounded-patience scan kernel (v1)
 internal/mcp/         MCP tool definitions + stdio transport

@@ -57,6 +57,16 @@ Allowed areas: <paths or modules>.
 Out of scope: Secrets, unrelated refactors, external writes without approval.
 ```
 
+Cursor CLI workers can get a filled version of this packet from live meristem
+state:
+
+```bash
+go run ./cmd/meristem provider cursor-cli scaffold \
+  --work-item <uuid> \
+  --scope 'Implement one narrow change.' \
+  --allowed-area internal/example
+```
+
 ## Notes for operators
 
 Each worker should have its own agent-source token so events have clean
