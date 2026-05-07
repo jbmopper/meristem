@@ -122,6 +122,13 @@ until work item `011493cd-4087-4b36-9c31-9fd3c7a397f3` identifies the required
 Cursor Agent mode/configuration. Do not count fallback workspace searches as a
 passing MCP smoke.
 
+Local environment at the time of this finding: Cursor CLI
+`2026.05.05-84a231c` on `darwin/arm64`. The next candidate test is
+`cursor-agent --print --force --trust --approve-mcps ...`, because Cursor
+community reports indicate programmatic/headless MCP approval may require
+`--force`. That flag broadens tool approval and must be explicitly approved by
+the operator before Codex runs it.
+
 ## Provider Contract
 
 - Use one `source=agent` token per Cursor CLI worker identity. Provision the
