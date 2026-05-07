@@ -57,8 +57,16 @@ MERISTEM_DATABASE_URL='postgres://meristem:meristem@127.0.0.1:5432/meristem?sslm
     --allowed-area internal/example \
     --apply-mcp \
     --worktree meristem-<uuid-prefix> \
-    --worktree-base main
+    --worktree-base <target-project-base-ref>
 ```
+
+Run `go run ./cmd/meristem ...` from the meristem repo, or use an installed
+`meristem` binary and pass `--meristem-root /Users/juliusmopper/Dev/meristem`.
+`--workspace`, `--allowed-area`, `--worktree`, and `--worktree-base` refer to
+the target project that Cursor will edit. If the target project is meristem
+itself, use `--workspace /Users/juliusmopper/Dev/meristem` and
+`--worktree-base v1`. For a different project, use that repository's normal
+base ref, often `main`.
 
 Use `--dry-run` to inspect the `cursor-agent` argv and prompt without launching.
 Use `--mode print --trust --approve-mcps` only for explicitly approved headless

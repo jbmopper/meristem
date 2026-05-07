@@ -158,7 +158,7 @@ func runCursorCLILaunch(ctx context.Context, args []string) error {
 	tokenFile := fs.String("token-file", cursorcli.DefaultTokenFile, "agent token file path to reference, not read")
 	goBin := fs.String("go-bin", defaultGoBin(), "go binary used by generated MCP config")
 	worktreeName := fs.String("worktree", "", "optional Cursor worktree name")
-	worktreeBase := fs.String("worktree-base", "", "optional Cursor worktree base branch/ref")
+	worktreeBase := fs.String("worktree-base", "", "optional Cursor worktree base branch/ref in the target workspace")
 	mode := fs.String("mode", cursorcli.LaunchModeInteractive, "launch mode: interactive or print")
 	applyMCP := fs.Bool("apply-mcp", false, "write .cursor/mcp.json into the target workspace before launch")
 	forceMCP := fs.Bool("force-mcp", false, "allow replacing an existing target .cursor/mcp.json")
@@ -380,12 +380,14 @@ func cursorCLILaunchUsage(w io.Writer) {
     --scope TEXT \
     --allowed-area PATH_OR_MODULE [--allowed-area PATH_OR_MODULE ...] \
     [--apply-mcp] [--force-mcp] \
-    [--worktree NAME] [--worktree-base REF] \
+    [--worktree NAME] [--worktree-base TARGET_REF] \
     [--mode interactive|print] \
     [--approve-mcps] [--trust] \
     [--dry-run]
 
 Generates a live meristem handoff prompt and invokes cursor-agent against the
-target workspace. Use --dry-run to inspect the exact argv and prompt first.
+target workspace. --worktree-base is a ref in that target workspace, not
+necessarily a meristem ref. Use --dry-run to inspect the exact argv and prompt
+first.
 `)
 }
