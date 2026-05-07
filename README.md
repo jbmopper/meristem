@@ -17,7 +17,7 @@ Currently shipped:
 - `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, and work-item routes.
 - `meristem tokens {create, list, revoke}` — bearer token lifecycle.
 - `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface.
-- `meristem provider cursor-cli scaffold` — secret-free handoff packet for Cursor CLI worker agents.
+- `meristem provider cursor-cli {scaffold,mcp-config,launch}` — secret-free handoff, target-workspace MCP config, and local Cursor Agent launcher for worker agents.
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
 - `meristem healthcheck` — `/readyz` probe binary, used by the `meristem` container's HEALTHCHECK directive (the runtime image is distroless, so the probe ships as a subcommand).
 - Deterministic error/log read views — `GET /v1/deterministic-errors` and MCP `deterministic_errors.*`, filtered by `logs.*` token scopes.
@@ -157,7 +157,7 @@ When spinning up a worker manually, paste the streamlined MCP instructions from
 the assigned work item, scope, and allowed areas.
 
 For Cursor CLI workers, generate a filled handoff packet from live meristem
-state:
+state, or dry-run a launch command before starting Cursor Agent:
 
 ```bash
 MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
@@ -165,10 +165,26 @@ MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslm
     --work-item <uuid> \
     --scope 'Implement one narrow change.' \
     --allowed-area internal/example
+
+MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+  go run ./cmd/meristem provider cursor-cli launch \
+    --work-item <uuid> \
+    --workspace /path/to/target-project \
+    --scope 'Implement one narrow change.' \
+    --allowed-area internal/example \
+    --model spark \
+    --apply-mcp \
+    --worktree meristem-<short-id> \
+    --worktree-base <target-project-base-ref> \
+    --dry-run
 ```
 
 The generated packet references `.meristem/cursor-cli.token` by path and does
-not print bearer secrets.
+not print bearer secrets. The current known blocker is live headless Cursor
+Agent MCP exposure: `cursor-agent mcp list-tools meristem` can see meristem
+tools, but `cursor-agent --print` model runs have reported `MCP unavailable`.
+Use `docs/providers/cursor-cli.md` as the live runbook before assigning real
+work.
 
 ## Go client
 

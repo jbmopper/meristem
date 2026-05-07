@@ -11,7 +11,15 @@ Use `--model spark` or `--model 5.3-spark` to launch Cursor Agent with
 
 ## Current Slice
 
-`meristem provider cursor-cli scaffold` prints a secret-free handoff packet:
+The provider currently supports three local operator commands:
+
+- `meristem provider cursor-cli scaffold` prints a secret-free handoff packet.
+- `meristem provider cursor-cli mcp-config` prints or writes target-workspace
+  Cursor MCP config that points back to the meristem control-plane repo.
+- `meristem provider cursor-cli launch` builds the handoff prompt and invokes
+  `cursor-agent` against an explicit target workspace.
+
+To print a handoff packet:
 
 ```bash
 MERISTEM_DATABASE_URL='postgres://meristem:meristem@127.0.0.1:5432/meristem?sslmode=disable' \
@@ -78,6 +86,42 @@ Use `--mode print --trust --approve-mcps` only for explicitly approved headless
 runs; interactive launches let Cursor surface trust and MCP prompts to the
 operator.
 
+## Verified Status
+
+The local Cursor Agent installation can see the configured meristem MCP server:
+
+```bash
+cursor-agent mcp list
+cursor-agent mcp list-tools meristem
+```
+
+The expected status is `meristem: ready`, with the meristem tools exposed under
+Cursor-compatible underscore names such as `work_items_get`,
+`work_items_transition`, and `feed_read`.
+
+Provider dry-runs are also verified:
+
+```bash
+MERISTEM_DATABASE_URL='postgres://meristem:meristem@127.0.0.1:5432/meristem?sslmode=disable' \
+  go run ./cmd/meristem provider cursor-cli launch \
+    --work-item <uuid> \
+    --workspace /Users/juliusmopper/Dev/meristem \
+    --scope 'Dry-run a bounded worker launch.' \
+    --allowed-area internal/providers/cursorcli \
+    --model spark \
+    --worktree spark-smoke \
+    --worktree-base v1 \
+    --dry-run
+```
+
+Known blocker: live headless `cursor-agent --print` runs have not yet received
+the meristem MCP tools, even though `cursor-agent mcp list-tools meristem`
+shows them. Strict Spark and `composer-2` smoke prompts returned `MCP
+unavailable`. Treat headless launches as blocked for meristem-coordinated work
+until work item `011493cd-4087-4b36-9c31-9fd3c7a397f3` identifies the required
+Cursor Agent mode/configuration. Do not count fallback workspace searches as a
+passing MCP smoke.
+
 ## Provider Contract
 
 - Use one `source=agent` token per Cursor CLI worker identity. Provision the
@@ -98,5 +142,6 @@ operator.
 
 ## Out Of Scope
 
-This slice does not launch Cursor processes, lease jobs, manage branches, or
-build semantic/vector memory. Those are follow-on `work_item`s.
+This slice does not lease jobs, manage a worker pool, apply provider patches to
+the raw target repo, build semantic/vector memory, or enforce the deterministic
+external-agent context boundary. Those are follow-on `work_item`s.
