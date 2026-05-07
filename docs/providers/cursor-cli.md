@@ -30,12 +30,50 @@ The command reads the `work_item` projection and includes:
 
 The scaffold never prints token contents. It references token files by path.
 
+For workers that edit a project outside the meristem repo, configure that
+target workspace to launch meristem's MCP server from the control-plane repo:
+
+```bash
+MERISTEM_DATABASE_URL='postgres://meristem:meristem@127.0.0.1:5432/meristem?sslmode=disable' \
+  meristem provider cursor-cli mcp-config \
+    --workspace /path/to/target-project \
+    --meristem-root /Users/juliusmopper/Dev/meristem \
+    --apply
+```
+
+The command writes `/path/to/target-project/.cursor/mcp.json` with a command
+that `cd`s back to the meristem repo and reads `.meristem/cursor-cli.token` at
+runtime. It refuses to replace an existing Cursor MCP config unless `--force`
+is set.
+
+To launch a Cursor worker directly:
+
+```bash
+MERISTEM_DATABASE_URL='postgres://meristem:meristem@127.0.0.1:5432/meristem?sslmode=disable' \
+  meristem provider cursor-cli launch \
+    --work-item <uuid> \
+    --workspace /path/to/target-project \
+    --scope 'Implement one narrow change.' \
+    --allowed-area internal/example \
+    --apply-mcp \
+    --worktree meristem-<uuid-prefix> \
+    --worktree-base main
+```
+
+Use `--dry-run` to inspect the `cursor-agent` argv and prompt without launching.
+Use `--mode print --trust --approve-mcps` only for explicitly approved headless
+runs; interactive launches let Cursor surface trust and MCP prompts to the
+operator.
+
 ## Provider Contract
 
 - Use one `source=agent` token per Cursor CLI worker identity. Provision the
   default local token with `scripts/provision-assistant-access.sh --targets cursor-cli`.
 - Launch meristem MCP with `MERISTEM_MCP_TOOL_NAMES=cursor` so Cursor sees
   underscore aliases if it filters dot-namespaced tool names.
+- A target workspace's `.cursor/mcp.json` may point back to the meristem repo;
+  worker edits still happen in the target workspace passed to `cursor-agent
+  --workspace`.
 - The worker must fetch the assigned work item through MCP before editing.
 - `human_review_status=blocked` means the worker stops and asks for human input.
 - `human_review_status=waved_through` is the ordinary project-work default.
