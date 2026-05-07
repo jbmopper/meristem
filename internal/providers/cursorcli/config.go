@@ -138,6 +138,8 @@ func normalizeLaunch(in LaunchInput) LaunchInput {
 	in.Model = strings.TrimSpace(in.Model)
 	if in.Model == "" {
 		in.Model = DefaultModel
+	} else {
+		in.Model = NormalizeModel(in.Model)
 	}
 	in.WorkspaceRoot = strings.TrimSpace(in.WorkspaceRoot)
 	in.WorktreeName = strings.TrimSpace(in.WorktreeName)

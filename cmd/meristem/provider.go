@@ -55,7 +55,7 @@ func runCursorCLIScaffold(ctx context.Context, args []string) error {
 	fs.SetOutput(io.Discard)
 	workItemRaw := fs.String("work-item", "", "work_item UUID to hand off")
 	scope := fs.String("scope", "", "scope sentence for the worker")
-	model := fs.String("model", cursorcli.DefaultModel, "Cursor model label for the handoff")
+	model := fs.String("model", cursorcli.DefaultModel, "Cursor model label for the handoff; aliases: spark, 5.3-spark")
 	tokenFile := fs.String("token-file", cursorcli.DefaultTokenFile, "agent token file path to reference, not read")
 	meristemRoot := fs.String("meristem-root", defaultMeristemRoot(), "meristem repo root path for MCP setup")
 	repoRoot := fs.String("repo-root", "", "deprecated alias for --meristem-root")
@@ -153,7 +153,7 @@ func runCursorCLILaunch(ctx context.Context, args []string) error {
 	scope := fs.String("scope", "", "scope sentence for the worker")
 	workspaceRoot := fs.String("workspace", "", "target workspace path where Cursor Agent edits")
 	meristemRoot := fs.String("meristem-root", defaultMeristemRoot(), "meristem repo root path for MCP setup")
-	model := fs.String("model", cursorcli.DefaultModel, "Cursor model label")
+	model := fs.String("model", cursorcli.DefaultModel, "Cursor model label; aliases: spark, 5.3-spark")
 	cursorBin := fs.String("cursor-bin", cursorcli.DefaultCursorBin, "cursor-agent binary")
 	tokenFile := fs.String("token-file", cursorcli.DefaultTokenFile, "agent token file path to reference, not read")
 	goBin := fs.String("go-bin", defaultGoBin(), "go binary used by generated MCP config")
@@ -346,7 +346,7 @@ func cursorCLIScaffoldUsage(w io.Writer) {
     --scope TEXT \
     --allowed-area PATH_OR_MODULE [--allowed-area PATH_OR_MODULE ...] \
     [--out-of-scope TEXT ...] \
-    [--model composer-2] \
+    [--model composer-2|spark|5.3-spark] \
     [--token-file .meristem/cursor-cli.token] \
     [--meristem-root .] \
     [--workspace-root .]
@@ -381,6 +381,7 @@ func cursorCLILaunchUsage(w io.Writer) {
     --allowed-area PATH_OR_MODULE [--allowed-area PATH_OR_MODULE ...] \
     [--apply-mcp] [--force-mcp] \
     [--worktree NAME] [--worktree-base TARGET_REF] \
+    [--model composer-2|spark|5.3-spark] \
     [--mode interactive|print] \
     [--approve-mcps] [--trust] \
     [--dry-run]

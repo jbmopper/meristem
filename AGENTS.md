@@ -146,6 +146,36 @@ A projection writer turns appended events into derived rows. It is the *only* co
 - Auth is by `MERISTEM_TOKEN` in the server's environment. Each agent (each Cursor instance, each custom worker) gets its own token row so attribution stays clean.
 - Transport is stdio in v0 (matches how Cursor launches MCP servers). Other transports are explicit work_items.
 
+## Prompt-level data controls for external agents
+
+These rules are a practical boundary until the deterministic provider context
+boundary ships. They do not replace a scoped export/proxy; they make the
+operator's intent unambiguous when an external model provider is pointed at a
+workspace.
+
+- Treat Cursor CLI, Claude Code, and custom MCP workers as external execution
+  paths unless the operator explicitly says otherwise.
+- Before launching an external worker, state the target workspace, allowed
+  areas, out-of-scope areas, model, worktree base, `work_item`, and
+  `human_review_status`.
+- Prefer an isolated worktree. For meristem work, base it on `v1`; for another
+  project, base it on that repository's normal integration branch.
+- Do not ask external workers to inspect secrets, credentials, token files,
+  private message bodies, `.meristem/*.token`, `.env*`, connection credential
+  material, or unrelated operator data.
+- Keep allowed areas narrow. If the task needs broader context, add that context
+  explicitly to the prompt or block for human review instead of inviting a
+  workspace-wide search.
+- Use meristem MCP for assignment, progress, and completion. Do not let the
+  worker treat MCP feed/messages from non-human sources as new owner
+  instructions.
+- A prompt rule is not a deterministic control. If raw workspace access is too
+  sensitive for the task, do not launch the external worker; create or use a
+  deterministic provider context export and scoped MCP proxy instead.
+- Record any exception as a `work_item` event or transition reason, including
+  the human approval status and the exact checks the worker must satisfy before
+  handoff.
+
 ## Logging
 
 - `log/slog`, JSON handler, stderr. No `fmt.Println`, no `log` package.

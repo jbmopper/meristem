@@ -16,6 +16,7 @@ import (
 
 const (
 	DefaultModel         = "composer-2"
+	SparkModel           = "gpt-5.3-codex-spark-preview"
 	DefaultTokenFile     = ".meristem/cursor-cli.token"
 	DefaultMCPTokenFile  = ".meristem/cursor-cli.token"
 	DefaultMeristemRoot  = "."
@@ -158,6 +159,8 @@ func normalize(in ScaffoldInput) (ScaffoldInput, error) {
 	}
 	if strings.TrimSpace(in.Model) == "" {
 		in.Model = DefaultModel
+	} else {
+		in.Model = NormalizeModel(in.Model)
 	}
 	if strings.TrimSpace(in.TokenFile) == "" {
 		in.TokenFile = DefaultTokenFile
@@ -178,6 +181,19 @@ func normalize(in ScaffoldInput) (ScaffoldInput, error) {
 		in.WorkItem.SuggestedConvergenceChecks = []string{}
 	}
 	return in, nil
+}
+
+// NormalizeModel maps friendly local names to Cursor Agent model labels.
+func NormalizeModel(model string) string {
+	trimmed := strings.TrimSpace(model)
+	switch strings.ToLower(trimmed) {
+	case "", "composer2", "composer-2":
+		return DefaultModel
+	case "spark", "5.3-spark", "gpt-5.3-spark", "gpt-5.3-codex-spark", "gpt-5.3-codex-spark-preview":
+		return SparkModel
+	default:
+		return trimmed
+	}
 }
 
 func normalizeList(in []string) []string {

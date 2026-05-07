@@ -5,6 +5,10 @@ The Cursor CLI provider is the local handoff path for assigning a meristem
 It is a provider adapter, not a new identity type: worker attribution remains
 the agent-source bearer token used by the MCP process.
 
+Use `--model spark` or `--model 5.3-spark` to launch Cursor Agent with
+`gpt-5.3-codex-spark-preview`. The provider normalizes the older local label
+`composer2` to Cursor's installed `composer-2` name.
+
 ## Current Slice
 
 `meristem provider cursor-cli scaffold` prints a secret-free handoff packet:
@@ -55,6 +59,7 @@ MERISTEM_DATABASE_URL='postgres://meristem:meristem@127.0.0.1:5432/meristem?sslm
     --workspace /path/to/target-project \
     --scope 'Implement one narrow change.' \
     --allowed-area internal/example \
+    --model spark \
     --apply-mcp \
     --worktree meristem-<uuid-prefix> \
     --worktree-base <target-project-base-ref>

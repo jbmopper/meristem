@@ -52,7 +52,7 @@ func TestRenderMCPConfigRequiresDatabaseURL(t *testing.T) {
 func TestBuildLaunchCommand(t *testing.T) {
 	bin, args, err := BuildLaunchCommand(LaunchInput{
 		CursorBin:     "/usr/local/bin/cursor-agent",
-		Model:         "composer-2",
+		Model:         "spark",
 		WorkspaceRoot: "/tmp/project",
 		WorktreeName:  "wi-123",
 		WorktreeBase:  "v1",
@@ -69,7 +69,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 	}
 	joined := strings.Join(args, "\x00")
 	for _, want := range []string{
-		"--model\x00composer-2",
+		"--model\x00gpt-5.3-codex-spark-preview",
 		"--workspace\x00/tmp/project",
 		"--worktree\x00wi-123",
 		"--worktree-base\x00v1",
@@ -80,6 +80,25 @@ func TestBuildLaunchCommand(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args missing %q: %#v", want, args)
+		}
+	}
+}
+
+func TestNormalizeModel(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{in: "", want: DefaultModel},
+		{in: "composer2", want: DefaultModel},
+		{in: "composer-2", want: DefaultModel},
+		{in: "spark", want: SparkModel},
+		{in: "5.3-spark", want: SparkModel},
+		{in: "gpt-5.3-codex-spark-preview", want: SparkModel},
+		{in: "gpt-5.3-codex-spark-preview-high", want: "gpt-5.3-codex-spark-preview-high"},
+	} {
+		if got := NormalizeModel(tc.in); got != tc.want {
+			t.Fatalf("NormalizeModel(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
