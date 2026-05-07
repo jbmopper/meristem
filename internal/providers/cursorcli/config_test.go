@@ -52,7 +52,7 @@ func TestRenderMCPConfigRequiresDatabaseURL(t *testing.T) {
 func TestBuildLaunchCommand(t *testing.T) {
 	bin, args, err := BuildLaunchCommand(LaunchInput{
 		CursorBin:     "/usr/local/bin/cursor-agent",
-		Model:         "composer2",
+		Model:         "composer-2",
 		WorkspaceRoot: "/tmp/project",
 		WorktreeName:  "wi-123",
 		WorktreeBase:  "v1",
@@ -69,7 +69,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 	}
 	joined := strings.Join(args, "\x00")
 	for _, want := range []string{
-		"--model\x00composer2",
+		"--model\x00composer-2",
 		"--workspace\x00/tmp/project",
 		"--worktree\x00wi-123",
 		"--worktree-base\x00v1",

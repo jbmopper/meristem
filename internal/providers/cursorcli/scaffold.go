@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	DefaultModel         = "composer2"
+	DefaultModel         = "composer-2"
 	DefaultTokenFile     = ".meristem/cursor-cli.token"
 	DefaultMCPTokenFile  = ".meristem/cursor-cli.token"
 	DefaultMeristemRoot  = "."

@@ -346,7 +346,7 @@ func cursorCLIScaffoldUsage(w io.Writer) {
     --scope TEXT \
     --allowed-area PATH_OR_MODULE [--allowed-area PATH_OR_MODULE ...] \
     [--out-of-scope TEXT ...] \
-    [--model composer2] \
+    [--model composer-2] \
     [--token-file .meristem/cursor-cli.token] \
     [--meristem-root .] \
     [--workspace-root .]

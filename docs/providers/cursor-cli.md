@@ -1,7 +1,7 @@
 # Cursor CLI Provider
 
 The Cursor CLI provider is the local handoff path for assigning a meristem
-`work_item` to a Cursor CLI worker, usually running the `composer2` model.
+`work_item` to a Cursor CLI worker, usually running the `composer-2` model.
 It is a provider adapter, not a new identity type: worker attribution remains
 the agent-source bearer token used by the MCP process.
 

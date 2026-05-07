@@ -34,7 +34,7 @@ func TestRenderScaffoldIncludesWorkerContract(t *testing.T) {
 
 	for _, want := range []string{
 		"Provider: `cursor-cli`",
-		"Model: `composer2`",
+		"Model: `composer-2`",
 		"Assigned work_item: `" + id.String() + "`",
 		"Human review status: `approved`",
 		"- go test ./...",
