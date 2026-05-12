@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 )
 
@@ -183,6 +184,56 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	}
 }
 
+func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
+	root := uuid.New()
+	s := newTestServer(t)
+	s.actor = domain.Token{
+		ID:     uuid.New(),
+		Source: domain.SourceAgent,
+		Name:   "scoped-worker",
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeWorkItemsWrite,
+			access.ScopeFeedReadAssigned,
+			"work_items.tree:" + root.String(),
+		},
+	}
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if resp.Error != nil {
+		t.Fatalf("tools/list returned error: %+v", resp.Error)
+	}
+	var result struct {
+		Tools []toolDescriptor `json:"tools"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tools/list: %v", err)
+	}
+	got := toolNameSet(result.Tools)
+	for _, want := range []string{
+		"feed.read",
+		"work_items.list",
+		"work_items.get",
+		"work_items.spawn_child",
+		"work_items.append_event",
+		"work_items.update_metadata",
+		"work_items.transition",
+	} {
+		if !got[want] {
+			t.Errorf("missing scoped worker tool %q; got %v", want, toolNames(result.Tools))
+		}
+	}
+	for _, hidden := range []string{
+		"inbox.capture",
+		"deterministic_errors.list",
+		"deterministic_errors.get",
+		"work_items.create",
+	} {
+		if got[hidden] {
+			t.Errorf("scoped worker should not see %q; got %v", hidden, toolNames(result.Tools))
+		}
+	}
+}
+
 func TestServer_CallTool_AcceptsCursorAlias(t *testing.T) {
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"feed_read","arguments":{}}}`)
@@ -203,6 +254,40 @@ func TestServer_CallTool_AcceptsCursorAlias(t *testing.T) {
 	}
 	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "feed service not configured") {
 		t.Errorf("alias did not route to feed.read handler: %+v", result.Content)
+	}
+}
+
+func TestServer_CallTool_DeniesHiddenScopedToolBeforeHandler(t *testing.T) {
+	root := uuid.New()
+	s := newTestServer(t)
+	s.actor = domain.Token{
+		ID:     uuid.New(),
+		Source: domain.SourceAgent,
+		Name:   "scoped-worker",
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeWorkItemsWrite,
+			"work_items.tree:" + root.String(),
+		},
+	}
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"should not happen"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("expected transport success, got error %+v", resp.Error)
+	}
+	var result struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tool result: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected isError=true, got %+v", result)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "insufficient_scope") {
+		t.Fatalf("expected insufficient_scope denial before handler, got %+v", result.Content)
 	}
 }
 
@@ -336,6 +421,14 @@ func toolNames(tools []toolDescriptor) []string {
 	out := make([]string, len(tools))
 	for i, t := range tools {
 		out[i] = t.Name
+	}
+	return out
+}
+
+func toolNameSet(tools []toolDescriptor) map[string]bool {
+	out := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		out[tool.Name] = true
 	}
 	return out
 }

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
@@ -36,6 +37,7 @@ const (
 // layer per docs/v0.md, never an alternate execution path.
 type Deps struct {
 	Auth                *auth.Service
+	Access              *access.Service
 	Inbox               *inbox.Service
 	WorkItems           *workitems.Service
 	DeterministicErrors *errorreporting.Service
@@ -265,8 +267,12 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 }
 
 func (s *Server) handleListTools() (any, *rpcError) {
+	actor := s.actorToken()
 	descs := make([]toolDescriptor, 0, len(s.tools))
 	for _, t := range s.tools {
+		if !access.ToolVisible(actor, t.Name) {
+			continue
+		}
 		descs = append(descs, toolDescriptor{
 			Name:        s.advertisedToolName(t.Name),
 			Description: t.Description,
@@ -306,6 +312,9 @@ func (s *Server) handleCallTool(ctx context.Context, raw json.RawMessage) (any, 
 	actor := s.actorToken()
 	if actor.ID == (domain.Token{}).ID {
 		return toolErrorResult("mcp server is not authenticated; set MERISTEM_TOKEN before launching"), nil
+	}
+	if !access.ToolVisible(actor, tool.Name) {
+		return toolErrorResult("insufficient_scope: token cannot use " + tool.Name), nil
 	}
 	result, err := tool.Handler(ctx, actor, params.Arguments)
 	if err != nil {

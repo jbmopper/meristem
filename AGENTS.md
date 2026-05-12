@@ -145,13 +145,20 @@ A projection writer turns appended events into derived rows. It is the *only* co
 - Args mirror the REST request body. Return values mirror the REST response body. The same domain function backs both transports.
 - Auth is by `MERISTEM_TOKEN` in the server's environment. Each agent (each Cursor instance, each custom worker) gets its own token row so attribution stays clean.
 - Transport is stdio in v0 (matches how Cursor launches MCP servers). Other transports are explicit work_items.
+- MCP tools are filtered by token policy before advertisement and again before
+  object-level calls. Scoped worker tokens use scopes such as
+  `work_items.tree:<uuid>`, `work_items.read`, `work_items.write`, and
+  `feed.read_assigned`; denied writes must append no events. Existing
+  scope-less tokens keep legacy broad access until rotated; any non-empty scope
+  set is treated as policy-bearing and must fail closed on unknown or incomplete
+  scopes.
 
 ## Prompt-level data controls for external agents
 
 These rules are a practical boundary until the deterministic provider context
-boundary ships. They do not replace a scoped export/proxy; they make the
-operator's intent unambiguous when an external model provider is pointed at a
-workspace.
+boundary and scoped MCP surface fully cover every provider path. They do not
+replace a scoped export/proxy; they make the operator's intent unambiguous when
+an external model provider is pointed at a workspace.
 
 - Treat Cursor CLI, Claude Code, and custom MCP workers as external execution
   paths unless the operator explicitly says otherwise.

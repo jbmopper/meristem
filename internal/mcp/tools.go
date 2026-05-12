@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
@@ -94,7 +95,7 @@ func (s *Server) toolFeedRead() Tool {
 			"cursor": schemaString("Opaque cursor from a prior next_cursor or SSE id. Omit for snapshot mode."),
 			"wait":   schemaString("Long-poll cap as a Go duration (e.g. 10s). Use with watcher semantics; server-capped."),
 		}),
-		Handler: func(ctx context.Context, _ domain.Token, raw json.RawMessage) (any, error) {
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.Feed == nil {
 				return nil, errors.New("feed service not configured")
 			}
@@ -108,6 +109,10 @@ func (s *Server) toolFeedRead() Tool {
 			}
 			if args.Cursor == "" && args.Wait == "" {
 				items, err := s.deps.Feed.List(ctx, args.Limit)
+				if err != nil {
+					return nil, err
+				}
+				items, err = s.filterFeedItems(ctx, actor, items)
 				if err != nil {
 					return nil, err
 				}
@@ -140,6 +145,10 @@ func (s *Server) toolFeedRead() Tool {
 				if errors.Is(err, feed.ErrInvalidCursor) {
 					return nil, fmt.Errorf("feed.read: invalid_cursor: %w", err)
 				}
+				return nil, err
+			}
+			page, err = s.filterFeedPage(ctx, actor, page)
+			if err != nil {
 				return nil, err
 			}
 			return map[string]any{
@@ -233,7 +242,7 @@ func (s *Server) toolWorkItemsList() Tool {
 			"state": schemaString("Filter to one lifecycle state (e.g. captured, running, done)."),
 			"limit": schemaInt("Max items to return (1-200). Defaults to 50."),
 		}),
-		Handler: func(ctx context.Context, _ domain.Token, raw json.RawMessage) (any, error) {
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
 				return nil, errors.New("workitems service not configured")
 			}
@@ -245,6 +254,10 @@ func (s *Server) toolWorkItemsList() Tool {
 				return nil, err
 			}
 			items, err := s.deps.WorkItems.List(ctx, args.State, args.Limit)
+			if err != nil {
+				return nil, err
+			}
+			items, err = s.filterWorkItems(ctx, actor, items)
 			if err != nil {
 				return nil, err
 			}
@@ -264,7 +277,7 @@ func (s *Server) toolWorkItemsGet() Tool {
 		InputSchema: schemaObject([]string{"id"}, map[string]any{
 			"id": schemaString("Work item uuid."),
 		}),
-		Handler: func(ctx context.Context, _ domain.Token, raw json.RawMessage) (any, error) {
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
 				return nil, errors.New("workitems service not configured")
 			}
@@ -276,6 +289,9 @@ func (s *Server) toolWorkItemsGet() Tool {
 			}
 			id, err := parseUUID(args.ID, "id")
 			if err != nil {
+				return nil, err
+			}
+			if err := s.canReadWorkItem(ctx, actor, id); err != nil {
 				return nil, err
 			}
 			item, err := s.deps.WorkItems.Get(ctx, id)
@@ -317,6 +333,9 @@ func (s *Server) toolWorkItemsCreate() Tool {
 				HumanReviewStatus          string   `json:"human_review_status"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			if err := s.canCreateWorkItem(ctx, actor); err != nil {
 				return nil, err
 			}
 			item, err := s.deps.WorkItems.Create(ctx, workitems.CreateInput{
@@ -373,6 +392,9 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 			if err != nil {
 				return nil, err
 			}
+			if err := s.canWriteWorkItem(ctx, actor, parent); err != nil {
+				return nil, err
+			}
 			item, err := s.deps.WorkItems.SpawnChild(ctx, parent, workitems.CreateInput{
 				Title:                      args.Title,
 				Body:                       args.Body,
@@ -424,6 +446,9 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 			if err != nil {
 				return nil, err
 			}
+			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
+				return nil, err
+			}
 			var payload any
 			if len(args.Payload) > 0 {
 				if err := json.Unmarshal(args.Payload, &payload); err != nil {
@@ -470,6 +495,9 @@ func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 			if err != nil {
 				return nil, err
 			}
+			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
+				return nil, err
+			}
 			item, err := s.deps.WorkItems.UpdateMetadata(ctx, id, workitems.UpdateMetadataInput{
 				SuggestedConvergenceChecks: args.SuggestedConvergenceChecks,
 				HumanReviewStatus:          domain.HumanReviewStatus(args.HumanReviewStatus),
@@ -511,6 +539,9 @@ func (s *Server) toolWorkItemsTransition() Tool {
 			if err != nil {
 				return nil, err
 			}
+			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
+				return nil, err
+			}
 			item, err := s.deps.WorkItems.Transition(ctx, id, domain.WorkItemState(args.To), args.Reason, actor)
 			if err != nil {
 				if errors.Is(err, workitems.ErrNotFound) {
@@ -521,6 +552,96 @@ func (s *Server) toolWorkItemsTransition() Tool {
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
 	}
+}
+
+func (s *Server) filterFeedItems(ctx context.Context, actor domain.Token, items []feed.Item) ([]feed.Item, error) {
+	if s.deps.Access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return nil, errors.New("access service not configured")
+		}
+		return items, nil
+	}
+	filtered, err := s.deps.Access.FilterFeedItems(ctx, actor, items)
+	if errors.Is(err, access.ErrDenied) {
+		return nil, fmt.Errorf("insufficient_scope: token cannot read feed")
+	}
+	return filtered, err
+}
+
+func (s *Server) filterFeedPage(ctx context.Context, actor domain.Token, page feed.Page) (feed.Page, error) {
+	if s.deps.Access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return feed.Page{}, errors.New("access service not configured")
+		}
+		return page, nil
+	}
+	filtered, err := s.deps.Access.FilterFeedPage(ctx, actor, page)
+	if errors.Is(err, access.ErrDenied) {
+		return feed.Page{}, fmt.Errorf("insufficient_scope: token cannot read feed")
+	}
+	return filtered, err
+}
+
+func (s *Server) filterWorkItems(ctx context.Context, actor domain.Token, items []domain.WorkItem) ([]domain.WorkItem, error) {
+	if s.deps.Access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return nil, errors.New("access service not configured")
+		}
+		return items, nil
+	}
+	filtered, err := s.deps.Access.FilterWorkItems(ctx, actor, items)
+	if errors.Is(err, access.ErrDenied) {
+		return nil, fmt.Errorf("insufficient_scope: token cannot read work_items")
+	}
+	return filtered, err
+}
+
+func (s *Server) canReadWorkItem(ctx context.Context, actor domain.Token, id uuid.UUID) error {
+	if s.deps.Access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return errors.New("access service not configured")
+		}
+		return nil
+	}
+	if err := s.deps.Access.CanReadWorkItem(ctx, actor, id); err != nil {
+		if errors.Is(err, access.ErrDenied) {
+			return fmt.Errorf("work item %s not found", id)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Server) canCreateWorkItem(ctx context.Context, actor domain.Token) error {
+	if s.deps.Access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return errors.New("access service not configured")
+		}
+		return nil
+	}
+	if err := s.deps.Access.CanCreateWorkItem(ctx, actor); err != nil {
+		if errors.Is(err, access.ErrDenied) {
+			return fmt.Errorf("insufficient_scope: token cannot create top-level work_items")
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uuid.UUID) error {
+	if s.deps.Access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return errors.New("access service not configured")
+		}
+		return nil
+	}
+	if err := s.deps.Access.CanWriteWorkItem(ctx, actor, id); err != nil {
+		if errors.Is(err, access.ErrDenied) {
+			return fmt.Errorf("work item %s not found", id)
+		}
+		return err
+	}
+	return nil
 }
 
 // workItemDTO is the JSON shape returned by tools. It mirrors the HTTP

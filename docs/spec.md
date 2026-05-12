@@ -205,6 +205,14 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
   - `can_request_writes`: token may submit write actions for approval.
   - `can_decide_approvals`: token may approve or deny. Held only by iPhone and active web sessions.
   - A token cannot hold both for the same approval (separation of duties).
+- Scoped agent MCP access is a deterministic reducer over token scopes and
+  canonical projections, not a per-agent projection. The first shipped scopes
+  are `work_items.tree:<uuid>`, `work_items.read`, `work_items.write`, and
+  `feed.read_assigned`; MCP tools/list hides impossible tool classes and
+  object-level work_item/feed calls re-check the assigned tree before touching
+  services. Denied writes append no events. Scope-less legacy tokens retain
+  broad v0 access until explicitly rotated; any non-empty scope set is
+  policy-bearing and fails closed on unknown or incomplete scopes.
 - Token revocation is instant; the next request fails. A panic-revoke endpoint reachable from the iPhone invalidates every non-root token.
 - Tokens are recorded on every event. Audit answers "who, via what client, when, with what authority."
 

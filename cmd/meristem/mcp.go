@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/errorreporting"
@@ -47,6 +48,7 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 	writer := app.NewEventWriter()
 	deps := mcp.Deps{
 		Auth:                auth.NewService(pool, writer),
+		Access:              access.NewService(pool),
 		Inbox:               inbox.NewService(pool, writer),
 		WorkItems:           workitems.NewService(pool, writer),
 		DeterministicErrors: errorreporting.NewService(pool, writer),

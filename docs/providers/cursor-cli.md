@@ -133,6 +133,9 @@ the operator before Codex runs it.
 
 - Use one `source=agent` token per Cursor CLI worker identity. Provision the
   default local token with `scripts/provision-assistant-access.sh --targets cursor-cli`.
+- For deterministic MCP scoping, mint worker tokens with the narrowest useful
+  scopes, usually `work_items.tree:<assigned-work-item-id>`,
+  `work_items.read`, `work_items.write`, and `feed.read_assigned`.
 - Launch meristem MCP with `MERISTEM_MCP_TOOL_NAMES=cursor` so Cursor sees
   underscore aliases if it filters dot-namespaced tool names.
 - A target workspace's `.cursor/mcp.json` may point back to the meristem repo;
