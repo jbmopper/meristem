@@ -269,14 +269,23 @@ This slice is successful when:
 
 ## Work Item Mapping
 
-The current roadmap/work-item mapping is:
+As of 2026-05-27, this section is a historical map, not the durable backlog.
+Use live meristem `work_item`s and the feed for current coordination state. The
+short references originally recorded here (`e1625848`, `d56a0bc3`) are not
+full MCP-addressable ids and should not be used as live handoff targets from
+this file.
 
-- `e1625848`: feed cursor + long-poll on `/v1/feed`
-- `d56a0bc3`: push/wake-up work, explicitly constrained to depend on the
-  feed cursor and to avoid new push transports on the server
+Live related anchors visible through MCP during the 2026-05-27 migration:
+
+- `5f10552c-2435-4128-8a93-3765fb31be3e` — shipped MCP `feed.read`
+  watcher parity for cursor/wait/`next_cursor`.
+- `e54cda1b-2841-4adc-a4d4-16bc73c5c4a6` — analysis item that selected
+  MCP feed watcher parity as the next slice.
+- `95888b61-97ff-41eb-9b0f-bc515ea2394d` — migration slice that moved
+  active markdown coordination/checklist state into meristem.
 
 If this document proves useful, the next natural backlog item after
-those two is:
+the feed-resume work is:
 
 - **Minimum viable agent-to-agent coordination over meristem**
   - stable coordination event conventions

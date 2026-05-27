@@ -3,7 +3,7 @@
 A synthesis of an architectural conversation about meristem that was held in
 the wrong repo (`clinical-demo`) by an assistant that had not yet read this
 project's actual state. After reading `docs/spec.md`, `AGENTS.md`,
-`docs/coord/2026-04-23-parallel-work.md`, and
+`docs/coord/archive/2026-04-23-parallel-work.md`, and
 `docs/self-building-api-synthesis.md`, most of what felt like new agreement
 turned out to be already canonical. A smaller set of points is genuinely new
 and warrants spec edits or new entries in **What meristem Builds For Itself**.
@@ -12,8 +12,23 @@ This document is advisory. If it conflicts with `docs/spec.md`, that file
 wins; if it conflicts with `AGENTS.md`, fix the projection in `AGENTS.md`,
 then this. The "roadmap" is not this file — the roadmap lives in the spec's
 **v1 Substrate** + **What meristem Builds For Itself** sections, plus tracked
-`work_item`s in the running system. Once an operator runs `scripts/bootstrap.sh`,
-the items below should be filed as signals/work_items rather than living here.
+`work_item`s in the running system. On 2026-05-27, the concrete open items
+below were migrated into live meristem work_items. This file is now context for
+those items, not a backlog.
+
+## Migration Status
+
+Migrated under `95888b61-97ff-41eb-9b0f-bc515ea2394d`:
+
+- `b7c3d480-1d27-468f-9a9d-47fd7bb7cd71` — first-class triage stage.
+- `7ddd3d29-10a4-4b37-bac3-b5a2287f9d8b` — trajectory-aware convergence termination.
+- `fd05f747-c6aa-498c-8404-c466141c963c` — `awaiting_approval` releases the executor.
+- `0c400d97-ba0a-4a22-832e-22bbb7645251` — shallow multimodal translation boundary.
+- `c9817f6f-ff5e-4bfa-ad1d-965e52187464` — alternative-spawning recovery.
+- `a06e8705-431d-4052-a98d-158c071b293b` — filesystem isolation for parallel external writes.
+
+The anti-`agent_kind` constraint from this note is already projected into
+`AGENTS.md`; it did not need a new backlog item.
 
 ## What is already in the spec; do not re-litigate
 
@@ -385,8 +400,8 @@ intended:
 - The topology — agents post signals, meristem coordinates, humans
   approve writes — is correct.
 - v0 is closed. Everything past v0 should arrive as work_items in the
-  running system, including the items above. This document's purpose
-  is to make those work_items easier to write when an operator gets to
-  them; it is not a substitute for them.
+  running system. The concrete items above have been migrated into live
+  work_items; this document is retained as context, not as a substitute
+  backlog.
 
 If anything in this doc conflicts with the above, the above wins.

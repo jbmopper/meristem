@@ -29,6 +29,11 @@ Currently shipped:
 
 The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The copy/paste bootstrap text for MCP-connected workers is in [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md); Cursor CLI handoff details are in [`docs/providers/cursor-cli.md`](docs/providers/cursor-cli.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
 
+Project coordination now lives in meristem itself: live `work_item`s, appended
+events, transitions, and `/v1/feed`. Markdown coordination notes under
+`docs/coord/` are outage-only fallback or historical archive material, not the
+current backlog.
+
 ## Layout
 
 ```text

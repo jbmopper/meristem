@@ -1,5 +1,15 @@
 # Parallel work coordination, 2026-04-23
 
+> Historical archive. This file is not an active coordination surface.
+> Current meristem work coordinates through live `work_item`s, MCP, and
+> `/v1/feed` whenever the API/MCP surface is reachable. If meristem is down,
+> use markdown only as an outage fallback and replay the durable facts into
+> meristem once it is back.
+>
+> Audit note, 2026-05-27: the historical pointer below to coord work_item
+> `dea636ae-ad6e-5aa2-bb2d-72f4e5afad66` was not found through the current
+> MCP view. Treat it as historical context, not a live handoff target.
+
 Two CLI agents are concurrently building meristem. Until the system can track its own development as work-items, this file is the out-of-band coordination thread. New entries go at the top of each section so the most recent state is easy to find.
 
 Roles in this doc:

@@ -219,9 +219,15 @@ the assigned work_item, scope, and allowed areas. Treat that bootstrap text as
 an entry prompt; the rules in this file and `docs/spec.md` still govern the
 work.
 
-Until `meristem` can track its own development as work_items, multiple agents working concurrently coordinate out-of-band through `docs/coord/`. Each file is dated; read the most recent before starting a turn that touches code another agent has written. When you finish a turn that affects another agent's territory or makes a contract decision, append a short dated note to the appropriate file. When all open questions in a coord file are closed, move it to `docs/coord/archive/`.
+`meristem` now tracks its own development as work_items. When API/MCP is
+reachable, coordinate concurrent work through live `work_item`s, appended
+events, transitions, and the feed. Do not create or extend markdown
+coordination threads as the source of truth.
 
-If your turn is the first one in a new coordination thread, create `docs/coord/YYYY-MM-DD-<topic>.md` with sections: snapshot of who has touched what, decisions, open questions, ownership split, findings carried forward.
+Use `docs/coord/` only as an outage fallback when meristem itself is
+unreachable. If you must write a fallback note there, keep it short, mark it as
+temporary, and replay the durable facts into meristem as soon as the system is
+back. Closed or historical fallback notes belong in `docs/coord/archive/`.
 
 ## When in doubt
 
@@ -229,7 +235,7 @@ Read the spec:
 
 - `docs/spec.md` — the system spec; final authority.
 - `docs/v0.md` — v0 implementation spec; concrete contracts for the bootstrap slice.
-- `docs/coord/` — current coordination notes between concurrent agents.
+- `docs/coord/` — outage-only fallback and historical coordination notes.
 - `README.md` — how to run the binary locally.
 
 This file is a projection of those documents. If you spot drift, fix this file; the spec is canonical.
