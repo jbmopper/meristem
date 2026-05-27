@@ -50,6 +50,13 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "database_unavailable", "database is not configured")
 		return
 	}
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !s.canReadFeed(w, r, actor) {
+		return
+	}
 
 	// Last-Event-ID is the SSE-standard header browsers and well-behaved
 	// CLI clients send on reconnect. Fall back to ?cursor= for callers
@@ -129,15 +136,23 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(items) > 0 {
+			allItems := items
+			items, err = s.filterFeedItems(r.Context(), actor, items)
+			if err != nil {
+				s.logger.Warn("sse: access filter failed", "error", err.Error())
+				return
+			}
 			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 			for i := range items {
 				if !writeSSEFrame(w, &items[i]) {
 					return
 				}
-				fromSeq = items[i].Seq
 			}
-			flusher.Flush()
-			lastWriteAt = time.Now()
+			fromSeq = allItems[len(allItems)-1].Seq
+			if len(items) > 0 {
+				flusher.Flush()
+				lastWriteAt = time.Now()
+			}
 			// Loop without sleeping when we just drained a batch — there
 			// may be more events queued behind us. The sleep below only
 			// fires after an empty Tail.
