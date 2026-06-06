@@ -73,6 +73,23 @@ func TestReduceGrantsWriteGrantWithApprovalAndSubset(t *testing.T) {
 	}
 }
 
+func TestReduceTreatsDescendantTreeAsParentScopeSubset(t *testing.T) {
+	parentRoot := uuid.New()
+	childRoot := uuid.New()
+	decision := Reduce(Request{
+		Parent:            agentToken(parentRoot, access.ScopeWorkItemsRead, access.ScopeFeedReadAssigned),
+		Template:          TemplateSameTreeReadProgress,
+		RequestedSource:   domain.SourceAgent,
+		RequestedTreeRoot: childRoot,
+		TreeRelation:      TreeDescendant,
+		HumanReviewStatus: domain.HumanReviewWavedThrough,
+	})
+
+	if decision.Disposition != DispositionGrant {
+		t.Fatalf("disposition = %s, want grant: %s", decision.Disposition, decision.Reason)
+	}
+}
+
 func TestReduceEscalatesOutsideTree(t *testing.T) {
 	root := uuid.New()
 	decision := Reduce(Request{

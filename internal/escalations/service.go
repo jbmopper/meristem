@@ -48,6 +48,29 @@ func (s *Service) Request(ctx context.Context, in RequestInput) (RequestResult, 
 	if in.WorkItemID == uuid.Nil {
 		return RequestResult{}, fmt.Errorf("escalations: work_item_id is required")
 	}
+	if strings.TrimSpace(in.Reason) == "" {
+		return RequestResult{}, fmt.Errorf("escalations: reason is required")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return RequestResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.RequestInTx(ctx, tx, in)
+	if err != nil {
+		return RequestResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RequestResult{}, err
+	}
+	return result, nil
+}
+
+// RequestInTx records a human escalation in a caller-owned transaction.
+func (s *Service) RequestInTx(ctx context.Context, tx pgx.Tx, in RequestInput) (RequestResult, error) {
+	if in.WorkItemID == uuid.Nil {
+		return RequestResult{}, fmt.Errorf("escalations: work_item_id is required")
+	}
 	reason := strings.TrimSpace(in.Reason)
 	if reason == "" {
 		return RequestResult{}, fmt.Errorf("escalations: reason is required")
@@ -56,12 +79,6 @@ func (s *Service) Request(ctx context.Context, in RequestInput) (RequestResult, 
 	if summary == "" {
 		summary = reason
 	}
-
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return RequestResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	parent, err := scanWorkItem(ctx, tx, in.WorkItemID)
 	if err != nil {
@@ -73,7 +90,7 @@ func (s *Service) Request(ctx context.Context, in RequestInput) (RequestResult, 
 	if existing, ok, err := existingEscalation(ctx, tx, escalationID); err != nil {
 		return RequestResult{}, err
 	} else if ok {
-		return RequestResult{EscalationID: escalationID, HumanWorkItemID: existing, Fresh: false}, tx.Commit(ctx)
+		return RequestResult{EscalationID: escalationID, HumanWorkItemID: existing, Fresh: false}, nil
 	}
 	actorID := &in.Actor.ID
 	source := sourceForActor(in.Actor)
@@ -166,9 +183,6 @@ func (s *Service) Request(ctx context.Context, in RequestInput) (RequestResult, 
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return RequestResult{}, err
-	}
 	return RequestResult{EscalationID: escalationID, HumanWorkItemID: humanWorkItemID, Fresh: fresh}, nil
 }
 

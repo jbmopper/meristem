@@ -104,7 +104,7 @@ func Reduce(req Request) Decision {
 	if writeTemplate && req.HumanReviewStatus != domain.HumanReviewApproved {
 		return escalate("write-capable subactor grants require explicit human approval")
 	}
-	if !parentCoversTemplate(req.Parent.Scopes, templateScopes, req.RequestedTreeRoot) {
+	if !parentCoversTemplate(req.Parent.Scopes, templateScopes, req.RequestedTreeRoot, req.TreeRelation) {
 		return escalate("requested grant is not a subset of parent token scopes")
 	}
 	return Decision{
@@ -135,11 +135,14 @@ func templateScopeSet(template Template, root uuid.UUID) ([]string, bool, bool) 
 	}
 }
 
-func parentCoversTemplate(parentScopes []string, grantScopes []string, root uuid.UUID) bool {
+func parentCoversTemplate(parentScopes []string, grantScopes []string, root uuid.UUID, relation TreeRelation) bool {
 	parent := scopeSet(parentScopes)
 	parentTreeOK := false
 	for scope := range parent {
 		if scope == "work_items.tree:"+root.String() {
+			parentTreeOK = true
+		}
+		if relation == TreeDescendant && strings.HasPrefix(scope, "work_items.tree:") {
 			parentTreeOK = true
 		}
 	}

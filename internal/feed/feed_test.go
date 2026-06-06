@@ -33,7 +33,13 @@ func TestExpectedKindsAreClassified(t *testing.T) {
 		domain.EventDeterministicErrorReported,
 		domain.EventDeterministicErrorMasked,
 		domain.EventDeterministicErrorUnmasked,
+		domain.EventEscalationRequested,
+		domain.EventSubactorGrantRequested,
+		domain.EventSubactorGrantGranted,
+		domain.EventSubactorGrantDenied,
+		domain.EventSubactorGrantEscalated,
 		domain.EventPatienceBreached,
+		domain.EventConvergenceVerdictRecorded,
 	}
 	for _, kind := range expectedIncluded {
 		if !contains(IncludedKinds, kind) {

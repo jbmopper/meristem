@@ -39,6 +39,10 @@ var IncludedKinds = []string{
 	domain.EventDeterministicErrorMasked,
 	domain.EventDeterministicErrorUnmasked,
 	domain.EventEscalationRequested,
+	domain.EventSubactorGrantRequested,
+	domain.EventSubactorGrantGranted,
+	domain.EventSubactorGrantDenied,
+	domain.EventSubactorGrantEscalated,
 	domain.EventPatienceBreached,
 	domain.EventConvergenceVerdictRecorded,
 }

@@ -8,6 +8,11 @@ import (
 )
 
 type contextKey struct{}
+type recordedResponseKey struct{}
+
+type recordedResponseOverride struct {
+	body []byte
+}
 
 // Request is the canonical idempotency identity for one authenticated POST.
 // Services use it to derive stable projection subject ids, so a retry that
@@ -22,6 +27,10 @@ type Request struct {
 
 func withRequest(ctx context.Context, req Request) context.Context {
 	return context.WithValue(ctx, contextKey{}, req)
+}
+
+func withRecordedResponseOverride(ctx context.Context, override *recordedResponseOverride) context.Context {
+	return context.WithValue(ctx, recordedResponseKey{}, override)
 }
 
 // WithRequest is the public seam over the package-internal context
@@ -43,4 +52,23 @@ func SubjectID(ctx context.Context, label string) (uuid.UUID, bool) {
 	}
 	seed := req.TokenID.String() + "|" + req.Scope + "|" + req.Key + "|" + base64.StdEncoding.EncodeToString(req.RequestHash) + "|" + label
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)), true
+}
+
+// SetRecordedResponse replaces the body persisted in idempotency.recorded and
+// served on replay. The current request still receives the handler's original
+// response. Secret-returning handlers use this to avoid durable secret storage.
+func SetRecordedResponse(ctx context.Context, body []byte) {
+	override, ok := ctx.Value(recordedResponseKey{}).(*recordedResponseOverride)
+	if !ok || override == nil {
+		return
+	}
+	override.body = append(override.body[:0], body...)
+}
+
+func recordedResponse(ctx context.Context) ([]byte, bool) {
+	override, ok := ctx.Value(recordedResponseKey{}).(*recordedResponseOverride)
+	if !ok || override == nil || override.body == nil {
+		return nil, false
+	}
+	return override.body, true
 }

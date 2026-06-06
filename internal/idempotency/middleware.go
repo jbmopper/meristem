@@ -126,17 +126,30 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 
 		rec := newRecorder()
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		r = r.WithContext(withRequest(r.Context(), Request{
+		override := &recordedResponseOverride{}
+		ctx := withRequest(r.Context(), Request{
 			TokenID:     tok.ID,
 			Scope:       scope,
 			Key:         key,
 			RequestHash: reqHash,
-		}))
+		})
+		ctx = withRecordedResponseOverride(ctx, override)
+		r = r.WithContext(ctx)
 		next.ServeHTTP(rec, r)
 
-		fresh, err := m.record(r.Context(), tok, scope, key, reqHash, rec.status, rec.body.Bytes())
+		recordBody := rec.body.Bytes()
+		if overridden, ok := recordedResponse(r.Context()); ok {
+			recordBody = overridden
+		}
+		fresh, err := m.record(r.Context(), tok, scope, key, reqHash, rec.status, recordBody)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "idempotency_record_failed", "could not record idempotency key")
+			return
+		}
+		if override.body != nil && fresh {
+			copyHeader(w.Header(), rec.header)
+			w.WriteHeader(rec.status)
+			_, _ = w.Write(rec.body.Bytes())
 			return
 		}
 

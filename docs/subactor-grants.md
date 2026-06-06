@@ -1,8 +1,9 @@
 # Subactor Grant Reducer
 
-Child B defines the first deterministic rule for agent-created subactors. This
-slice is a reducer contract only: no REST route, MCP tool, or secret-returning
-API is added here.
+Child B defines the first deterministic rule and issuance path for
+agent-created subactors. The reducer remains pure; the REST route resolves
+database facts, records grant lifecycle events, and only mints a token after a
+`grant` decision.
 
 ## Current State
 
@@ -17,9 +18,28 @@ MERISTEM_TOKEN="$(tr -d '\n' < .meristem/root.token)" \
     --scopes 'work_items.read,work_items.write,feed.read_assigned,work_items.tree:<work_item_uuid>'
 ```
 
-Agents cannot yet mint their own subactor tokens. That is deliberate: token
-issuance is a side effect and must pass through a deterministic reducer before
-any automation path exists.
+Agents can request subactor tokens through:
+
+```http
+POST /v1/subactor-grants
+```
+
+The route is bearer-authenticated and runs behind the standard HTTP
+idempotency middleware. Request body:
+
+```json
+{
+  "template": "same_tree_read_progress",
+  "work_item_id": "00000000-0000-0000-0000-000000000000",
+  "requested_scopes": [],
+  "name": "optional-token-name"
+}
+```
+
+`work_item_id` is the requested tree root. `requested_scopes` is optional; when
+omitted, the named template supplies the scopes. Requested token source is fixed
+to `agent`, and `human_review_status` is read from the target `work_item`
+projection rather than accepted from the request body.
 
 ## Reducer Inputs
 
@@ -77,20 +97,36 @@ the delegation path is new.
   root delegation, non-agent source changes, logs visibility, approval
   authority, scope widening, or write-capable grants without approval.
 
-Reducer decisions are deterministic and safe to record as events in a later
-slice.
+Reducer decisions are recorded as feed-visible events:
 
-## Future Issuance Contract
+- `subactor_grant.requested`
+- `subactor_grant.granted`
+- `subactor_grant.denied`
+- `subactor_grant.escalated`
 
-A future issuance service should:
+There is no `subactor_grants` projection table in this slice. Token projection
+state still comes from `token.created`; escalation state still comes from
+`escalation.requested` plus the work_item events emitted by the escalation
+service.
+
+## Issuance Contract
 
 1. Append `subactor_grant.requested`.
 2. Run the reducer.
 3. Append `subactor_grant.granted`, `subactor_grant.denied`, or
    `subactor_grant.escalated`.
-4. If granted, call the existing auth token creation path so `token.created`
-   remains the source of the token projection.
-5. Return the plaintext secret exactly once in the immediate response.
+4. If granted, append `token.created` through auth's token creation path in the
+   same transaction so the `tokens` row remains a projection.
+5. If escalated, call `escalations.RequestInTx` in the same transaction so the
+   human-visible escalation work_item is durable.
+6. Return the plaintext secret exactly once in the immediate fresh response.
+
+The idempotency cache records a redacted replay body for granted responses:
+fresh callers receive `token_secret`, but `idempotency.recorded` and replayed
+responses do not contain the plaintext secret. Durable retries after the
+24-hour HTTP cache window use the deterministic grant id to return the existing
+grant outcome without minting a second token; existing granted outcomes return
+token metadata but no secret.
 
 Do not write token rows directly. Do not record plaintext token secrets in
 events. Do not expose this over HTTP MCP write tools until the MCP mutation

@@ -21,8 +21,10 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/errorreporting"
+	"github.com/jbmopper/meristem/internal/escalations"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
@@ -60,6 +62,8 @@ type Server struct {
 	signals               *signals.Service
 	workItems             *workitems.Service
 	access                *access.Service
+	escalations           *escalations.Service
+	grants                *grants.IssuanceService
 	deterministicErrors   *errorreporting.Service
 	feed                  *feed.Service
 	mcpServer             *mcp.Server
@@ -92,6 +96,8 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.signals = signals.NewService(pool, s.writer)
 		s.workItems = workitems.NewService(pool, s.writer)
 		s.access = access.NewService(pool)
+		s.escalations = escalations.NewService(pool, s.writer)
+		s.grants = grants.NewIssuanceService(pool, s.writer, s.authService, s.escalations)
 		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.feed = feed.NewService(pool)
 		s.mcpServer = mcp.New(mcp.Deps{
@@ -122,6 +128,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
+	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
 	s.mux.Handle("GET /v1/feed", s.protected(http.HandlerFunc(s.handleFeed)))
 	s.mux.Handle("GET /v1/feed/stream", s.protected(http.HandlerFunc(s.handleFeedStream)))
 	s.mux.Handle("GET /v1/deterministic-errors", s.protected(http.HandlerFunc(s.handleListDeterministicErrors)))

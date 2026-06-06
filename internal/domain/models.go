@@ -21,6 +21,10 @@ const (
 	EventDeterministicErrorMasked   = "deterministic_error.masked"
 	EventDeterministicErrorUnmasked = "deterministic_error.unmasked"
 	EventEscalationRequested        = "escalation.requested"
+	EventSubactorGrantRequested     = "subactor_grant.requested"
+	EventSubactorGrantGranted       = "subactor_grant.granted"
+	EventSubactorGrantDenied        = "subactor_grant.denied"
+	EventSubactorGrantEscalated     = "subactor_grant.escalated"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
 	// that state. Recorded by `meristem worker --once` (see internal/worker).
@@ -70,6 +74,10 @@ var AllEventKinds = []string{
 	EventDeterministicErrorMasked,
 	EventDeterministicErrorUnmasked,
 	EventEscalationRequested,
+	EventSubactorGrantRequested,
+	EventSubactorGrantGranted,
+	EventSubactorGrantDenied,
+	EventSubactorGrantEscalated,
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
 }
@@ -82,6 +90,7 @@ const (
 	SubjectSignal             = "signal"
 	SubjectDeterministicError = "deterministic_error"
 	SubjectEscalation         = "escalation"
+	SubjectSubactorGrant      = "subactor_grant"
 	// SubjectConvergence is the subject kind for a convergence verdict. The
 	// subject_id is the work_item being reduced; the attempt lives in the event
 	// payload, so (work_item_id, attempt, payload) remains the deterministic

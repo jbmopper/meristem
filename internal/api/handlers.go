@@ -16,6 +16,8 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/grants"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -31,6 +33,36 @@ type workItemResponse struct {
 	CreatedBy                  *uuid.UUID               `json:"created_by,omitempty"`
 	CreatedAt                  time.Time                `json:"created_at"`
 	UpdatedAt                  time.Time                `json:"updated_at"`
+}
+
+type subactorGrantResponse struct {
+	GrantID     uuid.UUID                `json:"grant_id"`
+	WorkItemID  uuid.UUID                `json:"work_item_id"`
+	Template    grants.Template          `json:"template"`
+	Disposition grants.Disposition       `json:"disposition"`
+	Reason      string                   `json:"reason"`
+	Scopes      []string                 `json:"scopes,omitempty"`
+	Token       *subactorGrantToken      `json:"token,omitempty"`
+	TokenSecret string                   `json:"token_secret,omitempty"`
+	Events      subactorGrantEvents      `json:"events"`
+	Escalation  *subactorGrantEscalation `json:"escalation,omitempty"`
+}
+
+type subactorGrantToken struct {
+	ID     uuid.UUID     `json:"id"`
+	Name   string        `json:"name"`
+	Source domain.Source `json:"source"`
+	Scopes []string      `json:"scopes"`
+}
+
+type subactorGrantEvents struct {
+	Requested uuid.UUID `json:"requested"`
+	Outcome   uuid.UUID `json:"outcome"`
+}
+
+type subactorGrantEscalation struct {
+	ID              uuid.UUID `json:"id"`
+	HumanWorkItemID uuid.UUID `json:"human_work_item_id"`
 }
 
 func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +103,49 @@ func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
 		"work_item_id": result.WorkItemID,
 		"captured_at":  capturedAt,
 	})
+}
+
+func (s *Server) handleCreateSubactorGrant(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if s.grants == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "service_unavailable", "subactor grant service is not configured")
+		return
+	}
+	var req struct {
+		Template        string    `json:"template"`
+		WorkItemID      uuid.UUID `json:"work_item_id"`
+		RequestedScopes []string  `json:"requested_scopes"`
+		Name            string    `json:"name"`
+	}
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	result, err := s.grants.Issue(r.Context(), grants.IssueInput{
+		Parent:          actor,
+		WorkItemID:      req.WorkItemID,
+		Template:        grants.Template(req.Template),
+		RequestedScopes: req.RequestedScopes,
+		Name:            req.Name,
+	})
+	if err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	resp := toSubactorGrantResponse(result)
+	if resp.TokenSecret != "" {
+		redacted := resp
+		redacted.TokenSecret = ""
+		recorded, err := json.Marshal(redacted)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "subactor_grant_failed", "could not encode redacted idempotency response")
+			return
+		}
+		idempotency.SetRecordedResponse(r.Context(), recorded)
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 // handleFeed serves /v1/feed in two modes:
@@ -580,6 +655,49 @@ func toWorkItemResponse(item domain.WorkItem) workItemResponse {
 		CreatedAt:                  item.CreatedAt,
 		UpdatedAt:                  item.UpdatedAt,
 	}
+}
+
+func toSubactorGrantResponse(result grants.IssueResult) subactorGrantResponse {
+	resp := subactorGrantResponse{
+		GrantID:     result.GrantID,
+		WorkItemID:  result.WorkItemID,
+		Template:    result.Template,
+		Disposition: result.Disposition,
+		Reason:      result.Reason,
+		Scopes:      result.Scopes,
+		TokenSecret: result.TokenSecret,
+		Events: subactorGrantEvents{
+			Requested: result.RequestEventID,
+			Outcome:   result.OutcomeEventID,
+		},
+	}
+	if result.Token != nil {
+		resp.Token = &subactorGrantToken{
+			ID:     result.Token.ID,
+			Name:   result.Token.Name,
+			Source: result.Token.Source,
+			Scopes: result.Token.Scopes,
+		}
+	}
+	if result.EscalationID != uuid.Nil {
+		resp.Escalation = &subactorGrantEscalation{
+			ID:              result.EscalationID,
+			HumanWorkItemID: result.HumanWorkItemID,
+		}
+	}
+	return resp
+}
+
+func writeGrantError(w http.ResponseWriter, err error) {
+	if errors.Is(err, grants.ErrWorkItemNotFound) {
+		writeAPIError(w, http.StatusNotFound, "work_item_not_found", "work item not found")
+		return
+	}
+	if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "blank") || strings.Contains(err.Error(), "invalid human_review_status") {
+		writeAPIError(w, http.StatusBadRequest, "subactor_grant_request_failed", err.Error())
+		return
+	}
+	writeAPIError(w, http.StatusInternalServerError, "subactor_grant_failed", "could not issue subactor grant")
 }
 
 func writeWorkItemError(w http.ResponseWriter, err error) {
