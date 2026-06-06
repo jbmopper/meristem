@@ -217,6 +217,10 @@ func (s *Server) handleRaw(ctx context.Context, raw []byte, w *syncWriter) error
 }
 
 func (s *Server) dispatch(ctx context.Context, msg rpcMessage) (any, *rpcError) {
+	return s.dispatchWithActor(ctx, msg, s.actorToken())
+}
+
+func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor domain.Token) (any, *rpcError) {
 	switch msg.Method {
 	case "initialize":
 		return s.handleInitialize(msg.Params)
@@ -225,9 +229,9 @@ func (s *Server) dispatch(ctx context.Context, msg rpcMessage) (any, *rpcError) 
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return s.handleListTools()
+		return s.handleListTools(actor)
 	case "tools/call":
-		return s.handleCallTool(ctx, msg.Params)
+		return s.handleCallTool(ctx, actor, msg.Params)
 	case "shutdown":
 		return map[string]any{}, nil
 	default:
@@ -266,8 +270,7 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 	}, nil
 }
 
-func (s *Server) handleListTools() (any, *rpcError) {
-	actor := s.actorToken()
+func (s *Server) handleListTools(actor domain.Token) (any, *rpcError) {
 	descs := make([]toolDescriptor, 0, len(s.tools))
 	for _, t := range s.tools {
 		if !access.ToolVisible(actor, t.Name) {
@@ -298,7 +301,7 @@ type callToolParams struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-func (s *Server) handleCallTool(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
+func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, *rpcError) {
 	var params callToolParams
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &params); err != nil {
@@ -309,7 +312,6 @@ func (s *Server) handleCallTool(ctx context.Context, raw json.RawMessage) (any, 
 	if !ok {
 		return nil, rpcErrorf(errCodeMethodNotFound, "no such tool: "+params.Name)
 	}
-	actor := s.actorToken()
 	if actor.ID == (domain.Token{}).ID {
 		return toolErrorResult("mcp server is not authenticated; set MERISTEM_TOKEN before launching"), nil
 	}

@@ -8,15 +8,15 @@ The owner gives directions in any form. `meristem` normalizes them into a graph 
 
 ## Status
 
-v0 in development. Once v0 is up, all further work is tracked as `work_item`s in `meristem` itself.
+v0 is shipped. Further work is tracked as `work_item`s in `meristem` itself.
 
 Currently shipped:
 
 - `meristem migrate` — apply embedded Postgres migrations.
 - `meristem safety check` — validate deterministic resource limits (request bodies, feed long-poll cap, patience budgets); `api`, `worker`, `mcp`, and non–dry-run `seed v1` refuse to start if invalid.
-- `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, and work-item routes.
+- `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, work-item routes, and read-only Streamable HTTP MCP at `/mcp`.
 - `meristem tokens {create, list, revoke}` — bearer token lifecycle.
-- `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface.
+- `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface; this remains the write-capable compatibility transport while HTTP MCP write idempotency is specified.
 - `meristem provider cursor-cli {scaffold,mcp-config,launch}` — secret-free handoff, target-workspace MCP config, and local Cursor Agent launcher for worker agents.
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
 - `meristem healthcheck` — `/readyz` probe binary, used by the `meristem` container's HEALTHCHECK directive (the runtime image is distroless, so the probe ships as a subcommand).
@@ -27,7 +27,7 @@ Currently shipped:
 
 ## Spec
 
-The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The copy/paste bootstrap text for MCP-connected workers is in [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md); Cursor CLI handoff details are in [`docs/providers/cursor-cli.md`](docs/providers/cursor-cli.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
+The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The copy/paste bootstrap text for MCP-connected workers is in [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md); Cursor CLI handoff details are in [`docs/providers/cursor-cli.md`](docs/providers/cursor-cli.md). The subactor delegation reducer is documented in [`docs/subactor-grants.md`](docs/subactor-grants.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
 
 Project coordination now lives in meristem itself: live `work_item`s, appended
 events, transitions, and `/v1/feed`. Markdown coordination notes under
@@ -39,7 +39,7 @@ current backlog.
 ```text
 cmd/meristem/       binary entry point
 internal/api/      HTTP surface
-internal/mcp/      MCP server (JSON-RPC over stdio)
+internal/mcp/      MCP server (JSON-RPC over stdio and HTTP dispatch)
 internal/safety/   deterministic resource limits (startup gate + HTTP enforcement)
 internal/providers/ provider-specific handoff/scaffold helpers
 internal/storage/  Postgres pool and migration runner

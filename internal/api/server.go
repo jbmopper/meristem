@@ -25,6 +25,7 @@ import (
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/signals"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -61,6 +62,7 @@ type Server struct {
 	access                *access.Service
 	deterministicErrors   *errorreporting.Service
 	feed                  *feed.Service
+	mcpServer             *mcp.Server
 	policy                safety.Policy
 }
 
@@ -92,6 +94,15 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.access = access.NewService(pool)
 		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.feed = feed.NewService(pool)
+		s.mcpServer = mcp.New(mcp.Deps{
+			Auth:                s.authService,
+			Access:              s.access,
+			Inbox:               s.inbox,
+			WorkItems:           s.workItems,
+			DeterministicErrors: s.deterministicErrors,
+			Feed:                s.feed,
+			MaxFeedWait:         s.policy.MaxFeedWait,
+		}, mcp.ServerInfo{Name: "meristem", Version: "dev"}, logger)
 	}
 	s.routes()
 	return s
@@ -107,6 +118,8 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleLiveness)
 	s.mux.HandleFunc("GET /readyz", s.handleReadiness)
+	s.mux.Handle("GET /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
+	s.mux.Handle("POST /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("GET /v1/feed", s.protected(http.HandlerFunc(s.handleFeed)))
