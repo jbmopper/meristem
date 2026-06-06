@@ -93,6 +93,35 @@ func TestServer_NotificationsProduceNoResponse(t *testing.T) {
 	}
 }
 
+// TestServer_Run_AcceptsMultilineJSON verifies that pretty-printed (multiline)
+// JSON-RPC requests are parsed correctly. Some MCP clients — particularly
+// small models running through Codex — send tool call arguments with embedded
+// newlines; the scanner-based reader would break on these.
+func TestServer_Run_AcceptsMultilineJSON(t *testing.T) {
+	s := newTestServer(t)
+	// Pretty-printed request spanning multiple lines.
+	multiline := "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"initialize\",\n  \"params\": {\n    \"protocolVersion\": \"2024-11-05\"\n  }\n}\n"
+	out := &bytes.Buffer{}
+	if err := s.Run(context.Background(), strings.NewReader(multiline), out); err != nil {
+		t.Fatalf("Run returned error on multiline JSON: %v", err)
+	}
+	line := strings.TrimRight(out.String(), "\n")
+	if line == "" {
+		t.Fatal("expected response, got empty stdout")
+	}
+	// Response must itself be a single compact line (no embedded newlines).
+	if strings.Contains(line, "\n") {
+		t.Fatalf("response contains embedded newline (not compact): %q", line)
+	}
+	var msg rpcMessage
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nraw: %s", err, line)
+	}
+	if msg.Error != nil {
+		t.Fatalf("initialize returned error: %+v", msg.Error)
+	}
+}
+
 func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)

@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -143,35 +142,44 @@ func (s *Server) actorToken() domain.Token {
 // a write error occurs. Read errors other than EOF are returned; EOF is
 // the normal disconnect path.
 //
-// Each line is one message. We reject oversized lines explicitly rather
-// than silently truncating (bufio.Scanner's default 64 KiB cap is too
-// small for tool payloads but we still want a hard ceiling).
+// Messages may arrive as compact single-line JSON or pretty-printed
+// multi-line JSON; json.Decoder handles both. The server always writes
+// compact single-line responses (one message per '\n'-terminated line).
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
+	dec := json.NewDecoder(in)
 	writer := newSyncWriter(out)
 
-	for scanner.Scan() {
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line := scanner.Bytes()
-		if len(line) == 0 {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
+			// JSON syntax/type error: send a parse error per JSON-RPC 2.0 and
+			// stop. The decoder stream state is undefined after a bad token so
+			// further reads are unreliable.
+			var synErr *json.SyntaxError
+			var unmarshalErr *json.UnmarshalTypeError
+			if errors.As(err, &synErr) || errors.As(err, &unmarshalErr) {
+				_ = writer.write(rpcMessage{
+					JSONRPC: "2.0",
+					ID:      json.RawMessage("null"),
+					Error:   rpcErrorf(errCodeParse, "invalid JSON: "+err.Error()),
+				})
+				return nil
+			}
+			return err
+		}
+		if len(raw) == 0 {
 			continue
 		}
-		// Copy because scanner reuses the buffer between Scan calls and
-		// we may pass the bytes through to background goroutines later.
-		buf := make([]byte, len(line))
-		copy(buf, line)
-		if err := s.handleRaw(ctx, buf, writer); err != nil {
+		if err := s.handleRaw(ctx, []byte(raw), writer); err != nil {
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
 }
 
 func (s *Server) handleRaw(ctx context.Context, raw []byte, w *syncWriter) error {
