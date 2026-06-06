@@ -7,7 +7,6 @@
 # - Store each bearer secret in .meristem/<target>.token with mode 0600.
 # - Generate MCP config snippets that read token files at runtime instead of
 #   embedding bearer secrets in shared JSON config.
-# - Optionally rewrite .cursor/mcp.json to use .meristem/cursor-mcp.token.
 # - Optionally run `claude mcp add` when the Claude Code CLI is installed.
 #
 # It deliberately does NOT create remote Claude.ai/Cowork/ChatGPT connectors.
@@ -33,8 +32,6 @@ esac
 DEFAULT_TARGETS=(
   codex
   codex-cli
-  cursor-mcp
-  cursor-cli
   claude-code
   claude-code-cli
   claude-code-gui
@@ -42,7 +39,6 @@ DEFAULT_TARGETS=(
 )
 
 targets=("${DEFAULT_TARGETS[@]}")
-apply_cursor=false
 apply_claude_code=false
 print_remote=false
 
@@ -53,13 +49,12 @@ usage:
 
 options:
   --targets a,b,c       Provision only these target names.
-  --apply-cursor        Rewrite .cursor/mcp.json to read .meristem/cursor-mcp.token.
   --apply-claude-code   Run `claude mcp add ...` if the Claude CLI is installed.
   --print-remote        Print remote-only targets that are intentionally not minted.
   -h, --help            Show this help.
 
 defaults:
-  codex,codex-cli,cursor-mcp,cursor-cli,claude-code,claude-code-cli,
+  codex,codex-cli,claude-code,claude-code-cli,
   claude-code-gui,claude-desktop
 
 security:
@@ -77,10 +72,6 @@ while (($#)); do
       ;;
     --targets=*)
       IFS=',' read -r -a targets <<< "${1#--targets=}"
-      shift
-      ;;
-    --apply-cursor)
-      apply_cursor=true
       shift
       ;;
     --apply-claude-code)
@@ -111,6 +102,11 @@ die()  { printf '!! %s\n' "$*" >&2; exit 1; }
 
 sanitize_target() {
   local target="$1"
+  case "$target" in
+    cursor* )
+      die "unsupported target $target: Cursor-specific assistant bootstrapping is no longer supported"
+      ;;
+  esac
   case "$target" in
     ''|*[^A-Za-z0-9_.-]*)
       die "invalid target name $target; use only letters, numbers, dot, underscore, and dash"
@@ -203,32 +199,7 @@ claude mcp add meristem --scope user -- "$GENERATED_DIR_ABS/claude-code-meristem
 EOF
   chmod 700 "$GENERATED_DIR/claude-code-mcp-add.sh"
 
-  cat > "$GENERATED_DIR/cursor-mcp.secure.json" <<EOF
-{
-  "mcpServers": {
-    "meristem": {
-      "command": "bash",
-      "args": [
-        "-lc",
-        "cd '$REPO_ROOT' && MERISTEM_DATABASE_URL='$MERISTEM_DATABASE_URL' MERISTEM_MCP_TOOL_NAMES=cursor MERISTEM_TOKEN=\$(cat .meristem/cursor-mcp.token) exec '$GO_BIN' run ./cmd/meristem mcp"
-      ]
-    }
-  }
-}
-EOF
-  chmod 600 "$GENERATED_DIR/cursor-mcp.secure.json"
-
   log "generated secret-free MCP snippets in $GENERATED_DIR"
-}
-
-apply_cursor_config() {
-  local file
-  file="$(token_file_for cursor-mcp)"
-  [[ -s "$file" ]] || die "cannot apply Cursor config: $file is missing"
-  mkdir -p .cursor
-  cp "$GENERATED_DIR/cursor-mcp.secure.json" .cursor/mcp.json
-  chmod 600 .cursor/mcp.json
-  log "rewrote .cursor/mcp.json to read .meristem/cursor-mcp.token at runtime"
 }
 
 apply_claude_code_config() {
@@ -258,10 +229,6 @@ done
 
 write_generated_configs
 
-if $apply_cursor; then
-  apply_cursor_config
-fi
-
 if $apply_claude_code; then
   apply_claude_code_config
 fi
@@ -286,8 +253,8 @@ done.
 
 Useful files:
   $GENERATED_DIR/codex-meristem-command.sh
+  $GENERATED_DIR/claude-code-meristem-command.sh
   $GENERATED_DIR/claude-code-mcp-add.sh
-  $GENERATED_DIR/cursor-mcp.secure.json
 
 Verify Claude Code after applying:
   /mcp

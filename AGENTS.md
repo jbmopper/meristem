@@ -1,6 +1,6 @@
 # AGENTS.md
 
-A projection of `docs/spec.md` (system spec) and `docs/v0.md` (v0 implementation spec), distilled for generative systems — Cursor, Codex, Claude, custom workers — that pick up this repository to add or modify code.
+A projection of `docs/spec.md` (system spec) and `docs/v0.md` (v0 implementation spec), distilled for any generative-system implementation work in this repository.
 
 If this file and `docs/spec.md` disagree, **`docs/spec.md` wins and this file is wrong**. Fix the projection, not the source.
 
@@ -78,7 +78,6 @@ internal/workitems/   lifecycle, transitions, relations
 internal/feed/        chronological projection
 internal/signals/     non-human structured input → work_items (see docs/signals.md)
 internal/safety/      deterministic resource limits (request bodies, feed wait, patience budgets)
-internal/providers/   provider-specific handoff/scaffold helpers; never provider-specific durable identity
 internal/storage/     pgx pool + migration runner
 internal/worker/      bounded-patience scan kernel (v1)
 internal/mcp/         MCP tool definitions + stdio transport
@@ -143,8 +142,8 @@ A projection writer turns appended events into derived rows. It is the *only* co
 
 - Name format: `<package>.<verb>`, matching the REST surface: `inbox.capture`, `work_items.transition`, `feed.read`.
 - Args mirror the REST request body. Return values mirror the REST response body. The same domain function backs both transports.
-- Auth is by `MERISTEM_TOKEN` in the server's environment. Each agent (each Cursor instance, each custom worker) gets its own token row so attribution stays clean.
-- Transport is stdio in v0 (matches how Cursor launches MCP servers). Other transports are explicit work_items.
+- Auth is by `MERISTEM_TOKEN` in the server's environment. Each agent instance and worker gets its own token row so attribution stays clean.
+- Transport is stdio in v0 (matches how MCP clients launch this process). Other transports are explicit work_items.
 - MCP tools are filtered by token policy before advertisement and again before
   object-level calls. Scoped worker tokens use scopes such as
   `work_items.tree:<uuid>`, `work_items.read`, `work_items.write`, and
@@ -160,8 +159,8 @@ boundary and scoped MCP surface fully cover every provider path. They do not
 replace a scoped export/proxy; they make the operator's intent unambiguous when
 an external model provider is pointed at a workspace.
 
-- Treat Cursor CLI, Claude Code, and custom MCP workers as external execution
-  paths unless the operator explicitly says otherwise.
+- Treat external assistants (CLI-based helpers, Claude Code, and custom MCP workers) as external execution
+ paths unless the operator explicitly says otherwise.
 - Before launching an external worker, state the target workspace, allowed
   areas, out-of-scope areas, model, worktree base, `work_item`, and
   `human_review_status`.

@@ -20,7 +20,7 @@ resolve_token() {
   fi
   local dir="$REPO_ROOT"
   while [ "$dir" != "/" ]; do
-    for f in "$dir/.meristem/cursor-mcp.token" "$dir/.meristem/root.token"; do
+    for f in "$dir/.meristem/root.token"; do
       if [ -f "$f" ]; then
         tr -d '[:space:]' < "$f"
         return 0
