@@ -102,9 +102,23 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		slog.Int("scanned", result.Scanned),
 		slog.Int("breaches_emitted", result.BreachesEmitted),
 		slog.Int("breaches_already_recorded", result.BreachesAlreadyRecorded),
+		slog.Int("convergence_candidates", result.ConvergenceCandidatesScanned),
+		slog.Int("convergence_verdicts_recorded", result.ConvergenceVerdictsRecorded),
+		slog.Int("convergence_verdicts_already_recorded", result.ConvergenceVerdictsAlreadyRecorded),
+		slog.Int("convergence_accepts", result.ConvergenceAccepts),
+		slog.Int("convergence_retries", result.ConvergenceRetries),
+		slog.Int("convergence_escalations", result.ConvergenceEscalations),
 	)
-	fmt.Fprintf(os.Stdout, "worker --once: scanned=%d emitted=%d already_recorded=%d\n",
-		result.Scanned, result.BreachesEmitted, result.BreachesAlreadyRecorded)
+	fmt.Fprintf(os.Stdout, "worker --once: scanned=%d emitted=%d already_recorded=%d convergence_candidates=%d convergence_verdicts=%d accepts=%d retries=%d escalations=%d\n",
+		result.Scanned,
+		result.BreachesEmitted,
+		result.BreachesAlreadyRecorded,
+		result.ConvergenceCandidatesScanned,
+		result.ConvergenceVerdictsRecorded+result.ConvergenceVerdictsAlreadyRecorded,
+		result.ConvergenceAccepts,
+		result.ConvergenceRetries,
+		result.ConvergenceEscalations,
+	)
 	return nil
 }
 

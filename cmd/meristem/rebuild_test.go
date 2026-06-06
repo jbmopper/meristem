@@ -68,6 +68,7 @@ func TestProjectionTables_Coverage(t *testing.T) {
 		"idempotency_keys":     true,
 		"signals":              true,
 		"deterministic_errors": true,
+		"convergence_verdicts": true,
 	}
 	if len(projectionTables) != len(want) {
 		t.Errorf("projectionTables length drift: have %d, expected %d", len(projectionTables), len(want))

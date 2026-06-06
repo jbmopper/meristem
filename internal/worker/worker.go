@@ -163,6 +163,25 @@ type Result struct {
 	// `meristem worker --once` output can see "the scan saw N breaches; M
 	// were new this run."
 	BreachesAlreadyRecorded int
+
+	// ConvergenceCandidatesScanned is the count of running work_items
+	// with suggested convergence checks and therefore a chance to advance
+	// through the convergence loop in this pass.
+	ConvergenceCandidatesScanned int
+	// ConvergenceVerdictsRecorded is the number of fresh convergence verdict
+	// events appended this pass.
+	ConvergenceVerdictsRecorded int
+	// ConvergenceVerdictsAlreadyRecorded is the number of convergence verdicts
+	// observed but already present in the event log.
+	ConvergenceVerdictsAlreadyRecorded int
+	// ConvergenceAccepts is how many candidates reached accept and moved to done.
+	ConvergenceAccepts int
+	// ConvergenceRetries is how many candidates were rejected but kept within
+	// budget for another attempt.
+	ConvergenceRetries int
+	// ConvergenceEscalations is how many candidates exhausted budget or
+	// escalated directly and were moved out of the running loop.
+	ConvergenceEscalations int
 }
 
 // Worker scans the work_items projection for breaches and emits events.
@@ -212,7 +231,6 @@ func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid
 // retry, or escalation) is downstream.
 func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	now := w.clock().UTC()
-
 	states := w.budgets.states()
 	if len(states) == 0 {
 		return Result{}, nil
@@ -255,6 +273,18 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 			out.BreachesAlreadyRecorded++
 		}
 	}
+
+	convergenceResult, err := w.scanConvergence(ctx)
+	if err != nil {
+		return out, fmt.Errorf("worker: convergence pass: %w", err)
+	}
+	out.ConvergenceCandidatesScanned = convergenceResult.ConvergenceCandidatesScanned
+	out.ConvergenceVerdictsRecorded = convergenceResult.ConvergenceVerdictsRecorded
+	out.ConvergenceVerdictsAlreadyRecorded = convergenceResult.ConvergenceVerdictsAlreadyRecorded
+	out.ConvergenceAccepts = convergenceResult.ConvergenceAccepts
+	out.ConvergenceRetries = convergenceResult.ConvergenceRetries
+	out.ConvergenceEscalations = convergenceResult.ConvergenceEscalations
+
 	return out, nil
 }
 
