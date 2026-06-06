@@ -15,7 +15,7 @@ Currently shipped:
 - `meristem migrate` — apply embedded Postgres migrations.
 - `meristem safety check` — validate deterministic resource limits (request bodies, feed long-poll cap, patience budgets); `api`, `worker`, `mcp`, and non–dry-run `seed v1` refuse to start if invalid.
 - `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, work-item routes, and read-only Streamable HTTP MCP at `/mcp`.
-- `meristem tokens {create, list, revoke}` — bearer token lifecycle.
+- `meristem tokens {create, list, revoke}` plus `POST /v1/tokens/revoke-all` — bearer token lifecycle and root-only panic revocation.
 - `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface; this remains the write-capable compatibility transport while HTTP MCP write idempotency is specified.
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
 - `meristem healthcheck` — `/readyz` probe binary, used by the `meristem` container's HEALTHCHECK directive (the runtime image is distroless, so the probe ships as a subcommand).
@@ -171,6 +171,19 @@ MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslm
 
 This repository does not ship a dedicated worker launcher anymore. Use the
 generic MCP text path above.
+
+### Panic revoke
+
+If an assistant token is compromised or a local agent setup gets confused, the
+root token can revoke every active non-root token through the HTTP API. The
+endpoint appends one `token.revoked` event per token and leaves the root token
+active so the owner can mint replacements.
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8080/v1/tokens/revoke-all \
+  -H "Authorization: Bearer $(cat .meristem/root.token)" \
+  -H "Idempotency-Key: panic-revoke-$(date +%s)"
+```
 
 ## Go client
 
