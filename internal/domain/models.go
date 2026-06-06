@@ -20,6 +20,7 @@ const (
 	EventDeterministicErrorReported = "deterministic_error.reported"
 	EventDeterministicErrorMasked   = "deterministic_error.masked"
 	EventDeterministicErrorUnmasked = "deterministic_error.unmasked"
+	EventEscalationRequested        = "escalation.requested"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
 	// that state. Recorded by `meristem worker --once` (see internal/worker).
@@ -58,6 +59,7 @@ var AllEventKinds = []string{
 	EventDeterministicErrorReported,
 	EventDeterministicErrorMasked,
 	EventDeterministicErrorUnmasked,
+	EventEscalationRequested,
 	EventPatienceBreached,
 }
 
@@ -68,6 +70,7 @@ const (
 	SubjectWorkItem           = "work_item"
 	SubjectSignal             = "signal"
 	SubjectDeterministicError = "deterministic_error"
+	SubjectEscalation         = "escalation"
 )
 
 // Token is the active client credential projection. The raw bearer secret is
