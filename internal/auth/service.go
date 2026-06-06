@@ -250,6 +250,62 @@ func (s *Service) Revoke(ctx context.Context, id uuid.UUID, actor domain.Token) 
 	return tx.Commit(ctx)
 }
 
+// RevokeAllNonRoot appends one token.revoked event for each active non-root
+// token. The root actor remains active so the owner can recover after panic
+// revocation by minting fresh client tokens.
+func (s *Service) RevokeAllNonRoot(ctx context.Context, actor domain.Token) ([]uuid.UUID, error) {
+	if !actor.IsRoot || actor.RevokedAt != nil {
+		return nil, ErrRootRequired
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT id
+		FROM tokens
+		WHERE NOT is_root
+		  AND revoked_at IS NULL
+		ORDER BY created_at, id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+			SubjectKind:  domain.SubjectToken,
+			SubjectID:    id,
+			Kind:         domain.EventTokenRevoked,
+			Source:       sourceForToken(&actor),
+			ActorTokenID: &actor.ID,
+			Payload:      map[string]any{"reason": "panic_revoke"},
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 func (s *Service) Authenticate(ctx context.Context, secret string) (domain.Token, error) {
 	if !ValidSecretShape(secret) {
 		return domain.Token{}, ErrTokenShape

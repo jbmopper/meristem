@@ -148,6 +148,26 @@ func (s *Server) handleCreateSubactorGrant(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, resp)
 }
 
+func (s *Server) handlePanicRevokeTokens(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	revoked, err := s.authService.RevokeAllNonRoot(r.Context(), actor)
+	if err != nil {
+		if errors.Is(err, auth.ErrRootRequired) {
+			writeAPIError(w, http.StatusForbidden, "root_token_required", "root token required")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "token_revoke_failed", "could not revoke tokens")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"revoked_count": len(revoked),
+		"revoked":       revoked,
+	})
+}
+
 // handleFeed serves /v1/feed in two modes:
 //
 //   - Snapshot (back-compat): no cursor, no wait → latest-N events
@@ -457,6 +477,18 @@ func (s *Server) canCaptureInbox(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if !access.ToolVisible(actor, "inbox.capture") {
 		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot capture inbox messages")
+		return false
+	}
+	return true
+}
+
+func (s *Server) canPanicRevokeTokens(w http.ResponseWriter, r *http.Request) bool {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return false
+	}
+	if !actor.IsRoot {
+		writeAPIError(w, http.StatusForbidden, "root_token_required", "root token required")
 		return false
 	}
 	return true
