@@ -224,6 +224,11 @@ reachable, coordinate concurrent work through live `work_item`s, appended
 events, transitions, and the feed. Do not create or extend markdown
 coordination threads as the source of truth.
 
+When changing `docs/spec.md` § v1 Substrate, mirror the change into live
+`work_item` state in the same change: create missing substrate items, append
+status/diff events to existing items, or transition rows whose substrate work is
+now done. The spec list and seeded backlog must not drift silently.
+
 Use `docs/coord/` only as an outage fallback when meristem itself is
 unreachable. If you must write a fallback note there, keep it short, mark it as
 temporary, and replay the durable facts into meristem as soon as the system is
