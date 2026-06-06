@@ -38,10 +38,10 @@ func (verdictRecordedProjector) Apply(ctx context.Context, tx pgx.Tx, event doma
 	_, err = tx.Exec(ctx, `
 		INSERT INTO convergence_verdicts (
 			event_id, work_item_id, reducer_identity, reducer_version,
-			attempt, inputs_digest, disposition, reason, signals,
+			attempt, inputs_digest, disposition, reason, reducer_config, signals,
 			actor_token_id, source, occurred_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13)
 		ON CONFLICT (event_id) DO UPDATE SET
 			work_item_id = EXCLUDED.work_item_id,
 			reducer_identity = EXCLUDED.reducer_identity,
@@ -50,13 +50,14 @@ func (verdictRecordedProjector) Apply(ctx context.Context, tx pgx.Tx, event doma
 			inputs_digest = EXCLUDED.inputs_digest,
 			disposition = EXCLUDED.disposition,
 			reason = EXCLUDED.reason,
+			reducer_config = EXCLUDED.reducer_config,
 			signals = EXCLUDED.signals,
 			actor_token_id = EXCLUDED.actor_token_id,
 			source = EXCLUDED.source,
 			occurred_at = EXCLUDED.occurred_at
 	`, event.ID, event.SubjectID, payload.ReducerIdentity, payload.ReducerVersion,
 		payload.Attempt, payload.InputsDigest, string(payload.Verdict.Disposition),
-		payload.Verdict.Reason, []byte(payload.Signals), event.ActorTokenID,
+		payload.Verdict.Reason, []byte(payload.ReducerConfig), []byte(payload.Signals), event.ActorTokenID,
 		string(event.Source), event.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("convergence.verdict_recorded: insert projection: %w", err)
@@ -70,6 +71,7 @@ type verdictRecordedPayload struct {
 	Attempt         int             `json:"attempt"`
 	InputsDigest    string          `json:"inputs_digest"`
 	Verdict         Verdict         `json:"verdict"`
+	ReducerConfig   json.RawMessage `json:"reducer_config"`
 	Signals         json.RawMessage `json:"signals"`
 }
 
@@ -108,6 +110,16 @@ func decodeVerdictRecordedPayload(raw any) (verdictRecordedPayload, error) {
 	var signals []json.RawMessage
 	if err := json.Unmarshal(p.Signals, &signals); err != nil {
 		return verdictRecordedPayload{}, fmt.Errorf("convergence.verdict_recorded: signals must be a JSON array: %w", err)
+	}
+	if len(p.ReducerConfig) == 0 {
+		p.ReducerConfig = json.RawMessage(`{}`)
+	}
+	if !json.Valid(p.ReducerConfig) {
+		return verdictRecordedPayload{}, fmt.Errorf("convergence.verdict_recorded: reducer_config must be valid JSON")
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(p.ReducerConfig, &config); err != nil {
+		return verdictRecordedPayload{}, fmt.Errorf("convergence.verdict_recorded: reducer_config must be a JSON object: %w", err)
 	}
 	return p, nil
 }

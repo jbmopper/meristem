@@ -31,6 +31,13 @@ type MajorityVote struct {
 func (MajorityVote) Identity() string { return "majority_vote" }
 func (MajorityVote) Version() int     { return 1 }
 
+func (m MajorityVote) ReducerConfig() map[string]any {
+	if m.SignalKind == "" {
+		return nil
+	}
+	return map[string]any{"signal_kind": m.SignalKind}
+}
+
 func (m MajorityVote) Reduce(signals []Signal) (Verdict, error) {
 	var pass, fail int
 	for _, s := range signals {
@@ -83,6 +90,13 @@ type Unanimous struct {
 func (Unanimous) Identity() string { return "unanimous" }
 func (Unanimous) Version() int     { return 1 }
 
+func (u Unanimous) ReducerConfig() map[string]any {
+	if u.SignalKind == "" {
+		return nil
+	}
+	return map[string]any{"signal_kind": u.SignalKind}
+}
+
 func (u Unanimous) Reduce(signals []Signal) (Verdict, error) {
 	var seen, failed int
 	for _, s := range signals {
@@ -133,6 +147,14 @@ type Threshold struct {
 func (Threshold) Identity() string { return "threshold_mean" }
 func (Threshold) Version() int     { return 1 }
 
+func (t Threshold) ReducerConfig() map[string]any {
+	config := map[string]any{"accept": t.Accept}
+	if t.SignalKind != "" {
+		config["signal_kind"] = t.SignalKind
+	}
+	return config
+}
+
 func (t Threshold) Reduce(signals []Signal) (Verdict, error) {
 	var sum float64
 	var n int
@@ -182,6 +204,14 @@ type AllPassChecklist struct {
 
 func (AllPassChecklist) Identity() string { return "all_pass_checklist" }
 func (AllPassChecklist) Version() int     { return 1 }
+
+func (c AllPassChecklist) ReducerConfig() map[string]any {
+	if len(c.Required) == 0 {
+		return nil
+	}
+	required := append([]string(nil), c.Required...)
+	return map[string]any{"required": required}
+}
 
 const checklistItemPrefix = "checklist.item:"
 

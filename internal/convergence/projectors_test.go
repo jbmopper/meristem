@@ -31,6 +31,9 @@ func TestVerdictRecordedProjector_DerivesProjectionRow(t *testing.T) {
 			"reducer_version":  1,
 			"attempt":          2,
 			"inputs_digest":    strings.Repeat("a", 64),
+			"reducer_config": map[string]any{
+				"signal_kind": "grader.pass",
+			},
 			"verdict": map[string]any{
 				"disposition": "accept",
 				"reason":      "2/3 graders passed (majority)",
@@ -60,12 +63,15 @@ func TestVerdictRecordedProjector_DerivesProjectionRow(t *testing.T) {
 	assertArg(t, args, 5, strings.Repeat("a", 64))
 	assertArg(t, args, 6, "accept")
 	assertArg(t, args, 7, "2/3 graders passed (majority)")
-	if signals, ok := args[8].([]byte); !ok || !strings.Contains(string(signals), `"kind":"grader.pass"`) {
-		t.Fatalf("signals arg = %#v, want JSON containing grader.pass", args[8])
+	if config, ok := args[8].([]byte); !ok || !strings.Contains(string(config), `"signal_kind":"grader.pass"`) {
+		t.Fatalf("reducer_config arg = %#v, want JSON containing signal_kind", args[8])
 	}
-	assertArg(t, args, 9, &actorID)
-	assertArg(t, args, 10, "system")
-	assertArg(t, args, 11, occurredAt)
+	if signals, ok := args[9].([]byte); !ok || !strings.Contains(string(signals), `"kind":"grader.pass"`) {
+		t.Fatalf("signals arg = %#v, want JSON containing grader.pass", args[9])
+	}
+	assertArg(t, args, 10, &actorID)
+	assertArg(t, args, 11, "system")
+	assertArg(t, args, 12, occurredAt)
 }
 
 func TestVerdictRecordedProjector_ValidatesPayload(t *testing.T) {
@@ -82,6 +88,7 @@ func TestVerdictRecordedProjector_ValidatesPayload(t *testing.T) {
 		{"disposition", func(p map[string]any) { p["verdict"] = map[string]any{"disposition": "maybe", "reason": "x"} }, "invalid disposition"},
 		{"reason", func(p map[string]any) { p["verdict"] = map[string]any{"disposition": "accept"} }, "verdict.reason is required"},
 		{"signals", func(p map[string]any) { p["signals"] = map[string]any{"kind": "grader.pass"} }, "signals must be a JSON array"},
+		{"reducer config", func(p map[string]any) { p["reducer_config"] = []any{"not", "object"} }, "reducer_config must be a JSON object"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

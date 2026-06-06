@@ -14,9 +14,9 @@
 //   - A Reducer — a hand-coded, versioned, replayable pure function — folds
 //     those signals into one of three Verdicts: accept, reject, escalate.
 //   - Run() captures the reduction as a Reduction value: reducer identity and
-//     version, a digest of the exact signals reduced over, the raw signals,
-//     and the verdict. That value is what a caller persists as a
-//     convergence.verdict_recorded event so the decision is reconstructable
+//     version, reducer configuration, a digest of the exact inputs reduced over,
+//     the raw signals, and the verdict. That value is what a caller persists as
+//     a convergence.verdict_recorded event so the decision is reconstructable
 //     from the log alone (spec rule #2: "the verdict is an event").
 //
 // What the reducer core deliberately does NOT do, because durable truth lives
@@ -102,6 +102,13 @@ type Reducer interface {
 	Reduce(signals []Signal) (Verdict, error)
 }
 
+// ConfiguredReducer is implemented by reducers whose result depends on
+// parameters beyond the signal slice, such as a threshold or checklist. The
+// returned map is recorded in verdict payloads and included in InputsDigest.
+type ConfiguredReducer interface {
+	ReducerConfig() map[string]any
+}
+
 // Verdict pairs the disposition with the reason the reducer reached it. The
 // disposition is domain.Verdict (the durable wire vocabulary); Reason is a
 // short, stable, human-readable explanation that is also recorded.
@@ -127,13 +134,16 @@ type Reduction struct {
 	// not used by the reducer; it is recorded so the patience budget's
 	// accounting is visible in the log.
 	Attempt int `json:"attempt"`
-	// InputsDigest is the SHA-256 (hex) of the canonical encoding of Signals.
-	// Two reductions over the same signals share a digest; it is what makes
-	// "this verdict was over exactly these inputs" checkable without diffing
-	// the raw signal blobs.
+	// InputsDigest is the SHA-256 (hex) of the canonical encoding of the
+	// reducer configuration and Signals. Two reductions over the same inputs
+	// share a digest; it is what makes "this verdict was over exactly these
+	// inputs" checkable without diffing the raw signal blobs.
 	InputsDigest string `json:"inputs_digest"`
 	// Verdict is the disposition + reason the reducer produced.
 	Verdict Verdict `json:"verdict"`
+	// ReducerConfig is the parameter set the reducer used, when the reducer is
+	// configured. Parameter-free reducers record an empty config.
+	ReducerConfig map[string]any `json:"reducer_config,omitempty"`
 	// Signals is the exact set reduced over, kept for audit and re-folding.
 	Signals []Signal `json:"signals"`
 }
@@ -155,7 +165,8 @@ func Run(r Reducer, signals []Signal, attempt int) (Reduction, error) {
 	if attempt < 1 {
 		return Reduction{}, fmt.Errorf("convergence: attempt must be >= 1, got %d", attempt)
 	}
-	digest, err := digestSignals(signals)
+	config := reducerConfig(r)
+	digest, err := digestReductionInputs(signals, config)
 	if err != nil {
 		return Reduction{}, err
 	}
@@ -178,6 +189,7 @@ func Run(r Reducer, signals []Signal, attempt int) (Reduction, error) {
 		Attempt:         attempt,
 		InputsDigest:    digest,
 		Verdict:         v,
+		ReducerConfig:   config,
 		Signals:         recorded,
 	}, nil
 }
@@ -213,7 +225,7 @@ func (red Reduction) EventPayload() map[string]any {
 		}
 		signals = append(signals, entry)
 	}
-	return map[string]any{
+	payload := map[string]any{
 		"reducer_identity": red.ReducerIdentity,
 		"reducer_version":  red.ReducerVersion,
 		"attempt":          red.Attempt,
@@ -224,6 +236,22 @@ func (red Reduction) EventPayload() map[string]any {
 		},
 		"signals": signals,
 	}
+	if len(red.ReducerConfig) > 0 {
+		payload["reducer_config"] = red.ReducerConfig
+	}
+	return payload
+}
+
+func reducerConfig(r Reducer) map[string]any {
+	configured, ok := r.(ConfiguredReducer)
+	if !ok {
+		return nil
+	}
+	config := configured.ReducerConfig()
+	if len(config) == 0 {
+		return nil
+	}
+	return config
 }
 
 // Registry maps reducer identity → reducer, so a replay path can look up the

@@ -1,5 +1,3 @@
-//go:build convergence_worker_experiment
-
 package worker
 
 import (
@@ -14,7 +12,6 @@ import (
 
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
-	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -27,6 +24,7 @@ type convergencePassResult struct {
 	ConvergenceCandidatesScanned       int
 	ConvergenceVerdictsRecorded        int
 	ConvergenceVerdictsAlreadyRecorded int
+	ConvergenceStaleInputsSkipped      int
 	ConvergenceAccepts                 int
 	ConvergenceRetries                 int
 	ConvergenceEscalations             int
@@ -34,12 +32,27 @@ type convergencePassResult struct {
 
 var defaultConvergenceBudget = convergence.Budget{
 	MaxAttempts: defaultConvergenceMaxAttempts,
-	Escalation:  convergence.EscalateFail,
+	Escalation:  convergence.EscalateHandToHuman,
 }
 
 type convergenceCandidate struct {
 	ID                         uuid.UUID
 	SuggestedConvergenceChecks []string
+}
+
+type convergenceVerdictRecord struct {
+	Attempt      int
+	InputsDigest string
+	Verdict      convergence.Verdict
+}
+
+type convergenceDecision struct {
+	AppendCurrent bool
+	SkipStale     bool
+	Outcome       convergence.Outcome
+	Attempt       int
+	Escalation    convergence.Escalation
+	Verdict       convergence.Verdict
 }
 
 type eventAppendedSignalEnvelope struct {
@@ -50,6 +63,9 @@ type eventAppendedSignalEnvelope struct {
 // scanConvergence runs one convergence-driven reconcile pass across running
 // work_items that declared convergence checks.
 func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, error) {
+	if err := defaultConvergenceBudget.Validate(); err != nil {
+		return convergencePassResult{}, err
+	}
 	candidates, err := w.convergenceCandidates(ctx)
 	if err != nil {
 		return convergencePassResult{}, fmt.Errorf("scan running candidates: %w", err)
@@ -68,7 +84,8 @@ func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, er
 	}
 
 	for _, c := range candidates {
-		attempt, err := w.nextConvergenceAttempt(ctx, c.ID)
+		reducer := convergence.AllPassChecklist{Required: c.SuggestedConvergenceChecks}
+		last, err := w.latestConvergenceVerdict(ctx, c.ID, reducer)
 		if err != nil {
 			return result, err
 		}
@@ -78,26 +95,36 @@ func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, er
 			return result, err
 		}
 
-		reducer := convergence.AllPassChecklist{Required: c.SuggestedConvergenceChecks}
+		attempt := 1
+		if last != nil {
+			attempt = last.Attempt + 1
+		}
 		reduction, err := convergence.Run(reducer, signals, attempt)
 		if err != nil {
 			return result, err
 		}
 
-		fresh, err := w.emitConvergenceVerdict(ctx, c.ID, reduction)
-		if err != nil {
-			return result, err
-		}
-		if fresh {
-			result.ConvergenceVerdictsRecorded++
-		} else {
-			result.ConvergenceVerdictsAlreadyRecorded++
+		decision := decideConvergenceStep(last, reduction, defaultConvergenceBudget)
+		if decision.SkipStale {
+			result.ConvergenceStaleInputsSkipped++
+			continue
 		}
 
-		outcome, escalation := defaultConvergenceBudget.Next(reduction.Verdict, attempt)
-		switch outcome {
+		if decision.AppendCurrent {
+			fresh, err := w.emitConvergenceVerdict(ctx, c.ID, reduction)
+			if err != nil {
+				return result, err
+			}
+			if fresh {
+				result.ConvergenceVerdictsRecorded++
+			} else {
+				result.ConvergenceVerdictsAlreadyRecorded++
+			}
+		}
+
+		switch decision.Outcome {
 		case convergence.OutcomeAccept:
-			reason := convergenceReason("accept", attempt, reduction)
+			reason := convergenceReason("accept", decision.Attempt, decision.Verdict.Reason)
 			_, err := service.Transition(ctx, c.ID, domain.WorkItemDone, reason, actor)
 			if err != nil {
 				if !shouldIgnoreConvergenceTransitionError(err) {
@@ -111,7 +138,7 @@ func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, er
 			result.ConvergenceRetries++
 
 		case convergence.OutcomeEscalate:
-			err := w.escalateConvergence(ctx, service, c.ID, c.SuggestedConvergenceChecks, attempt, escalation, reduction.Verdict.Reason, actor)
+			err := w.escalateConvergence(ctx, service, c.ID, c.SuggestedConvergenceChecks, decision.Attempt, decision.Escalation, decision.Verdict.Reason, actor)
 			if err != nil {
 				if !shouldIgnoreConvergenceTransitionError(err) {
 					return result, err
@@ -124,6 +151,35 @@ func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, er
 	}
 
 	return result, nil
+}
+
+func decideConvergenceStep(last *convergenceVerdictRecord, current convergence.Reduction, budget convergence.Budget) convergenceDecision {
+	if last != nil && last.InputsDigest == current.InputsDigest {
+		outcome, escalation := budget.Next(last.Verdict, last.Attempt)
+		if outcome == convergence.OutcomeRetry {
+			return convergenceDecision{
+				SkipStale: true,
+				Outcome:   outcome,
+				Attempt:   last.Attempt,
+				Verdict:   last.Verdict,
+			}
+		}
+		return convergenceDecision{
+			Outcome:    outcome,
+			Attempt:    last.Attempt,
+			Escalation: escalation,
+			Verdict:    last.Verdict,
+		}
+	}
+
+	outcome, escalation := budget.Next(current.Verdict, current.Attempt)
+	return convergenceDecision{
+		AppendCurrent: true,
+		Outcome:       outcome,
+		Attempt:       current.Attempt,
+		Escalation:    escalation,
+		Verdict:       current.Verdict,
+	}
 }
 
 // convergenceCandidates loads running work_items that are eligible for convergence.
@@ -162,19 +218,33 @@ func (w *Worker) convergenceCandidates(ctx context.Context) ([]convergenceCandid
 	return out, nil
 }
 
-// nextConvergenceAttempt returns 1-based attempt count for the next reduction of
-// this work_item in the convergence loop.
-func (w *Worker) nextConvergenceAttempt(ctx context.Context, workItemID uuid.UUID) (int, error) {
-	var last int
+// latestConvergenceVerdict returns the latest verdict for this work_item and
+// reducer. The inputs digest includes reducer configuration, so changing the
+// declared checklist produces a different current digest and a fresh attempt.
+func (w *Worker) latestConvergenceVerdict(ctx context.Context, workItemID uuid.UUID, reducer convergence.Reducer) (*convergenceVerdictRecord, error) {
+	var out convergenceVerdictRecord
+	var disposition string
+	var reason string
 	err := w.pool.QueryRow(ctx, `
-		SELECT COALESCE(MAX((payload->>'attempt')::int), 0)
-		FROM events
-		WHERE subject_kind = $1 AND subject_id = $2 AND kind = $3
-	`, domain.SubjectConvergence, workItemID, domain.EventConvergenceVerdictRecorded).Scan(&last)
-	if err != nil {
-		return 0, err
+		SELECT attempt, inputs_digest, disposition, reason
+		FROM convergence_verdicts
+		WHERE work_item_id = $1
+			AND reducer_identity = $2
+			AND reducer_version = $3
+		ORDER BY attempt DESC, occurred_at DESC
+		LIMIT 1
+	`, workItemID, reducer.Identity(), reducer.Version()).Scan(&out.Attempt, &out.InputsDigest, &disposition, &reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
 	}
-	return last + 1, nil
+	if err != nil {
+		return nil, err
+	}
+	out.Verdict = convergence.Verdict{
+		Disposition: domain.Verdict(disposition),
+		Reason:      reason,
+	}
+	return &out, nil
 }
 
 // convergenceSignalsForItem gathers deterministic signals the reducer can consume.
@@ -386,7 +456,7 @@ func (w *Worker) emitConvergenceVerdict(ctx context.Context, workItemID uuid.UUI
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	_, fresh, err := w.writer.Append(ctx, tx, eventsSpecForConvergenceVerdict(w.actor, workItemID, reduction))
+	_, fresh, err := convergence.AppendVerdict(ctx, tx, w.writer, domain.SourceSystem, w.actor, workItemID, reduction)
 	if err != nil {
 		return false, err
 	}
@@ -394,17 +464,6 @@ func (w *Worker) emitConvergenceVerdict(ctx context.Context, workItemID uuid.UUI
 		return false, err
 	}
 	return fresh, nil
-}
-
-func eventsSpecForConvergenceVerdict(actor *uuid.UUID, workItemID uuid.UUID, reduction convergence.Reduction) events.Spec {
-	return events.Spec{
-		SubjectKind:  domain.SubjectConvergence,
-		SubjectID:    workItemID,
-		Kind:         domain.EventConvergenceVerdictRecorded,
-		Source:       domain.SourceSystem,
-		ActorTokenID: actor,
-		Payload:      reduction.EventPayload(),
-	}
 }
 
 // escalateConvergence applies the convergence budget escalation rule.
@@ -441,9 +500,9 @@ func escalationReason(attempt int, verdictReason string) string {
 	return fmt.Sprintf("convergence escalated at attempt %d (%s)", attempt, verdictReason)
 }
 
-func convergenceReason(kind string, attempt int, reduction convergence.Reduction) string {
-	if reduction.Verdict.Reason != "" {
-		return fmt.Sprintf("convergence %s attempt %d: %s", kind, attempt, reduction.Verdict.Reason)
+func convergenceReason(kind string, attempt int, verdictReason string) string {
+	if verdictReason != "" {
+		return fmt.Sprintf("convergence %s attempt %d: %s", kind, attempt, verdictReason)
 	}
 	return fmt.Sprintf("convergence %s attempt %d", kind, attempt)
 }

@@ -26,3 +26,25 @@ func digestSignals(signals []Signal) (string, error) {
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), nil
 }
+
+// digestReductionInputs returns the digest for every reducer input. For
+// parameter-free reducers it preserves the historical signal-only digest. For
+// configured reducers it folds the reducer config and signal slice together so
+// changing a threshold or required checklist cannot reuse an old verdict.
+func digestReductionInputs(signals []Signal, reducerConfig map[string]any) (string, error) {
+	if len(reducerConfig) == 0 {
+		return digestSignals(signals)
+	}
+	if signals == nil {
+		signals = []Signal{}
+	}
+	canonical, err := events.CanonicalJSON(map[string]any{
+		"reducer_config": reducerConfig,
+		"signals":        signals,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
+}

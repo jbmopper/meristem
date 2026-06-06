@@ -1,9 +1,9 @@
 # Convergence Engine — Scaffold and Handoff
 
-Status: **deterministic core and Slice A persistence are implemented; default
-worker wiring is quarantined.** This document describes what exists on this
-branch and the directions for the subsequent agent that finishes wiring the
-engine into the running system.
+Status: **deterministic core, Slice A persistence, and narrow Slice B checklist
+worker wiring are implemented.** This document describes what exists on this
+branch and the directions for subsequent agents that extend the engine beyond
+the initial all-pass checklist path.
 
 It is a projection of `docs/spec.md` → "Convergence Patterns" and AGENTS.md
 principle #12 ("Convergence has a deterministic reduction"). Where this file
@@ -18,9 +18,10 @@ handed into one of three verdicts — `accept | reject | escalate` — and that
 verdict, recorded as an event, is the only thing that advances a `work_item`.
 
 The reducer core is pure and unit-testable. Slice A adds the persistence
-boundary: verdict events are projected into `convergence_verdicts`, while the
-default worker emitter remains disabled until pattern declaration and bounded
-worker integration land.
+boundary: verdict events are projected into `convergence_verdicts`. Slice B
+wires the default worker to consume the smallest explicit pattern declaration:
+a running `work_item` with nonempty `suggested_convergence_checks` uses
+`AllPassChecklist`.
 
 ### Landed in this branch
 
@@ -32,7 +33,7 @@ worker integration land.
   - Canonical reducers: `MajorityVote`, `Unanimous`, `Threshold` (mean ≥
     accept), `AllPassChecklist` (consumes `suggested_convergence_checks`).
   - `Run(reducer, signals, attempt)` → `Reduction`, with a content-addressed
-    `InputsDigest` (SHA-256 over `events.CanonicalJSON(signals)` — the same
+    `InputsDigest` (SHA-256 over canonical reducer config + signals; the same
     canonicalizer the deterministic event id uses).
   - `Reduction.EventPayload()` — the canonical wire shape for the verdict
     event, so the persistence slice does not re-invent it.
@@ -45,8 +46,17 @@ worker integration land.
     for `convergence.verdict_recorded` events.
   - `RegisterProjectors(...)` — projects verdict events into
     `convergence_verdicts` keyed by `event_id`.
-- `migrations/0010_convergence_verdicts.*.sql` — the projection table, with
-  indexed `work_item_id` and `attempt` columns and `signals` stored as JSONB.
+- `migrations/0010_convergence_verdicts.*.sql` and
+  `0011_convergence_verdict_reducer_config.*.sql` — the projection table, with
+  indexed `work_item_id` and `attempt` columns, `signals` stored as JSONB, and
+  reducer configuration stored as JSONB.
+- `internal/worker` — default checklist convergence pass:
+  - candidate = `state=running` and nonempty `suggested_convergence_checks`;
+  - reducer = `AllPassChecklist`;
+  - verdict persistence uses `convergence.AppendVerdict`;
+  - unchanged rejected input digests do not consume another attempt;
+  - generic budget is three fresh input digests, then `hand_to_human`
+    escalation (`blocked` + `human_review_status=blocked`).
 - `internal/app/projectors.go` and `cmd/meristem/rebuild.go` — registry and
   rebuild wiring for the new projection.
 - `internal/domain` — convergence taxonomy:
@@ -59,21 +69,14 @@ worker integration land.
 
 ### Deliberately NOT in this branch
 
-- No default emitter in default builds. The append helper exists, but worker
-  code must not call it until pattern declaration and bounded worker
-  integration land.
 - No model calls. Producing signals is the probabilistic subsystem's job.
-- No default worker wiring. The engine reduces; the worker gathers signals and
-  acts only after persistence and pattern declaration land.
-- There is an experimental worker driver behind the
-  `convergence_worker_experiment` build tag. It is intentionally excluded from
-  default builds because it drives lifecycle transitions before pattern
-  declaration and bounded worker integration are ready.
+- No multi-model, threshold, approval-backed, or custom pattern declaration
+  surface. Those remain explicit follow-up work.
 - Parameterized reducers (`Threshold`, `AllPassChecklist`) are **not** in
   `DefaultRegistry()`: their behavior depends on per-work_item configuration,
   so registering a zero-value instance would make replay silently use the
-  wrong threshold. Callers construct the configured instance and `Run` it
-  directly, or register it under an identity that encodes its parameters.
+  wrong threshold. `Run` records reducer configuration in the verdict payload
+  and includes it in `InputsDigest`.
 
 ## Runtime boundary: open vs. closed
 
@@ -210,27 +213,28 @@ event log through the newly registered projector (the rebuild/replay path), or
 by resetting the dev database. This preserves the rule that non-`events` rows
 are produced by projectors, not ad hoc migration DML.
 
-### Slice B — worker integration (bounded patience)
+### Slice B — worker integration (bounded patience) — implemented narrowly
 
-1. In `internal/worker`, after the existing `patience.breached` scan, add a
-   convergence pass for `work_item`s in `running` that declare a convergence
-   pattern. The worker is the deterministic reducer's caller: it gathers
-   signals (from child `validate` work_items, recorded `work_item.event_appended`
-   grader outputs, or external-signal projections), calls
-   `convergence.Run(...)`, appends the verdict event, then applies
+1. In `internal/worker`, after the existing `patience.breached` scan, the
+   worker now runs a convergence pass for `work_item`s in `running` with
+   nonempty `suggested_convergence_checks`. The worker is the deterministic
+   reducer's caller: it gathers signals from recorded
+   `work_item.event_appended` checklist events and external-signal projections,
+   calls `convergence.Run(...)`, appends the verdict event, then applies
    `Budget.Next(...)`:
    - `OutcomeAccept` → transition the work_item toward `done`.
-   - `OutcomeRetry` → leave `running`; the next scan re-attempts (attempt+1).
+   - `OutcomeRetry` → leave `running`; the next scan only records a new attempt
+     if the input digest changed.
    - `OutcomeEscalate` → apply the `Escalation` rule: `EscalateFail` →
      `failed`; `EscalateHandToHuman` → `blocked` + `human_review_status`
      blocked; `EscalateRequestApproval` → the approval system (v1; until
      approvals ship, treat as `blocked` with a reason, never auto-approve).
 2. Every transition is its own event (one state change = one event). The
    verdict event and the transition event are distinct.
-3. Where the work_item declares no pattern, do nothing — convergence is opt-in
-   per item until a default policy is a separate, deliberate work_item.
+3. Where the work_item declares no checks, do nothing — convergence is opt-in
+   per item until a richer default policy is a separate, deliberate work_item.
 
-### Slice C — declare the pattern on a work_item
+### Slice C — richer pattern declaration on a work_item
 
 Decide how a `work_item` names its reducer + budget. Two options; pick and
 record the decision as a work_item event:
@@ -240,10 +244,10 @@ record the decision as a work_item event:
   payload shape and migration, **or**
 - Keep it out of the schema and derive the reducer from
   `suggested_convergence_checks` (checklist → `AllPassChecklist`) as the v1
-  default, deferring multi-model/threshold patterns to explicit declaration.
+  default. This is the path now implemented for checklist convergence.
 
-The second is the smaller step and keeps the schema unchanged; prefer it
-unless multi-model is needed immediately.
+The next slice should add a durable declaration when multi-model, threshold, or
+approval-backed patterns are needed.
 
 ### Slice D — surface (REST + MCP), optional
 

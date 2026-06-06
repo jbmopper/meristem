@@ -160,6 +160,9 @@ func TestRunPopulatesReductionAndDigestIsStable(t *testing.T) {
 	if red.InputsDigest == "" {
 		t.Fatal("inputs digest empty")
 	}
+	if red.ReducerConfig["signal_kind"] != "grader.pass" {
+		t.Fatalf("reducer config not recorded: %+v", red.ReducerConfig)
+	}
 	// Same signals → identical digest.
 	red2, err := Run(MajorityVote{SignalKind: "grader.pass"}, signals, 2)
 	if err != nil {
@@ -167,6 +170,13 @@ func TestRunPopulatesReductionAndDigestIsStable(t *testing.T) {
 	}
 	if red.InputsDigest != red2.InputsDigest {
 		t.Fatalf("digest not stable: %q vs %q", red.InputsDigest, red2.InputsDigest)
+	}
+	redDifferentConfig, err := Run(MajorityVote{SignalKind: "other.pass"}, signals, 1)
+	if err != nil {
+		t.Fatalf("Run different config: %v", err)
+	}
+	if red.InputsDigest == redDifferentConfig.InputsDigest {
+		t.Fatal("digest did not change when reducer config changed")
 	}
 	// Different signals → different digest.
 	red3, _ := Run(MajorityVote{SignalKind: "grader.pass"}, signals[:2], 1)
@@ -215,6 +225,10 @@ func TestEventPayloadRoundTripsFields(t *testing.T) {
 	}
 	if payload["inputs_digest"] != red.InputsDigest {
 		t.Fatal("digest mismatch in payload")
+	}
+	config, ok := payload["reducer_config"].(map[string]any)
+	if !ok || config["accept"] != 0.5 || config["signal_kind"] != "conf" {
+		t.Fatalf("reducer_config missing in payload: %#v", payload["reducer_config"])
 	}
 	verdict, ok := payload["verdict"].(map[string]any)
 	if !ok || verdict["disposition"] != string(domain.VerdictAccept) {
