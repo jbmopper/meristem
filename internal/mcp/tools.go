@@ -31,11 +31,12 @@ type Tool struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
+	Mutates     bool
 	Handler     func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error)
 }
 
 func (s *Server) buildTools() []Tool {
-	return []Tool{
+	tools := []Tool{
 		s.toolInboxCapture(),
 		s.toolFeedRead(),
 		s.toolDeterministicErrorsList(),
@@ -48,12 +49,19 @@ func (s *Server) buildTools() []Tool {
 		s.toolWorkItemsUpdateMetadata(),
 		s.toolWorkItemsTransition(),
 	}
+	for i := range tools {
+		if tools[i].Mutates {
+			tools[i].InputSchema = schemaWithIdempotencyKey(tools[i].InputSchema)
+		}
+	}
+	return tools
 }
 
 func (s *Server) toolInboxCapture() Tool {
 	return Tool{
 		Name:        "inbox.capture",
 		Description: "Capture a text instruction into the inbox; auto-creates a captured work_item.",
+		Mutates:     true,
 		InputSchema: schemaObject(
 			[]string{"text"},
 			map[string]any{
@@ -310,6 +318,7 @@ func (s *Server) toolWorkItemsCreate() Tool {
 	return Tool{
 		Name:        "work_items.create",
 		Description: "Create a new top-level work item.",
+		Mutates:     true,
 		InputSchema: schemaObject([]string{"title"}, map[string]any{
 			"title": schemaString("Short title. Required, non-empty."),
 			"body":  schemaString("Optional long-form body."),
@@ -361,6 +370,7 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 	return Tool{
 		Name:        "work_items.spawn_child",
 		Description: "Create a child work item under an existing parent.",
+		Mutates:     true,
 		InputSchema: schemaObject([]string{"parent_id", "title"}, map[string]any{
 			"parent_id": schemaString("Parent work item uuid."),
 			"title":     schemaString("Short title. Required, non-empty."),
@@ -425,6 +435,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 	return Tool{
 		Name:        "work_items.append_event",
 		Description: "Append a free-form progress event to a work item.",
+		Mutates:     true,
 		InputSchema: schemaObject([]string{"id", "kind"}, map[string]any{
 			"id":      schemaString("Work item uuid."),
 			"kind":    schemaString("Inner event kind (e.g. agent.tool_used). Required."),
@@ -470,6 +481,7 @@ func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 	return Tool{
 		Name:        "work_items.update_metadata",
 		Description: "Set suggested convergence checks and human review status on a work item.",
+		Mutates:     true,
 		InputSchema: schemaObject([]string{"id", "suggested_convergence_checks", "human_review_status"}, map[string]any{
 			"id": schemaString("Work item uuid."),
 			"suggested_convergence_checks": schemaStringArray(
@@ -518,6 +530,7 @@ func (s *Server) toolWorkItemsTransition() Tool {
 	return Tool{
 		Name:        "work_items.transition",
 		Description: "Move a work item to another lifecycle state.",
+		Mutates:     true,
 		InputSchema: schemaObject([]string{"id", "to"}, map[string]any{
 			"id":     schemaString("Work item uuid."),
 			"to":     schemaString("Target lifecycle state (captured, triaged, planned, awaiting_approval, running, blocked, done, failed, canceled)."),
@@ -746,6 +759,36 @@ func schemaObject(required []string, properties map[string]any) map[string]any {
 	if len(required) > 0 {
 		out["required"] = required
 	}
+	return out
+}
+
+func schemaWithIdempotencyKey(schema map[string]any) map[string]any {
+	out := make(map[string]any, len(schema))
+	for key, value := range schema {
+		out[key] = value
+	}
+	props, _ := out["properties"].(map[string]any)
+	if props == nil {
+		props = make(map[string]any)
+	} else {
+		copied := make(map[string]any, len(props)+1)
+		for key, value := range props {
+			copied[key] = value
+		}
+		props = copied
+	}
+	props["idempotency_key"] = schemaString("Required idempotency key for MCP mutation calls. Reuse only for the same tool arguments.")
+	out["properties"] = props
+
+	required, _ := out["required"].([]string)
+	for _, field := range required {
+		if field == "idempotency_key" {
+			return out
+		}
+	}
+	copiedRequired := append([]string{}, required...)
+	copiedRequired = append(copiedRequired, "idempotency_key")
+	out["required"] = copiedRequired
 	return out
 }
 

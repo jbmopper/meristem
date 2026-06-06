@@ -11,6 +11,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -49,6 +50,7 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 	deps := mcp.Deps{
 		Auth:                auth.NewService(pool, writer),
 		Access:              access.NewService(pool),
+		Idempotency:         idempotency.NewMiddleware(pool, writer),
 		Inbox:               inbox.NewService(pool, writer),
 		WorkItems:           workitems.NewService(pool, writer),
 		DeterministicErrors: errorreporting.NewService(pool, writer),

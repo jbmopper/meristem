@@ -12,6 +12,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/idempotency"
 )
 
 // roundtrip runs a single request through the dispatcher without going
@@ -184,6 +185,32 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	}
 }
 
+func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
+	s := newTestServer(t)
+	mutations := map[string]bool{
+		"inbox.capture":              true,
+		"work_items.create":          true,
+		"work_items.spawn_child":     true,
+		"work_items.append_event":    true,
+		"work_items.update_metadata": true,
+		"work_items.transition":      true,
+	}
+	for _, tool := range s.tools {
+		required := schemaRequiredSet(tool.InputSchema)
+		props, _ := tool.InputSchema["properties"].(map[string]any)
+		_, hasProperty := props["idempotency_key"]
+		if mutations[tool.Name] {
+			if !required["idempotency_key"] || !hasProperty {
+				t.Fatalf("mutation tool %s does not require idempotency_key: schema=%v", tool.Name, tool.InputSchema)
+			}
+			continue
+		}
+		if required["idempotency_key"] || hasProperty {
+			t.Fatalf("read tool %s should not expose idempotency_key: schema=%v", tool.Name, tool.InputSchema)
+		}
+	}
+}
+
 func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 	root := uuid.New()
 	s := newTestServer(t)
@@ -231,6 +258,77 @@ func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 		if got[hidden] {
 			t.Errorf("scoped worker should not see %q; got %v", hidden, toolNames(result.Tools))
 		}
+	}
+}
+
+func TestServer_CallMutationTool_RequiresIdempotencyKey(t *testing.T) {
+	s := newTestServer(t)
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"nope"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("expected transport success, got error %+v", resp.Error)
+	}
+	result := decodeToolResult(t, resp)
+	if !result.IsError {
+		t.Fatalf("expected isError=true, got %+v", result)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "idempotency_key_required") {
+		t.Fatalf("expected idempotency_key_required, got %+v", result.Content)
+	}
+}
+
+func TestServer_CallMutationTool_RequiresIdempotencyExecutor(t *testing.T) {
+	s := newTestServer(t)
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"nope","idempotency_key":"idem-1"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("expected transport success, got error %+v", resp.Error)
+	}
+	result := decodeToolResult(t, resp)
+	if !result.IsError {
+		t.Fatalf("expected isError=true from missing idempotency executor, got %+v", result)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "idempotency executor not configured") {
+		t.Fatalf("expected idempotency executor guard, got %+v", result.Content)
+	}
+}
+
+func TestServer_MutationIdempotencyContextCanonicalizesArguments(t *testing.T) {
+	s := newTestServer(t)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceAgent}
+	tool := s.toolsByName["work_items.create"]
+
+	ctx1, stripped1, err := mcpCallContext(context.Background(), actor, tool, json.RawMessage(`{"idempotency_key":"idem-1","title":"same","body":"body"}`))
+	if err != nil {
+		t.Fatalf("mcpCallContext first: %v", err)
+	}
+	ctx2, stripped2, err := mcpCallContext(context.Background(), actor, tool, json.RawMessage(`{"body":"body","title":"same","idempotency_key":"idem-1"}`))
+	if err != nil {
+		t.Fatalf("mcpCallContext second: %v", err)
+	}
+	id1, ok := idempotency.SubjectID(ctx1, "work_item")
+	if !ok {
+		t.Fatal("first context did not contain idempotency request")
+	}
+	id2, ok := idempotency.SubjectID(ctx2, "work_item")
+	if !ok {
+		t.Fatal("second context did not contain idempotency request")
+	}
+	if id1 != id2 {
+		t.Fatalf("same logical MCP mutation derived different subject ids: %s vs %s", id1, id2)
+	}
+	if strings.Contains(string(stripped1), "idempotency_key") || strings.Contains(string(stripped2), "idempotency_key") {
+		t.Fatalf("stripped arguments still contain idempotency_key: %s / %s", stripped1, stripped2)
+	}
+
+	ctx3, _, err := mcpCallContext(context.Background(), actor, tool, json.RawMessage(`{"idempotency_key":"idem-1","title":"different","body":"body"}`))
+	if err != nil {
+		t.Fatalf("mcpCallContext third: %v", err)
+	}
+	id3, ok := idempotency.SubjectID(ctx3, "work_item")
+	if !ok {
+		t.Fatal("third context did not contain idempotency request")
+	}
+	if id3 == id1 {
+		t.Fatalf("different logical MCP mutation reused subject id %s", id3)
 	}
 }
 
@@ -415,6 +513,39 @@ func TestAsTransportError_PassesThroughRPCError(t *testing.T) {
 	if got == nil || got.Code != errCodeInternal {
 		t.Errorf("expected internal error wrap, got %+v", got)
 	}
+}
+
+type decodedToolResult struct {
+	IsError bool `json:"isError"`
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func decodeToolResult(t *testing.T, resp rpcMessage) decodedToolResult {
+	t.Helper()
+	var result decodedToolResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tool result: %v", err)
+	}
+	return result
+}
+
+func schemaRequiredSet(schema map[string]any) map[string]bool {
+	out := map[string]bool{}
+	switch required := schema["required"].(type) {
+	case []string:
+		for _, field := range required {
+			out[field] = true
+		}
+	case []any:
+		for _, raw := range required {
+			if field, ok := raw.(string); ok {
+				out[field] = true
+			}
+		}
+	}
+	return out
 }
 
 func toolNames(tools []toolDescriptor) []string {

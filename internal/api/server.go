@@ -103,6 +103,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
+			Idempotency:         s.idempotencyMiddleware,
 			Inbox:               s.inbox,
 			WorkItems:           s.workItems,
 			DeterministicErrors: s.deterministicErrors,

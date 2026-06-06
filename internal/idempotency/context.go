@@ -33,11 +33,10 @@ func withRecordedResponseOverride(ctx context.Context, override *recordedRespons
 	return context.WithValue(ctx, recordedResponseKey{}, override)
 }
 
-// WithRequest is the public seam over the package-internal context
-// injection used by the middleware. It exists so other packages can
-// exercise the SubjectID derivation in tests without going through HTTP
-// or a real database. Production code should not call this; the
-// middleware is the only caller in the request path.
+// WithRequest is the public seam over the package-internal context injection
+// used by transports that enforce an idempotency contract before calling
+// write services. HTTP POSTs use the middleware; MCP mutation tools use their
+// adapter boundary because they are not REST requests.
 func WithRequest(ctx context.Context, req Request) context.Context {
 	return withRequest(ctx, req)
 }

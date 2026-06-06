@@ -56,6 +56,102 @@ func NewMiddleware(pool *pgxpool.Pool, writer *events.Writer) *Middleware {
 	return &Middleware{pool: pool, writer: writer}
 }
 
+// ExecuteInput describes one non-HTTP mutation guarded by the same durable
+// idempotency store as POST middleware. Run must return a JSON response body
+// for successful execution; semantic tool/API errors that should be replayed
+// should be encoded in that body and returned with a nil error.
+type ExecuteInput struct {
+	Token       domain.Token
+	Scope       string
+	Key         string
+	RequestHash []byte
+	Run         func(context.Context) (status int, body []byte, err error)
+}
+
+// ExecuteResult is the canonical recorded response for an idempotent mutation.
+type ExecuteResult struct {
+	Status   int
+	Body     []byte
+	Replayed bool
+}
+
+// Execute runs a non-HTTP mutation under the same durable idempotency contract
+// as Wrap: fast cache lookup, advisory-lock serialization, same-key /
+// different-body conflict, context injection for stable subject ids, and
+// idempotency.recorded persistence.
+func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResult, error) {
+	if m == nil || m.pool == nil || m.writer == nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency executor not configured")
+	}
+	if in.Token.ID == uuid.Nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency token is required")
+	}
+	if in.Scope == "" {
+		return ExecuteResult{}, fmt.Errorf("idempotency scope is required")
+	}
+	if in.Key == "" {
+		return ExecuteResult{}, fmt.Errorf("idempotency key is required")
+	}
+	if len(in.RequestHash) == 0 {
+		return ExecuteResult{}, fmt.Errorf("idempotency request hash is required")
+	}
+	if in.Run == nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency run function is required")
+	}
+
+	cached, err := m.lookup(ctx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+	if err != nil {
+		return ExecuteResult{}, idempotencyLookupError(err)
+	}
+	if cached.found {
+		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: true}, nil
+	}
+
+	release, err := m.acquireLock(ctx, in.Token.ID, in.Scope, in.Key)
+	if err != nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency lock failed: %w", err)
+	}
+	defer release()
+
+	cached, err = m.lookup(ctx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+	if err != nil {
+		return ExecuteResult{}, idempotencyLookupError(err)
+	}
+	if cached.found {
+		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: true}, nil
+	}
+
+	override := &recordedResponseOverride{}
+	callCtx := withRequest(ctx, Request{
+		TokenID:     in.Token.ID,
+		Scope:       in.Scope,
+		Key:         in.Key,
+		RequestHash: in.RequestHash,
+	})
+	callCtx = withRecordedResponseOverride(callCtx, override)
+	status, body, err := in.Run(callCtx)
+	if err != nil {
+		return ExecuteResult{}, err
+	}
+	if status == 0 {
+		status = http.StatusOK
+	}
+	recordBody := body
+	if overridden, ok := recordedResponse(callCtx); ok {
+		recordBody = overridden
+	}
+	fresh, err := m.record(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, recordBody)
+	if err != nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
+	}
+
+	cached, err = m.lookup(callCtx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+	if err == nil && cached.found {
+		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: !fresh}, nil
+	}
+	return ExecuteResult{Status: status, Body: recordBody, Replayed: !fresh}, nil
+}
+
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -191,6 +287,14 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		w.WriteHeader(rec.status)
 		_, _ = w.Write(rec.body.Bytes())
 	})
+}
+
+func idempotencyLookupError(err error) error {
+	var conflict conflictError
+	if errors.As(err, &conflict) {
+		return fmt.Errorf("idempotency_key_conflict: idempotency key reused with a different request body")
+	}
+	return fmt.Errorf("idempotency lookup failed: %w", err)
 }
 
 // writeLookupError reports whether the lookup error has been turned

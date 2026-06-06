@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -38,6 +41,7 @@ const (
 type Deps struct {
 	Auth                *auth.Service
 	Access              *access.Service
+	Idempotency         *idempotency.Middleware
 	Inbox               *inbox.Service
 	WorkItems           *workitems.Service
 	DeterministicErrors *errorreporting.Service
@@ -318,14 +322,119 @@ func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw jso
 	if !access.ToolVisible(actor, tool.Name) {
 		return toolErrorResult("insufficient_scope: token cannot use " + tool.Name), nil
 	}
-	result, err := tool.Handler(ctx, actor, params.Arguments)
+	if !tool.Mutates {
+		result, err := tool.Handler(ctx, actor, params.Arguments)
+		if err != nil {
+			// Tool-level errors travel inside a successful response with
+			// isError=true (per MCP spec), not as JSON-RPC errors. The
+			// distinction is "the transport worked, the tool didn't".
+			return toolErrorResult(err.Error()), nil
+		}
+		return toolSuccessResult(result), nil
+	}
+	result, err := s.handleIdempotentMutationTool(ctx, actor, tool, params.Arguments)
 	if err != nil {
-		// Tool-level errors travel inside a successful response with
-		// isError=true (per MCP spec), not as JSON-RPC errors. The
-		// distinction is "the transport worked, the tool didn't".
 		return toolErrorResult(err.Error()), nil
 	}
-	return toolSuccessResult(result), nil
+	return result, nil
+}
+
+func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (map[string]any, error) {
+	req, arguments, err := mcpIdempotencyRequest(actor, tool, raw)
+	if err != nil {
+		return nil, err
+	}
+	if s.deps.Idempotency == nil {
+		return nil, fmt.Errorf("idempotency executor not configured")
+	}
+	result, err := s.deps.Idempotency.Execute(ctx, idempotency.ExecuteInput{
+		Token:       actor,
+		Scope:       req.Scope,
+		Key:         req.Key,
+		RequestHash: req.RequestHash,
+		Run: func(callCtx context.Context) (int, []byte, error) {
+			payload, err := tool.Handler(callCtx, actor, arguments)
+			var toolResult map[string]any
+			if err != nil {
+				toolResult = toolErrorResult(err.Error())
+			} else {
+				toolResult = toolSuccessResult(payload)
+			}
+			encoded, err := json.Marshal(toolResult)
+			if err != nil {
+				return 0, nil, fmt.Errorf("marshal MCP tool result: %w", err)
+			}
+			return 200, encoded, nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var replayed map[string]any
+	if err := json.Unmarshal(result.Body, &replayed); err != nil {
+		return nil, fmt.Errorf("decode idempotent MCP result: %w", err)
+	}
+	return replayed, nil
+}
+
+func mcpCallContext(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (context.Context, json.RawMessage, error) {
+	req, stripped, err := mcpIdempotencyRequest(actor, tool, raw)
+	if err != nil {
+		return ctx, raw, err
+	}
+	return idempotency.WithRequest(ctx, req), stripped, nil
+}
+
+func mcpIdempotencyRequest(actor domain.Token, tool Tool, raw json.RawMessage) (idempotency.Request, json.RawMessage, error) {
+	if !tool.Mutates {
+		return idempotency.Request{}, raw, nil
+	}
+	var args map[string]json.RawMessage
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return idempotency.Request{}, raw, fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+	keyRaw, ok := args["idempotency_key"]
+	if !ok {
+		return idempotency.Request{}, raw, fmt.Errorf("idempotency_key_required: %s requires idempotency_key", tool.Name)
+	}
+	var key string
+	if err := json.Unmarshal(keyRaw, &key); err != nil {
+		return idempotency.Request{}, raw, fmt.Errorf("idempotency_key must be a string")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return idempotency.Request{}, raw, fmt.Errorf("idempotency_key_required: idempotency_key must be non-empty")
+	}
+
+	stripped := make(map[string]json.RawMessage, len(args))
+	for name, value := range args {
+		if name == "idempotency_key" {
+			continue
+		}
+		stripped[name] = value
+	}
+	strippedRaw, err := events.CanonicalJSON(stripped)
+	if err != nil {
+		return idempotency.Request{}, raw, fmt.Errorf("canonicalize MCP arguments: %w", err)
+	}
+	requestPayload := map[string]any{
+		"tool":      tool.Name,
+		"arguments": stripped,
+	}
+	canonicalRequest, err := events.CanonicalJSON(requestPayload)
+	if err != nil {
+		return idempotency.Request{}, raw, fmt.Errorf("canonicalize MCP idempotency request: %w", err)
+	}
+	hash := sha256.Sum256(canonicalRequest)
+	req := idempotency.Request{
+		TokenID:     actor.ID,
+		Scope:       "MCP:" + tool.Name,
+		Key:         key,
+		RequestHash: hash[:],
+	}
+	return req, json.RawMessage(strippedRaw), nil
 }
 
 type toolDescriptor struct {

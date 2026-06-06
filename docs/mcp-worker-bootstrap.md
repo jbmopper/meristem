@@ -44,6 +44,7 @@ MCP tool names:
 - Canonical clients expose: feed.read, work_items.get, work_items.list, work_items.append_event, work_items.update_metadata, work_items.spawn_child, work_items.transition, work_items.create, inbox.capture.
 - Cursor may expose underscore aliases instead: feed_read, work_items_get, work_items_list, work_items_append_event, work_items_update_metadata, work_items_spawn_child, work_items_transition, work_items_create, inbox_capture.
 - Use whichever spelling the MCP client advertises; they route to the same meristem operations.
+- Every mutating MCP call must include an `idempotency_key` argument. Use a stable, task-local key such as `[WORK_ITEM_ID]:worker.started` or `[WORK_ITEM_ID]:spawn:<short-child-purpose>` and reuse it only for the same tool arguments.
 ```
 
 ## Minimal operator fill-in

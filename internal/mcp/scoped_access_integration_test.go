@@ -19,6 +19,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -77,10 +78,11 @@ func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
 	}
 
 	s := New(Deps{
-		Auth:      authSvc,
-		Access:    access.NewService(pool),
-		WorkItems: workSvc,
-		Feed:      feed.NewService(pool),
+		Auth:        authSvc,
+		Access:      access.NewService(pool),
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems:   workSvc,
+		Feed:        feed.NewService(pool),
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 	if err := s.Authenticate(ctx, agentResult.Secret); err != nil {
 		t.Fatalf("authenticate scoped agent: %v", err)
@@ -95,9 +97,10 @@ func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
 
 	beforeDenied := eventCount(t, pool, domain.EventWorkItemTransitioned)
 	if isError, text := callToolForTest(t, s, "work_items.transition", map[string]any{
-		"id":     b.ID.String(),
-		"to":     string(domain.WorkItemRunning),
-		"reason": "should not happen",
+		"id":              b.ID.String(),
+		"to":              string(domain.WorkItemRunning),
+		"reason":          "should not happen",
+		"idempotency_key": "deny-out-of-tree",
 	}); !isError || !strings.Contains(text, "not found") {
 		t.Fatalf("out-of-tree transition should be denied as not found, isError=%t text=%q", isError, text)
 	}
@@ -105,13 +108,40 @@ func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
 		t.Fatalf("denied write appended transition event: before=%d after=%d", beforeDenied, after)
 	}
 
+	beforeAllowed := eventCount(t, pool, domain.EventWorkItemTransitioned)
 	assertToolCallOK(t, s, "work_items.transition", map[string]any{
-		"id":     a1.ID.String(),
-		"to":     string(domain.WorkItemRunning),
-		"reason": "inside assigned tree",
+		"id":              a1.ID.String(),
+		"to":              string(domain.WorkItemRunning),
+		"reason":          "inside assigned tree",
+		"idempotency_key": "transition-a1-running",
 	})
+	afterAllowed := eventCount(t, pool, domain.EventWorkItemTransitioned)
+	if afterAllowed != beforeAllowed+1 {
+		t.Fatalf("allowed transition event count = %d, want %d", afterAllowed, beforeAllowed+1)
+	}
 	if got := lastActorForKind(t, pool, domain.EventWorkItemTransitioned); got != agentResult.Token.ID {
 		t.Fatalf("allowed write actor = %s, want scoped agent %s", got, agentResult.Token.ID)
+	}
+
+	assertToolCallOK(t, s, "work_items.transition", map[string]any{
+		"id":              a1.ID.String(),
+		"to":              string(domain.WorkItemRunning),
+		"reason":          "inside assigned tree",
+		"idempotency_key": "transition-a1-running",
+	})
+	if afterReplay := eventCount(t, pool, domain.EventWorkItemTransitioned); afterReplay != afterAllowed {
+		t.Fatalf("replayed transition appended another event: before=%d after=%d", afterAllowed, afterReplay)
+	}
+	if isError, text := callToolForTest(t, s, "work_items.transition", map[string]any{
+		"id":              a1.ID.String(),
+		"to":              string(domain.WorkItemDone),
+		"reason":          "same key different args",
+		"idempotency_key": "transition-a1-running",
+	}); !isError || !strings.Contains(text, "idempotency_key_conflict") {
+		t.Fatalf("same key/different args should conflict, isError=%t text=%q", isError, text)
+	}
+	if afterConflict := eventCount(t, pool, domain.EventWorkItemTransitioned); afterConflict != afterAllowed {
+		t.Fatalf("conflicting transition appended event: before=%d after=%d", afterAllowed, afterConflict)
 	}
 
 	if isError, text := callToolForTest(t, s, "feed.read", map[string]any{"limit": 20}); isError {
