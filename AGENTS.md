@@ -41,7 +41,7 @@ The substrate **must not foreclose** these directions, even though it does not y
 These are how the principles above are made true in code. They are non-optional but they are not the *purpose*.
 
 - **Idempotency at every layer.** HTTP, jobs, connectors, events, projections, approvals, migrations. Re-sending the same instruction produces the same result. Falls out of (1)+(2) but is enforced explicitly because the implementation cannot ship without it.
-- **Deterministic event ids.** `events.id = uuid(sha256(subject_kind || ':' || subject_id || ':' || kind || ':' || canonical(payload))[:16])`. Replays produce no new rows; PK conflict is treated as success.
+- **Deterministic event ids.** `events.id = uuid(sha256(subject_kind || ':' || subject_id || ':' || kind || ':' || canonical(payload) [|| ':' || discriminator])[:16])`. Replays produce no new rows; PK conflict is treated as success. The discriminator distinguishes *distinct logical actions with identical payloads* (a work_item cycling through the same transition twice, a repeated progress payload): appends that run under the idempotency contract set it to the caller's `(token, scope, key)` identity, so retries of one action still collapse while separate actions never do. Payload-only identity (empty discriminator) is reserved for events whose payloads cannot legitimately repeat.
 - **`SELECT … FOR UPDATE SKIP LOCKED`** for the worker queue. No second queue, no Redis.
 - **Append-only enforcement on `events`** via row + statement triggers (`UPDATE`, `DELETE`, `TRUNCATE`). Triggers protect against application bugs, not just compromised roles.
 - **Migrations embedded into the binary** via `embed.FS`, applied in numeric order, each in its own transaction.

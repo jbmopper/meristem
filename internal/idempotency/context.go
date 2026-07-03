@@ -53,6 +53,21 @@ func SubjectID(ctx context.Context, label string) (uuid.UUID, bool) {
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)), true
 }
 
+// EventDiscriminator derives the event-identity discriminator for the
+// mutation currently executing under the idempotency contract. It is stable
+// across retries of one logical action (same token, scope, and key) and
+// different across actions, which is exactly the property events.Spec needs
+// to keep repeated-but-distinct actions from collapsing into one event row.
+// Outside an idempotent mutation it returns ("", false) and callers append
+// with payload-only identity, preserving pre-discriminator behavior.
+func EventDiscriminator(ctx context.Context) (string, bool) {
+	req, ok := ctx.Value(contextKey{}).(Request)
+	if !ok || req.TokenID == uuid.Nil || req.Scope == "" || req.Key == "" {
+		return "", false
+	}
+	return req.TokenID.String() + "|" + req.Scope + "|" + req.Key, true
+}
+
 // SetRecordedResponse replaces the body persisted in idempotency.recorded and
 // served on replay. The current request still receives the handler's original
 // response. Secret-returning handlers use this to avoid durable secret storage.

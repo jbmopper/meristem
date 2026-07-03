@@ -20,6 +20,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 const headerName = "Idempotency-Key"
@@ -136,6 +137,11 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	if status == 0 {
 		status = http.StatusOK
 	}
+	// Mirror Wrap: a 5xx is an incomplete attempt, not a conclusion, and
+	// must not be pinned under the key for the cache TTL.
+	if status >= http.StatusInternalServerError {
+		return ExecuteResult{Status: status, Body: body}, nil
+	}
 	recordBody := body
 	if overridden, ok := recordedResponse(callCtx); ok {
 		recordBody = overridden
@@ -168,8 +174,18 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			writeError(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key header is required")
 			return
 		}
+		// The safety cap must bound this ReadAll, not just the handler's
+		// decoder: this middleware buffers the body before any handler
+		// runs, so an unbounded read here would let a caller occupy
+		// arbitrary memory regardless of downstream limits.
+		r.Body = http.MaxBytesReader(w, r.Body, safety.DefaultPolicy().MaxRequestBodyBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds resource safety limit")
+				return
+			}
 			writeError(w, http.StatusBadRequest, "invalid_request_body", "could not read request body")
 			return
 		}
@@ -232,6 +248,19 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		ctx = withRecordedResponseOverride(ctx, override)
 		r = r.WithContext(ctx)
 		next.ServeHTTP(rec, r)
+
+		// 5xx responses are never recorded: they mean "the attempt did
+		// not complete", and pinning one under the key would make every
+		// well-behaved retry (same key, same body) replay the failure
+		// for the cache TTL instead of re-executing. The client's
+		// contract — retry with the same key until a non-5xx answer —
+		// only works if the cache stores conclusions, not accidents.
+		if rec.status >= http.StatusInternalServerError {
+			copyHeader(w.Header(), rec.header)
+			w.WriteHeader(rec.status)
+			_, _ = w.Write(rec.body.Bytes())
+			return
+		}
 
 		recordBody := rec.body.Bytes()
 		if overridden, ok := recordedResponse(r.Context()); ok {

@@ -29,6 +29,43 @@ func TestSubjectIDIsStableForSameRequestAndLabel(t *testing.T) {
 	}
 }
 
+func TestEventDiscriminator(t *testing.T) {
+	tokenID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	base := Request{
+		TokenID:     tokenID,
+		Scope:       "MCP:work_items.transition",
+		Key:         "key-1",
+		RequestHash: []byte("body"),
+	}
+
+	if disc, ok := EventDiscriminator(context.Background()); ok || disc != "" {
+		t.Fatalf("expected no discriminator outside idempotency context, got %q ok=%v", disc, ok)
+	}
+
+	first, ok := EventDiscriminator(withRequest(context.Background(), base))
+	if !ok || first == "" {
+		t.Fatal("expected discriminator under idempotency context")
+	}
+	retry, _ := EventDiscriminator(withRequest(context.Background(), base))
+	if retry != first {
+		t.Fatalf("discriminator must be stable across retries: %q != %q", retry, first)
+	}
+
+	otherKey := base
+	otherKey.Key = "key-2"
+	second, _ := EventDiscriminator(withRequest(context.Background(), otherKey))
+	if second == first {
+		t.Fatalf("distinct keys must yield distinct discriminators: %q", first)
+	}
+
+	otherBody := base
+	otherBody.RequestHash = []byte("different-body")
+	sameAction, _ := EventDiscriminator(withRequest(context.Background(), otherBody))
+	if sameAction != first {
+		t.Fatalf("request hash must not influence the discriminator (conflicts are the idempotency layer's job): %q != %q", sameAction, first)
+	}
+}
+
 func TestSubjectIDSeparatesLabelsAndRequestBodies(t *testing.T) {
 	tokenID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	base := Request{

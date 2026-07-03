@@ -31,17 +31,31 @@ import (
 // Spec is the input to Append. The id is derived from the spec; callers do
 // not set it.
 //
-// Identity-bearing fields (SubjectKind, SubjectID, Kind, Payload) determine
-// the event id; changing any one yields a different id. Attribution fields
-// (Source, ActorTokenID) are metadata and do *not* influence the id, so a
-// replay attributed to a different token still collapses to one event row.
+// Identity-bearing fields (SubjectKind, SubjectID, Kind, Payload,
+// Discriminator) determine the event id; changing any one yields a different
+// id. Attribution fields (Source, ActorTokenID) are metadata and do *not*
+// influence the id, so a replay attributed to a different token still
+// collapses to one event row.
+//
+// Discriminator distinguishes two *distinct logical actions* that happen to
+// produce identical payloads on the same subject — e.g. a work_item cycling
+// running→blocked twice with the same reason, or the same progress payload
+// appended twice on purpose. Without it, the second action's event collides
+// with the first and is silently dropped along with its projections. Callers
+// exposed to repeatable payloads must set it to a value that is stable across
+// retries of one action but different across actions; the caller's
+// idempotency identity (see idempotency.EventDiscriminator) is the canonical
+// choice. Empty means "payload alone identifies the event", which is only
+// safe for payloads that cannot legitimately repeat (e.g. token.created
+// carries a fresh random hash).
 type Spec struct {
-	SubjectKind  string
-	SubjectID    uuid.UUID
-	Kind         string
-	Source       domain.Source
-	ActorTokenID *uuid.UUID
-	Payload      any
+	SubjectKind   string
+	SubjectID     uuid.UUID
+	Kind          string
+	Source        domain.Source
+	ActorTokenID  *uuid.UUID
+	Payload       any
+	Discriminator string
 }
 
 func (s Spec) validate() error {
@@ -85,6 +99,13 @@ func DeterministicID(s Spec) (uuid.UUID, error) {
 	h.Write([]byte(s.Kind))
 	h.Write([]byte{':'})
 	h.Write(canonical)
+	// The discriminator only contributes when set so that ids of
+	// discriminator-free specs remain identical to those produced before the
+	// field existed; event logs written by older binaries replay cleanly.
+	if s.Discriminator != "" {
+		h.Write([]byte{':'})
+		h.Write([]byte(s.Discriminator))
+	}
 	sum := h.Sum(nil)
 
 	var id uuid.UUID

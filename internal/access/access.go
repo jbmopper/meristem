@@ -81,13 +81,17 @@ func (s *Service) FilterWorkItems(ctx context.Context, actor domain.Token, items
 	if !canReadWorkItems(scopeSet(actor.Scopes)) {
 		return nil, ErrDenied
 	}
+	candidates := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		candidates = append(candidates, item.ID)
+	}
+	visible, err := s.workItemsInAnyTree(ctx, actor, candidates)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]domain.WorkItem, 0, len(items))
 	for _, item := range items {
-		ok, err := s.workItemInAnyTree(ctx, actor, item.ID)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
+		if visible[item.ID] {
 			out = append(out, item)
 		}
 	}
@@ -142,13 +146,39 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 	if !hasScope(actor, ScopeFeedReadAssigned) {
 		return nil, ErrDenied
 	}
+	// Gather every work_item id any feed item's visibility can hinge on,
+	// resolve tree membership for all of them in one query, then filter in
+	// memory. Relation events are visible when either endpoint is.
+	var candidates []uuid.UUID
+	for _, item := range items {
+		if item.SubjectKind != domain.SubjectWorkItem {
+			continue
+		}
+		if item.Kind == domain.EventWorkItemRelationAdded {
+			candidates = append(candidates, relationIDs(item)...)
+			continue
+		}
+		candidates = append(candidates, item.SubjectID)
+	}
+	visible, err := s.workItemsInAnyTree(ctx, actor, candidates)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]feed.Item, 0, len(items))
 	for _, item := range items {
-		ok, err := s.feedItemVisible(ctx, actor, item)
-		if err != nil {
-			return nil, err
+		if item.SubjectKind != domain.SubjectWorkItem {
+			continue
 		}
-		if ok {
+		if item.Kind == domain.EventWorkItemRelationAdded {
+			for _, id := range relationIDs(item) {
+				if visible[id] {
+					out = append(out, item)
+					break
+				}
+			}
+			continue
+		}
+		if visible[item.SubjectID] {
 			out = append(out, item)
 		}
 	}
@@ -162,26 +192,6 @@ func (s *Service) FilterFeedPage(ctx context.Context, actor domain.Token, page f
 	}
 	page.Items = items
 	return page, nil
-}
-
-func (s *Service) feedItemVisible(ctx context.Context, actor domain.Token, item feed.Item) (bool, error) {
-	if item.SubjectKind != domain.SubjectWorkItem {
-		return false, nil
-	}
-	if item.Kind == domain.EventWorkItemRelationAdded {
-		ids := relationIDs(item)
-		for _, id := range ids {
-			ok, err := s.workItemInAnyTree(ctx, actor, id)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-	return s.workItemInAnyTree(ctx, actor, item.SubjectID)
 }
 
 func relationIDs(item feed.Item) []uuid.UUID {
@@ -202,41 +212,48 @@ func relationIDs(item feed.Item) []uuid.UUID {
 }
 
 func (s *Service) workItemInAnyTree(ctx context.Context, actor domain.Token, id uuid.UUID) (bool, error) {
-	if s == nil || s.pool == nil {
-		return false, fmt.Errorf("access: work_item tree policy requires database")
+	visible, err := s.workItemsInAnyTree(ctx, actor, []uuid.UUID{id})
+	if err != nil {
+		return false, err
 	}
-	roots := workItemTreeRoots(actor)
-	if len(roots) == 0 {
-		return false, nil
-	}
-	for _, root := range roots {
-		ok, err := s.workItemInTree(ctx, root, id)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			return true, nil
-		}
-	}
-	return false, nil
+	return visible[id], nil
 }
 
-func (s *Service) workItemInTree(ctx context.Context, root, target uuid.UUID) (bool, error) {
-	row := s.pool.QueryRow(ctx, `
+// workItemsInAnyTree resolves tree membership for every candidate id in one
+// recursive walk over all the actor's tree roots, rather than one query per
+// (candidate, root) pair. Filtering a page of N items costs one round trip
+// regardless of N or the number of tree scopes.
+func (s *Service) workItemsInAnyTree(ctx context.Context, actor domain.Token, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("access: work_item tree policy requires database")
+	}
+	roots := workItemTreeRoots(actor)
+	visible := make(map[uuid.UUID]bool, len(ids))
+	if len(roots) == 0 || len(ids) == 0 {
+		return visible, nil
+	}
+	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE subtree(id) AS (
-			SELECT $1::uuid
+			SELECT unnest($1::uuid[])
 			UNION
 			SELECT wir.child_id
 			FROM work_item_relations wir
 			JOIN subtree s ON wir.parent_id = s.id
 		)
-		SELECT EXISTS (SELECT 1 FROM subtree WHERE id = $2)
-	`, root, target)
-	var ok bool
-	if err := row.Scan(&ok); err != nil {
-		return false, err
+		SELECT DISTINCT id FROM subtree WHERE id = ANY($2::uuid[])
+	`, roots, ids)
+	if err != nil {
+		return nil, err
 	}
-	return ok, nil
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		visible[id] = true
+	}
+	return visible, rows.Err()
 }
 
 func workItemTreeRoots(actor domain.Token) []uuid.UUID {
