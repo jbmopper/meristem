@@ -1,8 +1,8 @@
 package mcp
 
 import (
-	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -36,6 +39,8 @@ const (
 // layer per docs/v0.md, never an alternate execution path.
 type Deps struct {
 	Auth                *auth.Service
+	Access              *access.Service
+	Idempotency         *idempotency.Middleware
 	Inbox               *inbox.Service
 	WorkItems           *workitems.Service
 	DeterministicErrors *errorreporting.Service
@@ -137,35 +142,44 @@ func (s *Server) actorToken() domain.Token {
 // a write error occurs. Read errors other than EOF are returned; EOF is
 // the normal disconnect path.
 //
-// Each line is one message. We reject oversized lines explicitly rather
-// than silently truncating (bufio.Scanner's default 64 KiB cap is too
-// small for tool payloads but we still want a hard ceiling).
+// Messages may arrive as compact single-line JSON or pretty-printed
+// multi-line JSON; json.Decoder handles both. The server always writes
+// compact single-line responses (one message per '\n'-terminated line).
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
+	dec := json.NewDecoder(in)
 	writer := newSyncWriter(out)
 
-	for scanner.Scan() {
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line := scanner.Bytes()
-		if len(line) == 0 {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
+			// JSON syntax/type error: send a parse error per JSON-RPC 2.0 and
+			// stop. The decoder stream state is undefined after a bad token so
+			// further reads are unreliable.
+			var synErr *json.SyntaxError
+			var unmarshalErr *json.UnmarshalTypeError
+			if errors.As(err, &synErr) || errors.As(err, &unmarshalErr) {
+				_ = writer.write(rpcMessage{
+					JSONRPC: "2.0",
+					ID:      json.RawMessage("null"),
+					Error:   rpcErrorf(errCodeParse, "invalid JSON: "+err.Error()),
+				})
+				return nil
+			}
+			return err
+		}
+		if len(raw) == 0 {
 			continue
 		}
-		// Copy because scanner reuses the buffer between Scan calls and
-		// we may pass the bytes through to background goroutines later.
-		buf := make([]byte, len(line))
-		copy(buf, line)
-		if err := s.handleRaw(ctx, buf, writer); err != nil {
+		if err := s.handleRaw(ctx, []byte(raw), writer); err != nil {
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
 }
 
 func (s *Server) handleRaw(ctx context.Context, raw []byte, w *syncWriter) error {
@@ -215,6 +229,10 @@ func (s *Server) handleRaw(ctx context.Context, raw []byte, w *syncWriter) error
 }
 
 func (s *Server) dispatch(ctx context.Context, msg rpcMessage) (any, *rpcError) {
+	return s.dispatchWithActor(ctx, msg, s.actorToken())
+}
+
+func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor domain.Token) (any, *rpcError) {
 	switch msg.Method {
 	case "initialize":
 		return s.handleInitialize(msg.Params)
@@ -223,9 +241,9 @@ func (s *Server) dispatch(ctx context.Context, msg rpcMessage) (any, *rpcError) 
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return s.handleListTools()
+		return s.handleListTools(actor)
 	case "tools/call":
-		return s.handleCallTool(ctx, msg.Params)
+		return s.handleCallTool(ctx, actor, msg.Params)
 	case "shutdown":
 		return map[string]any{}, nil
 	default:
@@ -264,9 +282,12 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 	}, nil
 }
 
-func (s *Server) handleListTools() (any, *rpcError) {
+func (s *Server) handleListTools(actor domain.Token) (any, *rpcError) {
 	descs := make([]toolDescriptor, 0, len(s.tools))
 	for _, t := range s.tools {
+		if !access.ToolVisible(actor, t.Name) {
+			continue
+		}
 		descs = append(descs, toolDescriptor{
 			Name:        s.advertisedToolName(t.Name),
 			Description: t.Description,
@@ -292,7 +313,7 @@ type callToolParams struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-func (s *Server) handleCallTool(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
+func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, *rpcError) {
 	var params callToolParams
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &params); err != nil {
@@ -303,18 +324,125 @@ func (s *Server) handleCallTool(ctx context.Context, raw json.RawMessage) (any, 
 	if !ok {
 		return nil, rpcErrorf(errCodeMethodNotFound, "no such tool: "+params.Name)
 	}
-	actor := s.actorToken()
 	if actor.ID == (domain.Token{}).ID {
 		return toolErrorResult("mcp server is not authenticated; set MERISTEM_TOKEN before launching"), nil
 	}
-	result, err := tool.Handler(ctx, actor, params.Arguments)
+	if !access.ToolVisible(actor, tool.Name) {
+		return toolErrorResult("insufficient_scope: token cannot use " + tool.Name), nil
+	}
+	if !tool.Mutates {
+		result, err := tool.Handler(ctx, actor, params.Arguments)
+		if err != nil {
+			// Tool-level errors travel inside a successful response with
+			// isError=true (per MCP spec), not as JSON-RPC errors. The
+			// distinction is "the transport worked, the tool didn't".
+			return toolErrorResult(err.Error()), nil
+		}
+		return toolSuccessResult(result), nil
+	}
+	result, err := s.handleIdempotentMutationTool(ctx, actor, tool, params.Arguments)
 	if err != nil {
-		// Tool-level errors travel inside a successful response with
-		// isError=true (per MCP spec), not as JSON-RPC errors. The
-		// distinction is "the transport worked, the tool didn't".
 		return toolErrorResult(err.Error()), nil
 	}
-	return toolSuccessResult(result), nil
+	return result, nil
+}
+
+func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (map[string]any, error) {
+	req, arguments, err := mcpIdempotencyRequest(actor, tool, raw)
+	if err != nil {
+		return nil, err
+	}
+	if s.deps.Idempotency == nil {
+		return nil, fmt.Errorf("idempotency executor not configured")
+	}
+	result, err := s.deps.Idempotency.Execute(ctx, idempotency.ExecuteInput{
+		Token:       actor,
+		Scope:       req.Scope,
+		Key:         req.Key,
+		RequestHash: req.RequestHash,
+		Run: func(callCtx context.Context) (int, []byte, error) {
+			payload, err := tool.Handler(callCtx, actor, arguments)
+			var toolResult map[string]any
+			if err != nil {
+				toolResult = toolErrorResult(err.Error())
+			} else {
+				toolResult = toolSuccessResult(payload)
+			}
+			encoded, err := json.Marshal(toolResult)
+			if err != nil {
+				return 0, nil, fmt.Errorf("marshal MCP tool result: %w", err)
+			}
+			return 200, encoded, nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var replayed map[string]any
+	if err := json.Unmarshal(result.Body, &replayed); err != nil {
+		return nil, fmt.Errorf("decode idempotent MCP result: %w", err)
+	}
+	return replayed, nil
+}
+
+func mcpCallContext(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (context.Context, json.RawMessage, error) {
+	req, stripped, err := mcpIdempotencyRequest(actor, tool, raw)
+	if err != nil {
+		return ctx, raw, err
+	}
+	return idempotency.WithRequest(ctx, req), stripped, nil
+}
+
+func mcpIdempotencyRequest(actor domain.Token, tool Tool, raw json.RawMessage) (idempotency.Request, json.RawMessage, error) {
+	if !tool.Mutates {
+		return idempotency.Request{}, raw, nil
+	}
+	var args map[string]json.RawMessage
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return idempotency.Request{}, raw, fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+	keyRaw, ok := args["idempotency_key"]
+	if !ok {
+		return idempotency.Request{}, raw, fmt.Errorf("idempotency_key_required: %s requires idempotency_key", tool.Name)
+	}
+	var key string
+	if err := json.Unmarshal(keyRaw, &key); err != nil {
+		return idempotency.Request{}, raw, fmt.Errorf("idempotency_key must be a string")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return idempotency.Request{}, raw, fmt.Errorf("idempotency_key_required: idempotency_key must be non-empty")
+	}
+
+	stripped := make(map[string]json.RawMessage, len(args))
+	for name, value := range args {
+		if name == "idempotency_key" {
+			continue
+		}
+		stripped[name] = value
+	}
+	strippedRaw, err := events.CanonicalJSON(stripped)
+	if err != nil {
+		return idempotency.Request{}, raw, fmt.Errorf("canonicalize MCP arguments: %w", err)
+	}
+	requestPayload := map[string]any{
+		"tool":      tool.Name,
+		"arguments": stripped,
+	}
+	canonicalRequest, err := events.CanonicalJSON(requestPayload)
+	if err != nil {
+		return idempotency.Request{}, raw, fmt.Errorf("canonicalize MCP idempotency request: %w", err)
+	}
+	hash := sha256.Sum256(canonicalRequest)
+	req := idempotency.Request{
+		TokenID:     actor.ID,
+		Scope:       "MCP:" + tool.Name,
+		Key:         key,
+		RequestHash: hash[:],
+	}
+	return req, json.RawMessage(strippedRaw), nil
 }
 
 type toolDescriptor struct {

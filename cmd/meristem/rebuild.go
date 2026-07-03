@@ -52,6 +52,7 @@ var projectionTables = []string{
 	"idempotency_keys",
 	"signals",
 	"deterministic_errors",
+	"convergence_verdicts",
 }
 
 func runRebuild(ctx context.Context, logger *slog.Logger, args []string) error {

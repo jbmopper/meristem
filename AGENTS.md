@@ -1,6 +1,6 @@
 # AGENTS.md
 
-A projection of `docs/spec.md` (system spec) and `docs/v0.md` (v0 implementation spec), distilled for generative systems — Cursor, Codex, Claude, custom workers — that pick up this repository to add or modify code.
+A projection of `docs/spec.md` (system spec) and `docs/v0.md` (v0 implementation spec), distilled for any generative-system implementation work in this repository.
 
 If this file and `docs/spec.md` disagree, **`docs/spec.md` wins and this file is wrong**. Fix the projection, not the source.
 
@@ -41,7 +41,7 @@ The substrate **must not foreclose** these directions, even though it does not y
 These are how the principles above are made true in code. They are non-optional but they are not the *purpose*.
 
 - **Idempotency at every layer.** HTTP, jobs, connectors, events, projections, approvals, migrations. Re-sending the same instruction produces the same result. Falls out of (1)+(2) but is enforced explicitly because the implementation cannot ship without it.
-- **Deterministic event ids.** `events.id = uuid(sha256(subject_kind || ':' || subject_id || ':' || kind || ':' || canonical(payload))[:16])`. Replays produce no new rows; PK conflict is treated as success.
+- **Deterministic event ids.** `events.id = uuid(sha256(subject_kind || ':' || subject_id || ':' || kind || ':' || canonical(payload) [|| ':' || discriminator])[:16])`. Replays produce no new rows; PK conflict is treated as success. The discriminator distinguishes *distinct logical actions with identical payloads* (a work_item cycling through the same transition twice, a repeated progress payload): appends that run under the idempotency contract set it to the caller's `(token, scope, key)` identity, so retries of one action still collapse while separate actions never do. Payload-only identity (empty discriminator) is reserved for events whose payloads cannot legitimately repeat.
 - **`SELECT … FOR UPDATE SKIP LOCKED`** for the worker queue. No second queue, no Redis.
 - **Append-only enforcement on `events`** via row + statement triggers (`UPDATE`, `DELETE`, `TRUNCATE`). Triggers protect against application bugs, not just compromised roles.
 - **Migrations embedded into the binary** via `embed.FS`, applied in numeric order, each in its own transaction.
@@ -78,7 +78,6 @@ internal/workitems/   lifecycle, transitions, relations
 internal/feed/        chronological projection
 internal/signals/     non-human structured input → work_items (see docs/signals.md)
 internal/safety/      deterministic resource limits (request bodies, feed wait, patience budgets)
-internal/providers/   provider-specific handoff/scaffold helpers; never provider-specific durable identity
 internal/storage/     pgx pool + migration runner
 internal/worker/      bounded-patience scan kernel (v1)
 internal/mcp/         MCP tool definitions + stdio transport
@@ -143,18 +142,25 @@ A projection writer turns appended events into derived rows. It is the *only* co
 
 - Name format: `<package>.<verb>`, matching the REST surface: `inbox.capture`, `work_items.transition`, `feed.read`.
 - Args mirror the REST request body. Return values mirror the REST response body. The same domain function backs both transports.
-- Auth is by `MERISTEM_TOKEN` in the server's environment. Each agent (each Cursor instance, each custom worker) gets its own token row so attribution stays clean.
-- Transport is stdio in v0 (matches how Cursor launches MCP servers). Other transports are explicit work_items.
+- Auth is by `MERISTEM_TOKEN` in the server's environment. Each agent instance and worker gets its own token row so attribution stays clean.
+- Transport is stdio in v0 (matches how MCP clients launch this process). Other transports are explicit work_items.
+- MCP tools are filtered by token policy before advertisement and again before
+  object-level calls. Scoped worker tokens use scopes such as
+  `work_items.tree:<uuid>`, `work_items.read`, `work_items.write`, and
+  `feed.read_assigned`; denied writes must append no events. Existing
+  scope-less tokens keep legacy broad access until rotated; any non-empty scope
+  set is treated as policy-bearing and must fail closed on unknown or incomplete
+  scopes.
 
 ## Prompt-level data controls for external agents
 
 These rules are a practical boundary until the deterministic provider context
-boundary ships. They do not replace a scoped export/proxy; they make the
-operator's intent unambiguous when an external model provider is pointed at a
-workspace.
+boundary and scoped MCP surface fully cover every provider path. They do not
+replace a scoped export/proxy; they make the operator's intent unambiguous when
+an external model provider is pointed at a workspace.
 
-- Treat Cursor CLI, Claude Code, and custom MCP workers as external execution
-  paths unless the operator explicitly says otherwise.
+- Treat external assistants (CLI-based helpers, Claude Code, and custom MCP workers) as external execution
+ paths unless the operator explicitly says otherwise.
 - Before launching an external worker, state the target workspace, allowed
   areas, out-of-scope areas, model, worktree base, `work_item`, and
   `human_review_status`.
@@ -212,9 +218,20 @@ the assigned work_item, scope, and allowed areas. Treat that bootstrap text as
 an entry prompt; the rules in this file and `docs/spec.md` still govern the
 work.
 
-Until `meristem` can track its own development as work_items, multiple agents working concurrently coordinate out-of-band through `docs/coord/`. Each file is dated; read the most recent before starting a turn that touches code another agent has written. When you finish a turn that affects another agent's territory or makes a contract decision, append a short dated note to the appropriate file. When all open questions in a coord file are closed, move it to `docs/coord/archive/`.
+`meristem` now tracks its own development as work_items. When API/MCP is
+reachable, coordinate concurrent work through live `work_item`s, appended
+events, transitions, and the feed. Do not create or extend markdown
+coordination threads as the source of truth.
 
-If your turn is the first one in a new coordination thread, create `docs/coord/YYYY-MM-DD-<topic>.md` with sections: snapshot of who has touched what, decisions, open questions, ownership split, findings carried forward.
+When changing `docs/spec.md` § v1 Substrate, mirror the change into live
+`work_item` state in the same change: create missing substrate items, append
+status/diff events to existing items, or transition rows whose substrate work is
+now done. The spec list and seeded backlog must not drift silently.
+
+Use `docs/coord/` only as an outage fallback when meristem itself is
+unreachable. If you must write a fallback note there, keep it short, mark it as
+temporary, and replay the durable facts into meristem as soon as the system is
+back. Closed or historical fallback notes belong in `docs/coord/archive/`.
 
 ## When in doubt
 
@@ -222,7 +239,7 @@ Read the spec:
 
 - `docs/spec.md` — the system spec; final authority.
 - `docs/v0.md` — v0 implementation spec; concrete contracts for the bootstrap slice.
-- `docs/coord/` — current coordination notes between concurrent agents.
+- `docs/coord/` — outage-only fallback and historical coordination notes.
 - `README.md` — how to run the binary locally.
 
 This file is a projection of those documents. If you spot drift, fix this file; the spec is canonical.

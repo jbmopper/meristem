@@ -140,6 +140,11 @@ Current read scopes:
 | `logs.read_masked` | May request masked records with `include_masked=true`. |
 | `logs.read_all` | Convenience scope for all read visibility. Root tokens get equivalent access automatically. |
 
+These scopes compose with scoped MCP worker scopes. For example, a worker with
+`work_items.tree:<uuid>` and `feed.read_assigned` can observe its assigned
+work-item tree without receiving deterministic error details unless it also has
+the appropriate `logs.*` scope.
+
 Current REST surface:
 
 - `GET /v1/deterministic-errors?limit=N&include_masked=false`

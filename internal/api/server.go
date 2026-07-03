@@ -17,13 +17,17 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/errorreporting"
+	"github.com/jbmopper/meristem/internal/escalations"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/signals"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -57,8 +61,12 @@ type Server struct {
 	inbox                 *inbox.Service
 	signals               *signals.Service
 	workItems             *workitems.Service
+	access                *access.Service
+	escalations           *escalations.Service
+	grants                *grants.IssuanceService
 	deterministicErrors   *errorreporting.Service
 	feed                  *feed.Service
+	mcpServer             *mcp.Server
 	policy                safety.Policy
 }
 
@@ -87,8 +95,21 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.inbox = inbox.NewService(pool, s.writer)
 		s.signals = signals.NewService(pool, s.writer)
 		s.workItems = workitems.NewService(pool, s.writer)
+		s.access = access.NewService(pool)
+		s.escalations = escalations.NewService(pool, s.writer)
+		s.grants = grants.NewIssuanceService(pool, s.writer, s.authService, s.escalations)
 		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.feed = feed.NewService(pool)
+		s.mcpServer = mcp.New(mcp.Deps{
+			Auth:                s.authService,
+			Access:              s.access,
+			Idempotency:         s.idempotencyMiddleware,
+			Inbox:               s.inbox,
+			WorkItems:           s.workItems,
+			DeterministicErrors: s.deterministicErrors,
+			Feed:                s.feed,
+			MaxFeedWait:         s.policy.MaxFeedWait,
+		}, mcp.ServerInfo{Name: "meristem", Version: "dev"}, logger)
 	}
 	s.routes()
 	return s
@@ -104,19 +125,23 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleLiveness)
 	s.mux.HandleFunc("GET /readyz", s.handleReadiness)
-	s.mux.Handle("POST /v1/inbox/messages", s.command(http.HandlerFunc(s.handleCaptureMessage)))
+	s.mux.Handle("GET /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
+	s.mux.Handle("POST /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
+	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
+	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
+	s.mux.Handle("POST /v1/tokens/revoke-all", s.commandWithAccess(s.canPanicRevokeTokens, http.HandlerFunc(s.handlePanicRevokeTokens)))
 	s.mux.Handle("GET /v1/feed", s.protected(http.HandlerFunc(s.handleFeed)))
 	s.mux.Handle("GET /v1/feed/stream", s.protected(http.HandlerFunc(s.handleFeedStream)))
 	s.mux.Handle("GET /v1/deterministic-errors", s.protected(http.HandlerFunc(s.handleListDeterministicErrors)))
 	s.mux.Handle("GET /v1/deterministic-errors/{id}", s.protected(http.HandlerFunc(s.handleGetDeterministicError)))
 	s.mux.Handle("GET /v1/work-items", s.protected(http.HandlerFunc(s.handleListWorkItems)))
-	s.mux.Handle("POST /v1/work-items", s.command(http.HandlerFunc(s.handleCreateWorkItem)))
+	s.mux.Handle("POST /v1/work-items", s.commandWithAccess(s.canCreateWorkItem, http.HandlerFunc(s.handleCreateWorkItem)))
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))
-	s.mux.Handle("POST /v1/work-items/{id}/children", s.command(http.HandlerFunc(s.handleSpawnChild)))
-	s.mux.Handle("POST /v1/work-items/{id}/events", s.command(http.HandlerFunc(s.handleAppendWorkItemEvent)))
-	s.mux.Handle("POST /v1/work-items/{id}/metadata", s.command(http.HandlerFunc(s.handleUpdateWorkItemMetadata)))
-	s.mux.Handle("POST /v1/work-items/{id}/transition", s.command(http.HandlerFunc(s.handleTransitionWorkItem)))
+	s.mux.Handle("POST /v1/work-items/{id}/children", s.commandWithAccess(s.canWriteWorkItemPath("work_items.spawn_child"), http.HandlerFunc(s.handleSpawnChild)))
+	s.mux.Handle("POST /v1/work-items/{id}/events", s.commandWithAccess(s.canWriteWorkItemPath("work_items.append_event"), http.HandlerFunc(s.handleAppendWorkItemEvent)))
+	s.mux.Handle("POST /v1/work-items/{id}/metadata", s.commandWithAccess(s.canWriteWorkItemPath("work_items.update_metadata"), http.HandlerFunc(s.handleUpdateWorkItemMetadata)))
+	s.mux.Handle("POST /v1/work-items/{id}/transition", s.commandWithAccess(s.canWriteWorkItemPath("work_items.transition"), http.HandlerFunc(s.handleTransitionWorkItem)))
 }
 
 func (s *Server) protected(next http.Handler) http.Handler {
@@ -131,6 +156,21 @@ func (s *Server) command(next http.Handler) http.Handler {
 		return serviceUnavailableHandler()
 	}
 	return s.authMiddleware.Wrap(s.idempotencyMiddleware.Wrap(next))
+}
+
+type accessGate func(http.ResponseWriter, *http.Request) bool
+
+func (s *Server) commandWithAccess(gate accessGate, next http.Handler) http.Handler {
+	if s.authMiddleware == nil || s.idempotencyMiddleware == nil {
+		return serviceUnavailableHandler()
+	}
+	inner := s.idempotencyMiddleware.Wrap(next)
+	return s.authMiddleware.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !gate(w, r) {
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled or the

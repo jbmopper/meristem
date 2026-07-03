@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +12,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/grants"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -29,6 +33,36 @@ type workItemResponse struct {
 	CreatedBy                  *uuid.UUID               `json:"created_by,omitempty"`
 	CreatedAt                  time.Time                `json:"created_at"`
 	UpdatedAt                  time.Time                `json:"updated_at"`
+}
+
+type subactorGrantResponse struct {
+	GrantID     uuid.UUID                `json:"grant_id"`
+	WorkItemID  uuid.UUID                `json:"work_item_id"`
+	Template    grants.Template          `json:"template"`
+	Disposition grants.Disposition       `json:"disposition"`
+	Reason      string                   `json:"reason"`
+	Scopes      []string                 `json:"scopes,omitempty"`
+	Token       *subactorGrantToken      `json:"token,omitempty"`
+	TokenSecret string                   `json:"token_secret,omitempty"`
+	Events      subactorGrantEvents      `json:"events"`
+	Escalation  *subactorGrantEscalation `json:"escalation,omitempty"`
+}
+
+type subactorGrantToken struct {
+	ID     uuid.UUID     `json:"id"`
+	Name   string        `json:"name"`
+	Source domain.Source `json:"source"`
+	Scopes []string      `json:"scopes"`
+}
+
+type subactorGrantEvents struct {
+	Requested uuid.UUID `json:"requested"`
+	Outcome   uuid.UUID `json:"outcome"`
+}
+
+type subactorGrantEscalation struct {
+	ID              uuid.UUID `json:"id"`
+	HumanWorkItemID uuid.UUID `json:"human_work_item_id"`
 }
 
 func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +105,69 @@ func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleCreateSubactorGrant(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if s.grants == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "service_unavailable", "subactor grant service is not configured")
+		return
+	}
+	var req struct {
+		Template        string    `json:"template"`
+		WorkItemID      uuid.UUID `json:"work_item_id"`
+		RequestedScopes []string  `json:"requested_scopes"`
+		Name            string    `json:"name"`
+	}
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	result, err := s.grants.Issue(r.Context(), grants.IssueInput{
+		Parent:          actor,
+		WorkItemID:      req.WorkItemID,
+		Template:        grants.Template(req.Template),
+		RequestedScopes: req.RequestedScopes,
+		Name:            req.Name,
+	})
+	if err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	resp := toSubactorGrantResponse(result)
+	if resp.TokenSecret != "" {
+		redacted := resp
+		redacted.TokenSecret = ""
+		recorded, err := json.Marshal(redacted)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "subactor_grant_failed", "could not encode redacted idempotency response")
+			return
+		}
+		idempotency.SetRecordedResponse(r.Context(), recorded)
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handlePanicRevokeTokens(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	revoked, err := s.authService.RevokeAllNonRoot(r.Context(), actor)
+	if err != nil {
+		if errors.Is(err, auth.ErrRootRequired) {
+			writeAPIError(w, http.StatusForbidden, "root_token_required", "root token required")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "token_revoke_failed", "could not revoke tokens")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"revoked_count": len(revoked),
+		"revoked":       revoked,
+	})
+}
+
 // handleFeed serves /v1/feed in two modes:
 //
 //   - Snapshot (back-compat): no cursor, no wait → latest-N events
@@ -85,6 +182,13 @@ func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
 // already need to send anyway. Cursor opacity is contractual — the
 // 32-char encoded blob is for round-tripping, not parsing.
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !s.canReadFeed(w, r, actor) {
+		return
+	}
 	limit, ok := parseLimit(w, r)
 	if !ok {
 		return
@@ -97,6 +201,11 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		items, err := s.feed.List(r.Context(), limit)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
+			return
+		}
+		items, err = s.filterFeedItems(r.Context(), actor, items)
+		if err != nil {
+			writeAccessError(w, err, "token cannot read feed")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -134,10 +243,22 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
 		return
 	}
+	page, err = s.filterFeedPage(r.Context(), actor, page)
+	if err != nil {
+		writeAccessError(w, err, "token cannot read feed")
+		return
+	}
 	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) handleListWorkItems(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !s.canListWorkItems(w, r, actor) {
+		return
+	}
 	limit, ok := parseLimit(w, r)
 	if !ok {
 		return
@@ -145,6 +266,11 @@ func (s *Server) handleListWorkItems(w http.ResponseWriter, r *http.Request) {
 	items, err := s.workItems.List(r.Context(), r.URL.Query().Get("state"), limit)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "work_items_read_failed", "could not list work items")
+		return
+	}
+	items, err = s.filterWorkItems(r.Context(), actor, items)
+	if err != nil {
+		writeAccessError(w, err, "token cannot read work_items")
 		return
 	}
 	out := make([]workItemResponse, 0, len(items))
@@ -190,6 +316,13 @@ func (s *Server) handleCreateWorkItem(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetWorkItem(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id")
 	if !ok {
+		return
+	}
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !s.canReadWorkItem(w, r, actor, id) {
 		return
 	}
 	item, err := s.workItems.Get(r.Context(), id)
@@ -333,6 +466,175 @@ func authenticatedToken(w http.ResponseWriter, r *http.Request) (domain.Token, b
 	return tok, true
 }
 
+func (s *Server) canCaptureInbox(w http.ResponseWriter, r *http.Request) bool {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return false
+	}
+	if actor.Source != "" && actor.Source != domain.SourceHuman {
+		writeAPIError(w, http.StatusForbidden, "human_token_required", "inbox message capture requires a human token")
+		return false
+	}
+	if !access.ToolVisible(actor, "inbox.capture") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot capture inbox messages")
+		return false
+	}
+	return true
+}
+
+func (s *Server) canPanicRevokeTokens(w http.ResponseWriter, r *http.Request) bool {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return false
+	}
+	if !actor.IsRoot {
+		writeAPIError(w, http.StatusForbidden, "root_token_required", "root token required")
+		return false
+	}
+	return true
+}
+
+func (s *Server) canReadFeed(w http.ResponseWriter, _ *http.Request, actor domain.Token) bool {
+	if !access.ToolVisible(actor, "feed.read") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read feed")
+		return false
+	}
+	if s.access == nil && access.RequiresScopedPolicy(actor) {
+		writeAPIError(w, http.StatusServiceUnavailable, "database_unavailable", "access service is not configured")
+		return false
+	}
+	return true
+}
+
+func (s *Server) canCreateWorkItem(w http.ResponseWriter, r *http.Request) bool {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return false
+	}
+	if !access.ToolVisible(actor, "work_items.create") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot create top-level work_items")
+		return false
+	}
+	if s.access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			writeAPIError(w, http.StatusServiceUnavailable, "database_unavailable", "access service is not configured")
+			return false
+		}
+		return true
+	}
+	if err := s.access.CanCreateWorkItem(r.Context(), actor); err != nil {
+		writeAccessError(w, err, "token cannot create top-level work_items")
+		return false
+	}
+	return true
+}
+
+func (s *Server) canListWorkItems(w http.ResponseWriter, _ *http.Request, actor domain.Token) bool {
+	if !access.ToolVisible(actor, "work_items.list") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read work_items")
+		return false
+	}
+	if s.access == nil && access.RequiresScopedPolicy(actor) {
+		writeAPIError(w, http.StatusServiceUnavailable, "database_unavailable", "access service is not configured")
+		return false
+	}
+	return true
+}
+
+func (s *Server) canReadWorkItem(w http.ResponseWriter, r *http.Request, actor domain.Token, id uuid.UUID) bool {
+	if !access.ToolVisible(actor, "work_items.get") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read work_items")
+		return false
+	}
+	if s.access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			writeAPIError(w, http.StatusServiceUnavailable, "database_unavailable", "access service is not configured")
+			return false
+		}
+		return true
+	}
+	if err := s.access.CanReadWorkItem(r.Context(), actor, id); err != nil {
+		if errors.Is(err, access.ErrDenied) {
+			writeAPIError(w, http.StatusNotFound, "work_item_not_found", "work item not found")
+			return false
+		}
+		writeAccessError(w, err, "token cannot read work_items")
+		return false
+	}
+	return true
+}
+
+func (s *Server) canWriteWorkItemPath(tool string) accessGate {
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		actor, ok := authenticatedToken(w, r)
+		if !ok {
+			return false
+		}
+		if !access.ToolVisible(actor, tool) {
+			writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot write work_items")
+			return false
+		}
+		id, ok := pathUUID(w, r, "id")
+		if !ok {
+			return false
+		}
+		if s.access == nil {
+			if access.RequiresScopedPolicy(actor) {
+				writeAPIError(w, http.StatusServiceUnavailable, "database_unavailable", "access service is not configured")
+				return false
+			}
+			return true
+		}
+		if err := s.access.CanWriteWorkItem(r.Context(), actor, id); err != nil {
+			if errors.Is(err, access.ErrDenied) {
+				writeAPIError(w, http.StatusNotFound, "work_item_not_found", "work item not found")
+				return false
+			}
+			writeAccessError(w, err, "token cannot write work_items")
+			return false
+		}
+		return true
+	}
+}
+
+func (s *Server) filterWorkItems(ctx context.Context, actor domain.Token, items []domain.WorkItem) ([]domain.WorkItem, error) {
+	if s.access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return nil, fmt.Errorf("access service is not configured")
+		}
+		return items, nil
+	}
+	return s.access.FilterWorkItems(ctx, actor, items)
+}
+
+func (s *Server) filterFeedItems(ctx context.Context, actor domain.Token, items []feed.Item) ([]feed.Item, error) {
+	if s.access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return nil, fmt.Errorf("access service is not configured")
+		}
+		return items, nil
+	}
+	return s.access.FilterFeedItems(ctx, actor, items)
+}
+
+func (s *Server) filterFeedPage(ctx context.Context, actor domain.Token, page feed.Page) (feed.Page, error) {
+	if s.access == nil {
+		if access.RequiresScopedPolicy(actor) {
+			return feed.Page{}, fmt.Errorf("access service is not configured")
+		}
+		return page, nil
+	}
+	return s.access.FilterFeedPage(ctx, actor, page)
+}
+
+func writeAccessError(w http.ResponseWriter, err error, message string) {
+	if errors.Is(err, access.ErrDenied) {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", message)
+		return
+	}
+	writeAPIError(w, http.StatusInternalServerError, "access_check_failed", "could not evaluate access policy")
+}
+
 func decodeJSONRequest(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer func() { _ = r.Body.Close() }()
 	r.Body = http.MaxBytesReader(w, r.Body, safety.DefaultPolicy().MaxRequestBodyBytes)
@@ -385,6 +687,49 @@ func toWorkItemResponse(item domain.WorkItem) workItemResponse {
 		CreatedAt:                  item.CreatedAt,
 		UpdatedAt:                  item.UpdatedAt,
 	}
+}
+
+func toSubactorGrantResponse(result grants.IssueResult) subactorGrantResponse {
+	resp := subactorGrantResponse{
+		GrantID:     result.GrantID,
+		WorkItemID:  result.WorkItemID,
+		Template:    result.Template,
+		Disposition: result.Disposition,
+		Reason:      result.Reason,
+		Scopes:      result.Scopes,
+		TokenSecret: result.TokenSecret,
+		Events: subactorGrantEvents{
+			Requested: result.RequestEventID,
+			Outcome:   result.OutcomeEventID,
+		},
+	}
+	if result.Token != nil {
+		resp.Token = &subactorGrantToken{
+			ID:     result.Token.ID,
+			Name:   result.Token.Name,
+			Source: result.Token.Source,
+			Scopes: result.Token.Scopes,
+		}
+	}
+	if result.EscalationID != uuid.Nil {
+		resp.Escalation = &subactorGrantEscalation{
+			ID:              result.EscalationID,
+			HumanWorkItemID: result.HumanWorkItemID,
+		}
+	}
+	return resp
+}
+
+func writeGrantError(w http.ResponseWriter, err error) {
+	if errors.Is(err, grants.ErrWorkItemNotFound) {
+		writeAPIError(w, http.StatusNotFound, "work_item_not_found", "work item not found")
+		return
+	}
+	if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "blank") || strings.Contains(err.Error(), "invalid human_review_status") {
+		writeAPIError(w, http.StatusBadRequest, "subactor_grant_request_failed", err.Error())
+		return
+	}
+	writeAPIError(w, http.StatusInternalServerError, "subactor_grant_failed", "could not issue subactor grant")
 }
 
 func writeWorkItemError(w http.ResponseWriter, err error) {

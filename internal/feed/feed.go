@@ -38,7 +38,13 @@ var IncludedKinds = []string{
 	domain.EventDeterministicErrorReported,
 	domain.EventDeterministicErrorMasked,
 	domain.EventDeterministicErrorUnmasked,
+	domain.EventEscalationRequested,
+	domain.EventSubactorGrantRequested,
+	domain.EventSubactorGrantGranted,
+	domain.EventSubactorGrantDenied,
+	domain.EventSubactorGrantEscalated,
 	domain.EventPatienceBreached,
+	domain.EventConvergenceVerdictRecorded,
 }
 
 // ExcludedKinds enumerates the event kinds the system explicitly *does not*

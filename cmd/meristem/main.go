@@ -10,7 +10,6 @@
 //	meristem migrate  - apply pending Postgres migrations
 //	meristem tokens   - mint, list, and revoke bearer tokens
 //	meristem mcp      - run the MCP stdio server
-//	meristem provider - generate provider handoff scaffolding
 //	meristem seed     - seed substrate backlogs into the running system
 //	meristem rebuild  - rebuild projections from events into a sandbox schema and diff
 //	meristem safety   - validate deterministic resource-safety controls
@@ -148,7 +147,6 @@ usage:
   meristem migrate [up|down] apply or roll back database migrations
   meristem tokens ...        create, list, or revoke bearer tokens
   meristem mcp               run the MCP stdio server (reads MERISTEM_TOKEN)
-  meristem provider ...      generate provider handoff scaffolding
   meristem seed v1           seed the v1 substrate backlog (reads MERISTEM_TOKEN, must be source=system)
   meristem rebuild           fold events through projectors into a sandbox schema and diff vs live
   meristem worker --once     one-shot bounded-patience scan (reads MERISTEM_TOKEN, must be source=system)
@@ -159,7 +157,7 @@ usage:
   meristem help              show this message
 
 environment:
-  MERISTEM_DATABASE_URL  Postgres DSN (required for api, migrate, mcp, tokens, seed, provider)
+  MERISTEM_DATABASE_URL  Postgres DSN (required for api, migrate, mcp, tokens, seed)
   MERISTEM_HTTP_ADDR     listen address for the api (default :8080)
   MERISTEM_TOKEN         bearer secret for mcp (any token), tokens (root), seed (system)
 `, version)

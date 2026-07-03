@@ -18,6 +18,7 @@ HUMAN.md
 .idea/
 .vscode/
 .cursor/
+.claude/
 .serena/
 terminals/
 

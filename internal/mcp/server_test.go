@@ -10,7 +10,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/idempotency"
 )
 
 // roundtrip runs a single request through the dispatcher without going
@@ -88,6 +90,35 @@ func TestServer_NotificationsProduceNoResponse(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("notification produced response: %q", out.String())
+	}
+}
+
+// TestServer_Run_AcceptsMultilineJSON verifies that pretty-printed (multiline)
+// JSON-RPC requests are parsed correctly. Some MCP clients — particularly
+// small models running through Codex — send tool call arguments with embedded
+// newlines; the scanner-based reader would break on these.
+func TestServer_Run_AcceptsMultilineJSON(t *testing.T) {
+	s := newTestServer(t)
+	// Pretty-printed request spanning multiple lines.
+	multiline := "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"initialize\",\n  \"params\": {\n    \"protocolVersion\": \"2024-11-05\"\n  }\n}\n"
+	out := &bytes.Buffer{}
+	if err := s.Run(context.Background(), strings.NewReader(multiline), out); err != nil {
+		t.Fatalf("Run returned error on multiline JSON: %v", err)
+	}
+	line := strings.TrimRight(out.String(), "\n")
+	if line == "" {
+		t.Fatal("expected response, got empty stdout")
+	}
+	// Response must itself be a single compact line (no embedded newlines).
+	if strings.Contains(line, "\n") {
+		t.Fatalf("response contains embedded newline (not compact): %q", line)
+	}
+	var msg rpcMessage
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nraw: %s", err, line)
+	}
+	if msg.Error != nil {
+		t.Fatalf("initialize returned error: %+v", msg.Error)
 	}
 }
 
@@ -183,6 +214,153 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	}
 }
 
+func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
+	s := newTestServer(t)
+	mutations := map[string]bool{
+		"inbox.capture":              true,
+		"work_items.create":          true,
+		"work_items.spawn_child":     true,
+		"work_items.append_event":    true,
+		"work_items.update_metadata": true,
+		"work_items.transition":      true,
+	}
+	for _, tool := range s.tools {
+		required := schemaRequiredSet(tool.InputSchema)
+		props, _ := tool.InputSchema["properties"].(map[string]any)
+		_, hasProperty := props["idempotency_key"]
+		if mutations[tool.Name] {
+			if !required["idempotency_key"] || !hasProperty {
+				t.Fatalf("mutation tool %s does not require idempotency_key: schema=%v", tool.Name, tool.InputSchema)
+			}
+			continue
+		}
+		if required["idempotency_key"] || hasProperty {
+			t.Fatalf("read tool %s should not expose idempotency_key: schema=%v", tool.Name, tool.InputSchema)
+		}
+	}
+}
+
+func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
+	root := uuid.New()
+	s := newTestServer(t)
+	s.actor = domain.Token{
+		ID:     uuid.New(),
+		Source: domain.SourceAgent,
+		Name:   "scoped-worker",
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeWorkItemsWrite,
+			access.ScopeFeedReadAssigned,
+			"work_items.tree:" + root.String(),
+		},
+	}
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if resp.Error != nil {
+		t.Fatalf("tools/list returned error: %+v", resp.Error)
+	}
+	var result struct {
+		Tools []toolDescriptor `json:"tools"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tools/list: %v", err)
+	}
+	got := toolNameSet(result.Tools)
+	for _, want := range []string{
+		"feed.read",
+		"work_items.list",
+		"work_items.get",
+		"work_items.spawn_child",
+		"work_items.append_event",
+		"work_items.update_metadata",
+		"work_items.transition",
+	} {
+		if !got[want] {
+			t.Errorf("missing scoped worker tool %q; got %v", want, toolNames(result.Tools))
+		}
+	}
+	for _, hidden := range []string{
+		"inbox.capture",
+		"deterministic_errors.list",
+		"deterministic_errors.get",
+		"work_items.create",
+	} {
+		if got[hidden] {
+			t.Errorf("scoped worker should not see %q; got %v", hidden, toolNames(result.Tools))
+		}
+	}
+}
+
+func TestServer_CallMutationTool_RequiresIdempotencyKey(t *testing.T) {
+	s := newTestServer(t)
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"nope"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("expected transport success, got error %+v", resp.Error)
+	}
+	result := decodeToolResult(t, resp)
+	if !result.IsError {
+		t.Fatalf("expected isError=true, got %+v", result)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "idempotency_key_required") {
+		t.Fatalf("expected idempotency_key_required, got %+v", result.Content)
+	}
+}
+
+func TestServer_CallMutationTool_RequiresIdempotencyExecutor(t *testing.T) {
+	s := newTestServer(t)
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"nope","idempotency_key":"idem-1"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("expected transport success, got error %+v", resp.Error)
+	}
+	result := decodeToolResult(t, resp)
+	if !result.IsError {
+		t.Fatalf("expected isError=true from missing idempotency executor, got %+v", result)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "idempotency executor not configured") {
+		t.Fatalf("expected idempotency executor guard, got %+v", result.Content)
+	}
+}
+
+func TestServer_MutationIdempotencyContextCanonicalizesArguments(t *testing.T) {
+	s := newTestServer(t)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceAgent}
+	tool := s.toolsByName["work_items.create"]
+
+	ctx1, stripped1, err := mcpCallContext(context.Background(), actor, tool, json.RawMessage(`{"idempotency_key":"idem-1","title":"same","body":"body"}`))
+	if err != nil {
+		t.Fatalf("mcpCallContext first: %v", err)
+	}
+	ctx2, stripped2, err := mcpCallContext(context.Background(), actor, tool, json.RawMessage(`{"body":"body","title":"same","idempotency_key":"idem-1"}`))
+	if err != nil {
+		t.Fatalf("mcpCallContext second: %v", err)
+	}
+	id1, ok := idempotency.SubjectID(ctx1, "work_item")
+	if !ok {
+		t.Fatal("first context did not contain idempotency request")
+	}
+	id2, ok := idempotency.SubjectID(ctx2, "work_item")
+	if !ok {
+		t.Fatal("second context did not contain idempotency request")
+	}
+	if id1 != id2 {
+		t.Fatalf("same logical MCP mutation derived different subject ids: %s vs %s", id1, id2)
+	}
+	if strings.Contains(string(stripped1), "idempotency_key") || strings.Contains(string(stripped2), "idempotency_key") {
+		t.Fatalf("stripped arguments still contain idempotency_key: %s / %s", stripped1, stripped2)
+	}
+
+	ctx3, _, err := mcpCallContext(context.Background(), actor, tool, json.RawMessage(`{"idempotency_key":"idem-1","title":"different","body":"body"}`))
+	if err != nil {
+		t.Fatalf("mcpCallContext third: %v", err)
+	}
+	id3, ok := idempotency.SubjectID(ctx3, "work_item")
+	if !ok {
+		t.Fatal("third context did not contain idempotency request")
+	}
+	if id3 == id1 {
+		t.Fatalf("different logical MCP mutation reused subject id %s", id3)
+	}
+}
+
 func TestServer_CallTool_AcceptsCursorAlias(t *testing.T) {
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"feed_read","arguments":{}}}`)
@@ -203,6 +381,40 @@ func TestServer_CallTool_AcceptsCursorAlias(t *testing.T) {
 	}
 	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "feed service not configured") {
 		t.Errorf("alias did not route to feed.read handler: %+v", result.Content)
+	}
+}
+
+func TestServer_CallTool_DeniesHiddenScopedToolBeforeHandler(t *testing.T) {
+	root := uuid.New()
+	s := newTestServer(t)
+	s.actor = domain.Token{
+		ID:     uuid.New(),
+		Source: domain.SourceAgent,
+		Name:   "scoped-worker",
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeWorkItemsWrite,
+			"work_items.tree:" + root.String(),
+		},
+	}
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"should not happen"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("expected transport success, got error %+v", resp.Error)
+	}
+	var result struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tool result: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected isError=true, got %+v", result)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "insufficient_scope") {
+		t.Fatalf("expected insufficient_scope denial before handler, got %+v", result.Content)
 	}
 }
 
@@ -332,10 +544,51 @@ func TestAsTransportError_PassesThroughRPCError(t *testing.T) {
 	}
 }
 
+type decodedToolResult struct {
+	IsError bool `json:"isError"`
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func decodeToolResult(t *testing.T, resp rpcMessage) decodedToolResult {
+	t.Helper()
+	var result decodedToolResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tool result: %v", err)
+	}
+	return result
+}
+
+func schemaRequiredSet(schema map[string]any) map[string]bool {
+	out := map[string]bool{}
+	switch required := schema["required"].(type) {
+	case []string:
+		for _, field := range required {
+			out[field] = true
+		}
+	case []any:
+		for _, raw := range required {
+			if field, ok := raw.(string); ok {
+				out[field] = true
+			}
+		}
+	}
+	return out
+}
+
 func toolNames(tools []toolDescriptor) []string {
 	out := make([]string, len(tools))
 	for i, t := range tools {
 		out[i] = t.Name
+	}
+	return out
+}
+
+func toolNameSet(tools []toolDescriptor) map[string]bool {
+	out := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		out[tool.Name] = true
 	}
 	return out
 }

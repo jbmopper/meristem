@@ -3,6 +3,7 @@ package app
 
 import (
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
@@ -23,6 +24,7 @@ func NewProjectionRegistry() *projections.Registry {
 	inbox.RegisterProjectors(registry)
 	workitems.RegisterProjectors(registry)
 	signals.RegisterProjectors(registry)
+	convergence.RegisterProjectors(registry)
 	return registry
 }
 

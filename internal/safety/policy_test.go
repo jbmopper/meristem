@@ -47,6 +47,24 @@ func TestValidateRejectsTerminalBudget(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsZeroPatience(t *testing.T) {
+	p := DefaultPolicy()
+	p.PatienceBudgets[domain.WorkItemCaptured] = 0
+
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected zero patience to fail validation")
+	}
+}
+
+func TestValidateRejectsNegativePatience(t *testing.T) {
+	p := DefaultPolicy()
+	p.PatienceBudgets[domain.WorkItemRunning] = -time.Hour
+
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected negative patience to fail validation")
+	}
+}
+
 func TestFingerprintIsStable(t *testing.T) {
 	p := DefaultPolicy()
 	a, err := p.Fingerprint()

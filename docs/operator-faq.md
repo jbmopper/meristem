@@ -19,8 +19,12 @@ No web UI in v0. The surfaces are:
 - **CLI**: `meristem tokens|seed|rebuild|migrate|api|mcp|healthcheck`.
 - **HTTP REST**: the `/v1/...` endpoints (see `internal/api/server.go`
   for the full list).
+- **MCP over HTTP**: `POST /mcp` on `meristem api` for the read-only
+  Streamable HTTP MCP slice. It uses bearer auth per request and currently
+  returns `405` for `GET /mcp` until server-initiated SSE is implemented.
 - **MCP over stdio**: for Cursor, Claude Code, or any agent that speaks
-  MCP. Each agent gets its own token row.
+  MCP. This remains the full write-capable compatibility transport. Each
+  agent gets its own token row.
 - **Go SDK**: a tiny client at `pkg/meristem` for `POST /v1/signals`.
 
 Day-to-day the "UI" is `curl | jq`, an iPhone Shortcut you'd build, your

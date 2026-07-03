@@ -17,6 +17,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/storage"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 const (
@@ -204,6 +205,184 @@ func TestScanOnceReBreachesAfterStateRotation(t *testing.T) {
 	}
 }
 
+func TestScanOnceConvergenceAcceptsAndPersistsVerdict(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-convergence-accept")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "convergence accept",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"tests_green"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+	if err := service.AppendEvent(ctx, item.ID, "checklist.item:tests_green", map[string]any{
+		"pass": true,
+		"raw":  "unit suite passed",
+	}, systemTok.Token); err != nil {
+		t.Fatalf("append checklist signal: %v", err)
+	}
+
+	w, err := New(pool, writer, DefaultBudgets(), &systemTok.Token.ID, func() time.Time {
+		return time.Date(2026, 6, 6, 0, 0, 0, 0, time.UTC)
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.ConvergenceCandidatesScanned != 1 {
+		t.Fatalf("candidates = %d, want 1", result.ConvergenceCandidatesScanned)
+	}
+	if result.ConvergenceVerdictsRecorded != 1 {
+		t.Fatalf("verdicts recorded = %d, want 1", result.ConvergenceVerdictsRecorded)
+	}
+	if result.ConvergenceAccepts != 1 {
+		t.Fatalf("accepts = %d, want 1", result.ConvergenceAccepts)
+	}
+	got, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if got.State != domain.WorkItemDone {
+		t.Fatalf("state = %q, want done", got.State)
+	}
+	if countVerdictsForWorkItem(t, ctx, pool, item.ID) != 1 {
+		t.Fatal("expected one convergence_verdicts projection row")
+	}
+}
+
+func TestScanOnceConvergenceSkipsUnchangedRejectedInputs(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-convergence-stale")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "convergence stale reject",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"missing_check"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	w, err := New(pool, writer, DefaultBudgets(), &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	first, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce first: %v", err)
+	}
+	if first.ConvergenceVerdictsRecorded != 1 || first.ConvergenceRetries != 1 {
+		t.Fatalf("first result = %+v, want one recorded retry", first)
+	}
+
+	second, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce second: %v", err)
+	}
+	if second.ConvergenceVerdictsRecorded != 0 {
+		t.Fatalf("second verdicts recorded = %d, want 0", second.ConvergenceVerdictsRecorded)
+	}
+	if second.ConvergenceStaleInputsSkipped != 1 {
+		t.Fatalf("stale skips = %d, want 1", second.ConvergenceStaleInputsSkipped)
+	}
+	if countVerdictsForWorkItem(t, ctx, pool, item.ID) != 1 {
+		t.Fatal("unchanged rejected inputs should not create a second verdict row")
+	}
+	got, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if got.State != domain.WorkItemRunning {
+		t.Fatalf("state = %q, want running", got.State)
+	}
+}
+
+func TestScanOnceConvergenceBlocksAfterFreshFailedAttempts(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-convergence-exhaust")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "convergence exhausted reject",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"tests_green"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	w, err := New(pool, writer, DefaultBudgets(), &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for attempt := 1; attempt <= defaultConvergenceMaxAttempts; attempt++ {
+		if err := service.AppendEvent(ctx, item.ID, "checklist.item:tests_green", map[string]any{
+			"pass": false,
+			"raw":  "attempt " + string(rune('0'+attempt)),
+		}, systemTok.Token); err != nil {
+			t.Fatalf("append failing signal %d: %v", attempt, err)
+		}
+		result, err := w.ScanOnce(ctx)
+		if err != nil {
+			t.Fatalf("ScanOnce attempt %d: %v", attempt, err)
+		}
+		if result.ConvergenceVerdictsRecorded != 1 {
+			t.Fatalf("attempt %d verdicts recorded = %d, want 1", attempt, result.ConvergenceVerdictsRecorded)
+		}
+	}
+
+	got, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if got.State != domain.WorkItemBlocked {
+		t.Fatalf("state = %q, want blocked", got.State)
+	}
+	if got.HumanReviewStatus != domain.HumanReviewBlocked {
+		t.Fatalf("human review status = %q, want blocked", got.HumanReviewStatus)
+	}
+	if countVerdictsForWorkItem(t, ctx, pool, item.ID) != defaultConvergenceMaxAttempts {
+		t.Fatalf("expected %d verdict rows", defaultConvergenceMaxAttempts)
+	}
+}
+
 // seedWorkItemAt appends one work_item.created event with a deterministic
 // id and then back-dates the projected updated_at column so the dwell time
 // the worker sees is exactly what the test wants. Direct UPDATE of the
@@ -286,6 +465,15 @@ func countEventsForSubject(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM events WHERE subject_id = $1 AND kind = $2`, id, kind).Scan(&n); err != nil {
 		t.Fatalf("count events subject=%s kind=%s: %v", id, kind, err)
+	}
+	return n
+}
+
+func countVerdictsForWorkItem(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM convergence_verdicts WHERE work_item_id = $1`, id).Scan(&n); err != nil {
+		t.Fatalf("count convergence_verdicts for %s: %v", id, err)
 	}
 	return n
 }

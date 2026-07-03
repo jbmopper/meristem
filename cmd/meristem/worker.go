@@ -1,13 +1,13 @@
 // `meristem worker --once` runs a single bounded-patience scan: it reads
 // every non-terminal work_item, compares dwell time against the per-state
-// budget, and appends one patience.breached event per observed breach.
+// budget, appends one patience.breached event per observed breach, and runs
+// checklist convergence for running work_items with suggested checks.
 //
 // The intent of this slice is to land the kernel and the on-the-wire
 // signal: by adding the worker subcommand and the patience.breached event
-// kind, the running system can now *observe* its own bounded-patience
-// invariant violations, which is the prerequisite for any acting on them.
-// The acting (escalation, retry, forced fail) and the daemon loop are
-// next slices.
+// kind, the running system can now observe bounded-patience invariant
+// violations and reconcile checklist-declared convergence. The daemon loop is
+// a subsequent slice.
 //
 // Authentication mirrors `meristem seed v1`: MERISTEM_TOKEN must be a
 // system-source token. The events the worker writes attribute to "system"
@@ -102,9 +102,25 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		slog.Int("scanned", result.Scanned),
 		slog.Int("breaches_emitted", result.BreachesEmitted),
 		slog.Int("breaches_already_recorded", result.BreachesAlreadyRecorded),
+		slog.Int("convergence_candidates", result.ConvergenceCandidatesScanned),
+		slog.Int("convergence_verdicts_recorded", result.ConvergenceVerdictsRecorded),
+		slog.Int("convergence_verdicts_already_recorded", result.ConvergenceVerdictsAlreadyRecorded),
+		slog.Int("convergence_stale_inputs_skipped", result.ConvergenceStaleInputsSkipped),
+		slog.Int("convergence_accepts", result.ConvergenceAccepts),
+		slog.Int("convergence_retries", result.ConvergenceRetries),
+		slog.Int("convergence_escalations", result.ConvergenceEscalations),
 	)
-	fmt.Fprintf(os.Stdout, "worker --once: scanned=%d emitted=%d already_recorded=%d\n",
-		result.Scanned, result.BreachesEmitted, result.BreachesAlreadyRecorded)
+	fmt.Fprintf(os.Stdout, "worker --once: scanned=%d emitted=%d already_recorded=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d\n",
+		result.Scanned,
+		result.BreachesEmitted,
+		result.BreachesAlreadyRecorded,
+		result.ConvergenceCandidatesScanned,
+		result.ConvergenceVerdictsRecorded+result.ConvergenceVerdictsAlreadyRecorded,
+		result.ConvergenceStaleInputsSkipped,
+		result.ConvergenceAccepts,
+		result.ConvergenceRetries,
+		result.ConvergenceEscalations,
+	)
 	return nil
 }
 
@@ -148,9 +164,10 @@ func workerUsage(w io.Writer) {
   MERISTEM_TOKEN=mrs_<system> meristem worker --once [--budget=DURATION]
 
 Runs a single bounded-patience scan. Reads every non-terminal work_item,
-compares dwell time to the per-state budget, and appends one
-patience.breached event per observed breach. Idempotent: re-running with
-the same observations is a no-op on the wire.
+compares dwell time to the per-state budget, appends one patience.breached
+event per observed breach, and runs checklist convergence for running
+work_items with suggested_convergence_checks. Idempotent: re-running with
+the same observations does not consume a new convergence attempt.
 
   --budget=DURATION   override the per-state defaults with one uniform
                       budget applied to every non-terminal state. Intended

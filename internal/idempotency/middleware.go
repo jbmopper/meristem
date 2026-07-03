@@ -20,6 +20,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 const headerName = "Idempotency-Key"
@@ -56,6 +57,107 @@ func NewMiddleware(pool *pgxpool.Pool, writer *events.Writer) *Middleware {
 	return &Middleware{pool: pool, writer: writer}
 }
 
+// ExecuteInput describes one non-HTTP mutation guarded by the same durable
+// idempotency store as POST middleware. Run must return a JSON response body
+// for successful execution; semantic tool/API errors that should be replayed
+// should be encoded in that body and returned with a nil error.
+type ExecuteInput struct {
+	Token       domain.Token
+	Scope       string
+	Key         string
+	RequestHash []byte
+	Run         func(context.Context) (status int, body []byte, err error)
+}
+
+// ExecuteResult is the canonical recorded response for an idempotent mutation.
+type ExecuteResult struct {
+	Status   int
+	Body     []byte
+	Replayed bool
+}
+
+// Execute runs a non-HTTP mutation under the same durable idempotency contract
+// as Wrap: fast cache lookup, advisory-lock serialization, same-key /
+// different-body conflict, context injection for stable subject ids, and
+// idempotency.recorded persistence.
+func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResult, error) {
+	if m == nil || m.pool == nil || m.writer == nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency executor not configured")
+	}
+	if in.Token.ID == uuid.Nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency token is required")
+	}
+	if in.Scope == "" {
+		return ExecuteResult{}, fmt.Errorf("idempotency scope is required")
+	}
+	if in.Key == "" {
+		return ExecuteResult{}, fmt.Errorf("idempotency key is required")
+	}
+	if len(in.RequestHash) == 0 {
+		return ExecuteResult{}, fmt.Errorf("idempotency request hash is required")
+	}
+	if in.Run == nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency run function is required")
+	}
+
+	cached, err := m.lookup(ctx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+	if err != nil {
+		return ExecuteResult{}, idempotencyLookupError(err)
+	}
+	if cached.found {
+		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: true}, nil
+	}
+
+	release, err := m.acquireLock(ctx, in.Token.ID, in.Scope, in.Key)
+	if err != nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency lock failed: %w", err)
+	}
+	defer release()
+
+	cached, err = m.lookup(ctx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+	if err != nil {
+		return ExecuteResult{}, idempotencyLookupError(err)
+	}
+	if cached.found {
+		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: true}, nil
+	}
+
+	override := &recordedResponseOverride{}
+	callCtx := withRequest(ctx, Request{
+		TokenID:     in.Token.ID,
+		Scope:       in.Scope,
+		Key:         in.Key,
+		RequestHash: in.RequestHash,
+	})
+	callCtx = withRecordedResponseOverride(callCtx, override)
+	status, body, err := in.Run(callCtx)
+	if err != nil {
+		return ExecuteResult{}, err
+	}
+	if status == 0 {
+		status = http.StatusOK
+	}
+	// Mirror Wrap: a 5xx is an incomplete attempt, not a conclusion, and
+	// must not be pinned under the key for the cache TTL.
+	if status >= http.StatusInternalServerError {
+		return ExecuteResult{Status: status, Body: body}, nil
+	}
+	recordBody := body
+	if overridden, ok := recordedResponse(callCtx); ok {
+		recordBody = overridden
+	}
+	fresh, err := m.record(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, recordBody)
+	if err != nil {
+		return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
+	}
+
+	cached, err = m.lookup(callCtx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+	if err == nil && cached.found {
+		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: !fresh}, nil
+	}
+	return ExecuteResult{Status: status, Body: recordBody, Replayed: !fresh}, nil
+}
+
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -72,8 +174,18 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			writeError(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key header is required")
 			return
 		}
+		// The safety cap must bound this ReadAll, not just the handler's
+		// decoder: this middleware buffers the body before any handler
+		// runs, so an unbounded read here would let a caller occupy
+		// arbitrary memory regardless of downstream limits.
+		r.Body = http.MaxBytesReader(w, r.Body, safety.DefaultPolicy().MaxRequestBodyBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds resource safety limit")
+				return
+			}
 			writeError(w, http.StatusBadRequest, "invalid_request_body", "could not read request body")
 			return
 		}
@@ -126,17 +238,43 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 
 		rec := newRecorder()
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		r = r.WithContext(withRequest(r.Context(), Request{
+		override := &recordedResponseOverride{}
+		ctx := withRequest(r.Context(), Request{
 			TokenID:     tok.ID,
 			Scope:       scope,
 			Key:         key,
 			RequestHash: reqHash,
-		}))
+		})
+		ctx = withRecordedResponseOverride(ctx, override)
+		r = r.WithContext(ctx)
 		next.ServeHTTP(rec, r)
 
-		fresh, err := m.record(r.Context(), tok, scope, key, reqHash, rec.status, rec.body.Bytes())
+		// 5xx responses are never recorded: they mean "the attempt did
+		// not complete", and pinning one under the key would make every
+		// well-behaved retry (same key, same body) replay the failure
+		// for the cache TTL instead of re-executing. The client's
+		// contract — retry with the same key until a non-5xx answer —
+		// only works if the cache stores conclusions, not accidents.
+		if rec.status >= http.StatusInternalServerError {
+			copyHeader(w.Header(), rec.header)
+			w.WriteHeader(rec.status)
+			_, _ = w.Write(rec.body.Bytes())
+			return
+		}
+
+		recordBody := rec.body.Bytes()
+		if overridden, ok := recordedResponse(r.Context()); ok {
+			recordBody = overridden
+		}
+		fresh, err := m.record(r.Context(), tok, scope, key, reqHash, rec.status, recordBody)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "idempotency_record_failed", "could not record idempotency key")
+			return
+		}
+		if override.body != nil && fresh {
+			copyHeader(w.Header(), rec.header)
+			w.WriteHeader(rec.status)
+			_, _ = w.Write(rec.body.Bytes())
 			return
 		}
 
@@ -178,6 +316,14 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		w.WriteHeader(rec.status)
 		_, _ = w.Write(rec.body.Bytes())
 	})
+}
+
+func idempotencyLookupError(err error) error {
+	var conflict conflictError
+	if errors.As(err, &conflict) {
+		return fmt.Errorf("idempotency_key_conflict: idempotency key reused with a different request body")
+	}
+	return fmt.Errorf("idempotency lookup failed: %w", err)
 }
 
 // writeLookupError reports whether the lookup error has been turned

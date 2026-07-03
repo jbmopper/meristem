@@ -192,11 +192,12 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, in UpdateMet
 		return domain.WorkItem{}, err
 	}
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind:  domain.SubjectWorkItem,
-		SubjectID:    id,
-		Kind:         domain.EventWorkItemMetadataUpdated,
-		Source:       sourceForActor(in.Actor),
-		ActorTokenID: &in.Actor.ID,
+		SubjectKind:   domain.SubjectWorkItem,
+		SubjectID:     id,
+		Kind:          domain.EventWorkItemMetadataUpdated,
+		Source:        sourceForActor(in.Actor),
+		ActorTokenID:  &in.Actor.ID,
+		Discriminator: eventDiscriminator(ctx),
 		Payload: map[string]any{
 			"from": map[string]any{
 				"suggested_convergence_checks": current.SuggestedConvergenceChecks,
@@ -233,11 +234,12 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 		return domain.WorkItem{}, fmt.Errorf("workitems: invalid transition from %s to %s", current.State, to)
 	}
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind:  domain.SubjectWorkItem,
-		SubjectID:    id,
-		Kind:         domain.EventWorkItemTransitioned,
-		Source:       sourceForActor(actor),
-		ActorTokenID: &actor.ID,
+		SubjectKind:   domain.SubjectWorkItem,
+		SubjectID:     id,
+		Kind:          domain.EventWorkItemTransitioned,
+		Source:        sourceForActor(actor),
+		ActorTokenID:  &actor.ID,
+		Discriminator: eventDiscriminator(ctx),
 		Payload: map[string]any{
 			"from":   current.State,
 			"to":     to,
@@ -265,11 +267,12 @@ func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind strin
 		return err
 	}
 	_, _, err = s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind:  domain.SubjectWorkItem,
-		SubjectID:    id,
-		Kind:         domain.EventWorkItemEventAppended,
-		Source:       sourceForActor(actor),
-		ActorTokenID: &actor.ID,
+		SubjectKind:   domain.SubjectWorkItem,
+		SubjectID:     id,
+		Kind:          domain.EventWorkItemEventAppended,
+		Source:        sourceForActor(actor),
+		ActorTokenID:  &actor.ID,
+		Discriminator: eventDiscriminator(ctx),
 		Payload: map[string]any{
 			"inner_kind": innerKind,
 			"inner":      payload,
@@ -345,6 +348,17 @@ func normalizeHumanReviewStatus(status domain.HumanReviewStatus) (domain.HumanRe
 		return "", fmt.Errorf("workitems: invalid human_review_status %q", status)
 	}
 	return status, nil
+}
+
+// eventDiscriminator distinguishes distinct logical actions whose event
+// payloads can legitimately repeat (transition cycles, duplicate progress
+// payloads, metadata toggles). Under the idempotency contract it is the
+// caller's (token, scope, key) identity: stable across retries, distinct
+// across actions. Callers outside that contract (seed, internal system
+// writes) get payload-only identity, matching pre-discriminator behavior.
+func eventDiscriminator(ctx context.Context) string {
+	disc, _ := idempotency.EventDiscriminator(ctx)
+	return disc
 }
 
 func newSubjectID(ctx context.Context, label string) uuid.UUID {

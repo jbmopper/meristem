@@ -1,7 +1,8 @@
 // Package worker drives the bounded-patience invariant: every non-terminal
-// work_item must either reach a terminal state or have its lengthening
-// dwell time recorded as a fact in the event log. v0 left this as a manual
-// concern; the worker is the v1 substrate that closes it.
+// work_item must either reach a terminal state, have its lengthening dwell
+// time recorded as a fact in the event log, or be reconciled through a declared
+// convergence pattern. v0 left this as a manual concern; the worker is the v1
+// substrate that closes it.
 //
 // Scope of this slice:
 //
@@ -9,8 +10,10 @@
 //   - Per-state patience budgets (Budgets), with sane defaults from
 //     DefaultBudgets so callers can run without configuration.
 //   - One patience.breached event per (work_item, state-epoch) breach
-//     observed. The event is record-only; subsequent slices add the
-//     escalation, retry, and forced-fail policies that consume it.
+//     observed.
+//   - A narrow convergence pass for running work_items whose
+//     suggested_convergence_checks declare the all-pass checklist pattern.
+//     The worker records a convergence verdict before any lifecycle action.
 //
 // Out of scope (next slices):
 //
@@ -163,6 +166,29 @@ type Result struct {
 	// `meristem worker --once` output can see "the scan saw N breaches; M
 	// were new this run."
 	BreachesAlreadyRecorded int
+
+	// ConvergenceCandidatesScanned is the count of running work_items
+	// with suggested convergence checks and therefore a chance to advance
+	// through the convergence loop in this pass.
+	ConvergenceCandidatesScanned int
+	// ConvergenceVerdictsRecorded is the number of fresh convergence verdict
+	// events appended this pass.
+	ConvergenceVerdictsRecorded int
+	// ConvergenceVerdictsAlreadyRecorded is the number of convergence verdicts
+	// observed but already present in the event log.
+	ConvergenceVerdictsAlreadyRecorded int
+	// ConvergenceStaleInputsSkipped is how many candidates had the same signal
+	// digest as the latest rejected verdict and were left running instead of
+	// consuming another attempt over stale inputs.
+	ConvergenceStaleInputsSkipped int
+	// ConvergenceAccepts is how many candidates reached accept and moved to done.
+	ConvergenceAccepts int
+	// ConvergenceRetries is how many candidates were rejected but kept within
+	// budget for another attempt.
+	ConvergenceRetries int
+	// ConvergenceEscalations is how many candidates exhausted budget or
+	// escalated directly and were moved out of the running loop.
+	ConvergenceEscalations int
 }
 
 // Worker scans the work_items projection for breaches and emits events.
@@ -202,59 +228,69 @@ func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid
 	return &Worker{pool: pool, writer: writer, budgets: budgets, actor: actor, clock: clock}, nil
 }
 
-// ScanOnce runs one breach pass: read every non-terminal work_item with a
-// budget once, evaluate each against EvaluateBreaches, and emit one
-// patience.breached event per observed breach. Each emit lands in its own
+// ScanOnce runs one breach pass and one convergence pass. The breach pass reads
+// every non-terminal work_item with a budget once, evaluates each against
+// EvaluateBreaches, and emits one patience.breached event per observed breach.
+// The convergence pass reads running work_items with declared checklist checks,
+// records convergence.verdict_recorded, and only then transitions or escalates
+// according to the convergence budget. Each emitted fact lands in its own
 // transaction so a per-row failure does not abort the whole pass.
-//
-// ScanOnce never transitions work_items; that is a separate concern owned
-// by future slices. The breach event is the record; the transition (or
-// retry, or escalation) is downstream.
 func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	now := w.clock().UTC()
-
+	out := Result{}
 	states := w.budgets.states()
-	if len(states) == 0 {
-		return Result{}, nil
-	}
-
-	rows, err := w.pool.Query(ctx, `
-		SELECT id, state, updated_at
-		FROM work_items
-		WHERE state = ANY($1::text[])
-		ORDER BY updated_at ASC
-	`, states)
-	if err != nil {
-		return Result{}, fmt.Errorf("worker: query work_items: %w", err)
-	}
-	var candidates []Candidate
-	for rows.Next() {
-		var c Candidate
-		var st string
-		if err := rows.Scan(&c.ID, &st, &c.UpdatedAt); err != nil {
-			rows.Close()
-			return Result{}, fmt.Errorf("worker: scan work_items row: %w", err)
-		}
-		c.State = domain.WorkItemState(st)
-		candidates = append(candidates, c)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return Result{}, fmt.Errorf("worker: iterate work_items: %w", err)
-	}
-
-	out := Result{Scanned: len(candidates)}
-	for _, breach := range EvaluateBreaches(now, candidates, w.budgets) {
-		fresh, err := w.emitBreach(ctx, breach)
+	if len(states) > 0 {
+		rows, err := w.pool.Query(ctx, `
+			SELECT id, state, updated_at
+			FROM work_items
+			WHERE state = ANY($1::text[])
+			ORDER BY updated_at ASC
+		`, states)
 		if err != nil {
-			return out, fmt.Errorf("worker: emit breach for %s: %w", breach.Candidate.ID, err)
+			return Result{}, fmt.Errorf("worker: query work_items: %w", err)
 		}
-		if fresh {
-			out.BreachesEmitted++
-		} else {
-			out.BreachesAlreadyRecorded++
+		var candidates []Candidate
+		for rows.Next() {
+			var c Candidate
+			var st string
+			if err := rows.Scan(&c.ID, &st, &c.UpdatedAt); err != nil {
+				rows.Close()
+				return Result{}, fmt.Errorf("worker: scan work_items row: %w", err)
+			}
+			c.State = domain.WorkItemState(st)
+			candidates = append(candidates, c)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return Result{}, fmt.Errorf("worker: iterate work_items: %w", err)
+		}
+
+		out.Scanned = len(candidates)
+		for _, breach := range EvaluateBreaches(now, candidates, w.budgets) {
+			fresh, err := w.emitBreach(ctx, breach)
+			if err != nil {
+				return out, fmt.Errorf("worker: emit breach for %s: %w", breach.Candidate.ID, err)
+			}
+			if fresh {
+				out.BreachesEmitted++
+			} else {
+				out.BreachesAlreadyRecorded++
+			}
 		}
 	}
+
+	convergenceResult, err := w.scanConvergence(ctx)
+	if err != nil {
+		return out, fmt.Errorf("worker: convergence pass: %w", err)
+	}
+	out.ConvergenceCandidatesScanned = convergenceResult.ConvergenceCandidatesScanned
+	out.ConvergenceVerdictsRecorded = convergenceResult.ConvergenceVerdictsRecorded
+	out.ConvergenceVerdictsAlreadyRecorded = convergenceResult.ConvergenceVerdictsAlreadyRecorded
+	out.ConvergenceStaleInputsSkipped = convergenceResult.ConvergenceStaleInputsSkipped
+	out.ConvergenceAccepts = convergenceResult.ConvergenceAccepts
+	out.ConvergenceRetries = convergenceResult.ConvergenceRetries
+	out.ConvergenceEscalations = convergenceResult.ConvergenceEscalations
+
 	return out, nil
 }
 

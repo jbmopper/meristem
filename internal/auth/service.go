@@ -44,6 +44,14 @@ type CreateTokenInput struct {
 	Actor   *domain.Token
 }
 
+type CreateDelegatedTokenInput struct {
+	ID     uuid.UUID
+	Name   string
+	Scopes []string
+	Source domain.Source
+	Actor  domain.Token
+}
+
 type CreateTokenResult struct {
 	Token  domain.Token
 	Secret string
@@ -61,16 +69,7 @@ func (s *Service) CreateToken(ctx context.Context, in CreateTokenInput) (CreateT
 			return CreateTokenResult{}, ErrRootRequired
 		}
 	}
-	tokenSource, err := normalizeTokenSource(in)
-	if err != nil {
-		return CreateTokenResult{}, err
-	}
 	eventSource := sourceForToken(in.Actor)
-	secret, hash, err := NewSecret()
-	if err != nil {
-		return CreateTokenResult{}, err
-	}
-	tokenID := uuid.New()
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -105,23 +104,12 @@ func (s *Service) CreateToken(ctx context.Context, in CreateTokenInput) (CreateT
 		}
 	}
 
-	var actorID *uuid.UUID
-	if in.Actor != nil {
-		actorID = &in.Actor.ID
-	}
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind:  domain.SubjectToken,
-		SubjectID:    tokenID,
-		Kind:         domain.EventTokenCreated,
-		Source:       eventSource,
-		ActorTokenID: actorID,
-		Payload: map[string]any{
-			"name":    in.Name,
-			"hash":    base64.StdEncoding.EncodeToString(hash),
-			"is_root": in.IsRoot,
-			"scopes":  in.Scopes,
-			"source":  tokenSource,
-		},
+	result, err := s.appendTokenCreated(ctx, tx, appendTokenInput{
+		Name:   in.Name,
+		IsRoot: in.IsRoot,
+		Scopes: in.Scopes,
+		Source: in.Source,
+		Actor:  in.Actor,
 	})
 	if err != nil {
 		return CreateTokenResult{}, err
@@ -130,11 +118,40 @@ func (s *Service) CreateToken(ctx context.Context, in CreateTokenInput) (CreateT
 		return CreateTokenResult{}, err
 	}
 
-	tok, err := s.Get(ctx, tokenID)
-	if err != nil {
-		return CreateTokenResult{}, err
+	return result, nil
+}
+
+// CreateDelegatedToken appends token.created inside a caller-owned
+// transaction after a deterministic grant reducer has approved the request.
+// It intentionally does not widen CreateToken's root-only semantics.
+func (s *Service) CreateDelegatedToken(ctx context.Context, tx pgx.Tx, in CreateDelegatedTokenInput) (CreateTokenResult, error) {
+	if in.Actor.ID == uuid.Nil {
+		return CreateTokenResult{}, fmt.Errorf("auth: delegated token actor is required")
 	}
-	return CreateTokenResult{Token: tok, Secret: secret}, nil
+	if in.Actor.RevokedAt != nil {
+		return CreateTokenResult{}, fmt.Errorf("auth: delegated token actor is revoked")
+	}
+	if in.Actor.IsRoot {
+		return CreateTokenResult{}, fmt.Errorf("auth: root token cannot use delegated subactor issuance")
+	}
+	if in.Actor.Source != domain.SourceAgent {
+		return CreateTokenResult{}, fmt.Errorf("auth: delegated token actor must be source=%q", domain.SourceAgent)
+	}
+	source := in.Source
+	if source == "" {
+		source = domain.SourceAgent
+	}
+	if source != domain.SourceAgent {
+		return CreateTokenResult{}, fmt.Errorf("auth: delegated token source must be %q", domain.SourceAgent)
+	}
+	return s.appendTokenCreated(ctx, tx, appendTokenInput{
+		Name:   in.Name,
+		IsRoot: false,
+		Scopes: in.Scopes,
+		Source: source,
+		Actor:  &in.Actor,
+		ID:     in.ID,
+	})
 }
 
 func normalizeTokenSource(in CreateTokenInput) (domain.Source, error) {
@@ -149,6 +166,62 @@ func normalizeTokenSource(in CreateTokenInput) (domain.Source, error) {
 		return "", fmt.Errorf("auth: root tokens must use source=%q, got %q", domain.SourceHuman, tokenSource)
 	}
 	return tokenSource, nil
+}
+
+type appendTokenInput struct {
+	ID     uuid.UUID
+	Name   string
+	IsRoot bool
+	Scopes []string
+	Source domain.Source
+	Actor  *domain.Token
+}
+
+func (s *Service) appendTokenCreated(ctx context.Context, tx pgx.Tx, in appendTokenInput) (CreateTokenResult, error) {
+	if in.Name == "" {
+		return CreateTokenResult{}, fmt.Errorf("auth: token name is required")
+	}
+	tokenSource, err := normalizeTokenSource(CreateTokenInput{
+		IsRoot: in.IsRoot,
+		Source: in.Source,
+	})
+	if err != nil {
+		return CreateTokenResult{}, err
+	}
+	secret, hash, err := NewSecret()
+	if err != nil {
+		return CreateTokenResult{}, err
+	}
+	tokenID := in.ID
+	if tokenID == uuid.Nil {
+		tokenID = uuid.New()
+	}
+	var actorID *uuid.UUID
+	if in.Actor != nil {
+		actorID = &in.Actor.ID
+	}
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectToken,
+		SubjectID:    tokenID,
+		Kind:         domain.EventTokenCreated,
+		Source:       sourceForToken(in.Actor),
+		ActorTokenID: actorID,
+		Payload: map[string]any{
+			"name":    in.Name,
+			"hash":    base64.StdEncoding.EncodeToString(hash),
+			"is_root": in.IsRoot,
+			"scopes":  in.Scopes,
+			"source":  tokenSource,
+		},
+	})
+	if err != nil {
+		return CreateTokenResult{}, err
+	}
+	tok, err := scanToken(ctx, tx, tokenID)
+	if err != nil {
+		return CreateTokenResult{}, err
+	}
+	return CreateTokenResult{Token: tok, Secret: secret}, nil
 }
 
 func (s *Service) Revoke(ctx context.Context, id uuid.UUID, actor domain.Token) error {
@@ -175,6 +248,62 @@ func (s *Service) Revoke(ctx context.Context, id uuid.UUID, actor domain.Token) 
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// RevokeAllNonRoot appends one token.revoked event for each active non-root
+// token. The root actor remains active so the owner can recover after panic
+// revocation by minting fresh client tokens.
+func (s *Service) RevokeAllNonRoot(ctx context.Context, actor domain.Token) ([]uuid.UUID, error) {
+	if !actor.IsRoot || actor.RevokedAt != nil {
+		return nil, ErrRootRequired
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT id
+		FROM tokens
+		WHERE NOT is_root
+		  AND revoked_at IS NULL
+		ORDER BY created_at, id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+			SubjectKind:  domain.SubjectToken,
+			SubjectID:    id,
+			Kind:         domain.EventTokenRevoked,
+			Source:       sourceForToken(&actor),
+			ActorTokenID: &actor.ID,
+			Payload:      map[string]any{"reason": "panic_revoke"},
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (s *Service) Authenticate(ctx context.Context, secret string) (domain.Token, error) {

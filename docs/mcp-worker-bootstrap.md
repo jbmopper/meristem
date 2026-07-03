@@ -42,8 +42,9 @@ At handoff or finish:
 
 MCP tool names:
 - Canonical clients expose: feed.read, work_items.get, work_items.list, work_items.append_event, work_items.update_metadata, work_items.spawn_child, work_items.transition, work_items.create, inbox.capture.
-- Cursor may expose underscore aliases instead: feed_read, work_items_get, work_items_list, work_items_append_event, work_items_update_metadata, work_items_spawn_child, work_items_transition, work_items_create, inbox_capture.
+- Some MCP hosts expose underscore aliases instead: feed_read, work_items_get, work_items_list, work_items_append_event, work_items_update_metadata, work_items_spawn_child, work_items_transition, work_items_create, inbox_capture.
 - Use whichever spelling the MCP client advertises; they route to the same meristem operations.
+- Every mutating MCP call must include an `idempotency_key` argument. Use a stable, task-local key such as `[WORK_ITEM_ID]:worker.started` or `[WORK_ITEM_ID]:spawn:<short-child-purpose>` and reuse it only for the same tool arguments.
 ```
 
 ## Minimal operator fill-in
@@ -57,15 +58,9 @@ Allowed areas: <paths or modules>.
 Out of scope: Secrets, unrelated refactors, external writes without approval.
 ```
 
-Cursor CLI workers can get a filled version of this packet from live meristem
-state:
-
-```bash
-go run ./cmd/meristem provider cursor-cli scaffold \
-  --work-item <uuid> \
-  --scope 'Implement one narrow change.' \
-  --allowed-area internal/example
-```
+Live-worker environments should treat this as the source of truth. This branch does
+not ship a dedicated handoff launcher; populate the packet fields from your
+target workflow and operator context instead.
 
 ## Notes for operators
 

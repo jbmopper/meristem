@@ -20,6 +20,11 @@ const (
 	EventDeterministicErrorReported = "deterministic_error.reported"
 	EventDeterministicErrorMasked   = "deterministic_error.masked"
 	EventDeterministicErrorUnmasked = "deterministic_error.unmasked"
+	EventEscalationRequested        = "escalation.requested"
+	EventSubactorGrantRequested     = "subactor_grant.requested"
+	EventSubactorGrantGranted       = "subactor_grant.granted"
+	EventSubactorGrantDenied        = "subactor_grant.denied"
+	EventSubactorGrantEscalated     = "subactor_grant.escalated"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
 	// that state. Recorded by `meristem worker --once` (see internal/worker).
@@ -35,6 +40,16 @@ const (
 	// re-entering would breach again on the next budget elapse, which is a
 	// new (state, payload) and therefore a new event.
 	EventPatienceBreached = "patience.breached"
+	// EventConvergenceVerdictRecorded records the output of a deterministic
+	// convergence reduction (see internal/convergence and docs/spec.md →
+	// "Convergence Patterns"). The payload carries the reducer identity and
+	// version, the digest of the signals it reduced over, the raw signals,
+	// and the resulting verdict (accept | reject | escalate). Per principle
+	// #12 the *reduction* is what advances the lifecycle, and it must be
+	// replayable from the log alone — so a stricter future reducer can
+	// re-fold the same signals. The persistence slice projects this kind into
+	// convergence_verdicts; worker emission remains separately gated.
+	EventConvergenceVerdictRecorded = "convergence.verdict_recorded"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -58,7 +73,13 @@ var AllEventKinds = []string{
 	EventDeterministicErrorReported,
 	EventDeterministicErrorMasked,
 	EventDeterministicErrorUnmasked,
+	EventEscalationRequested,
+	EventSubactorGrantRequested,
+	EventSubactorGrantGranted,
+	EventSubactorGrantDenied,
+	EventSubactorGrantEscalated,
 	EventPatienceBreached,
+	EventConvergenceVerdictRecorded,
 }
 
 const (
@@ -68,7 +89,44 @@ const (
 	SubjectWorkItem           = "work_item"
 	SubjectSignal             = "signal"
 	SubjectDeterministicError = "deterministic_error"
+	SubjectEscalation         = "escalation"
+	SubjectSubactorGrant      = "subactor_grant"
+	// SubjectConvergence is the subject kind for a convergence verdict. The
+	// subject_id is the work_item being reduced; the attempt lives in the event
+	// payload, so (work_item_id, attempt, payload) remains the deterministic
+	// event identity while the projection can index verdicts by work_item_id.
+	SubjectConvergence = "convergence"
 )
+
+// Verdict is the disposition produced by a deterministic convergence
+// reduction. It is the only thing that advances a work_item's lifecycle
+// out of a convergence loop: the candidate (a model's patch, plan, or
+// answer) never advances directly — the reducer's verdict does. See
+// docs/spec.md → "Convergence Patterns" and internal/convergence.
+type Verdict string
+
+const (
+	// VerdictAccept means the reducer judged the candidate converged: the
+	// work_item may advance toward done.
+	VerdictAccept Verdict = "accept"
+	// VerdictReject means the candidate failed the reduction. Whether this
+	// is terminal or triggers a retry is the patience budget's call, not
+	// the verdict's.
+	VerdictReject Verdict = "reject"
+	// VerdictEscalate means the reducer could not dispose on the signals it
+	// had (a tie, missing signals, an exhausted budget). The escalation rule
+	// — fail, request approval, or hand to a human — decides what happens.
+	VerdictEscalate Verdict = "escalate"
+)
+
+// Valid reports whether v is one of the three accepted verdicts.
+func (v Verdict) Valid() bool {
+	switch v {
+	case VerdictAccept, VerdictReject, VerdictEscalate:
+		return true
+	}
+	return false
+}
 
 // Token is the active client credential projection. The raw bearer secret is
 // never stored; Hash is the SHA-256 digest of the random token string.

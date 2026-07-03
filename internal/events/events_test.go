@@ -50,6 +50,50 @@ func TestDeterministicIDDiffersByPayload(t *testing.T) {
 	}
 }
 
+func TestDeterministicIDDiffersByDiscriminator(t *testing.T) {
+	payload := map[string]any{"from": "running", "to": "blocked", "reason": "same"}
+	first := mkSpec(payload)
+	first.Discriminator = "token|MCP:work_items.transition|key-1"
+	second := mkSpec(payload)
+	second.Discriminator = "token|MCP:work_items.transition|key-2"
+	a, err := DeterministicID(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := DeterministicID(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Errorf("distinct actions with identical payloads must not collapse: got %s twice", a)
+	}
+	retry, err := DeterministicID(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry != a {
+		t.Errorf("retry of the same action must collapse: %s vs %s", retry, a)
+	}
+}
+
+func TestDeterministicIDEmptyDiscriminatorMatchesLegacyIdentity(t *testing.T) {
+	payload := map[string]any{"title": "x"}
+	plain := mkSpec(payload)
+	a, err := DeterministicID(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit := mkSpec(payload)
+	explicit.Discriminator = ""
+	b, err := DeterministicID(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("empty discriminator must hash identically to pre-discriminator specs: %s vs %s", a, b)
+	}
+}
+
 func TestDeterministicIDDiffersByKind(t *testing.T) {
 	base := mkSpec(map[string]any{"x": 1})
 	a, _ := DeterministicID(base)

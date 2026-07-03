@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/safety"
 )
 
@@ -49,6 +51,7 @@ func TestDecodeJSONRequestRejectsOversizedBody(t *testing.T) {
 func TestHandleFeedRejectsWaitAboveSafetyLimit(t *testing.T) {
 	s := New(nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v1/feed?wait=61s", nil)
+	req = req.WithContext(auth.WithToken(req.Context(), domain.Token{IsRoot: true, Source: domain.SourceHuman}))
 	rec := httptest.NewRecorder()
 
 	s.handleFeed(rec, req)
