@@ -148,41 +148,84 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 	}
 	// Gather every work_item id any feed item's visibility can hinge on,
 	// resolve tree membership for all of them in one query, then filter in
-	// memory. Relation events are visible when either endpoint is.
+	// memory. An item is visible when any of its anchors is in-tree;
+	// anchor-less items are dropped from tree-scoped feeds.
+	anchorsByIndex := make([][]uuid.UUID, len(items))
 	var candidates []uuid.UUID
-	for _, item := range items {
-		if item.SubjectKind != domain.SubjectWorkItem {
-			continue
-		}
-		if item.Kind == domain.EventWorkItemRelationAdded {
-			candidates = append(candidates, relationIDs(item)...)
-			continue
-		}
-		candidates = append(candidates, item.SubjectID)
+	for i, item := range items {
+		anchorsByIndex[i] = feedItemAnchors(item)
+		candidates = append(candidates, anchorsByIndex[i]...)
 	}
 	visible, err := s.workItemsInAnyTree(ctx, actor, candidates)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]feed.Item, 0, len(items))
-	for _, item := range items {
-		if item.SubjectKind != domain.SubjectWorkItem {
-			continue
-		}
-		if item.Kind == domain.EventWorkItemRelationAdded {
-			for _, id := range relationIDs(item) {
-				if visible[id] {
-					out = append(out, item)
-					break
-				}
+	for i, item := range items {
+		for _, id := range anchorsByIndex[i] {
+			if visible[id] {
+				out = append(out, item)
+				break
 			}
-			continue
-		}
-		if visible[item.SubjectID] {
-			out = append(out, item)
 		}
 	}
 	return out, nil
+}
+
+// feedItemAnchors maps one feed item to the work_item ids its tree-scoped
+// visibility hinges on. This is the single place that knows how each
+// feed-included event kind relates to a work_item; feed.IncludedKinds and
+// this mapping must stay in sync (enforced by TestFeedItemAnchorsCoverIncludedKinds).
+//
+//   - work_item-subject events anchor on their subject; relation events
+//     anchor on both endpoints so either side's tree sees the edge.
+//   - convergence.verdict_recorded uses subject_kind "convergence" but its
+//     subject_id *is* the judged work_item (see convergence.VerdictEventSpec).
+//   - message.captured, signal.received, escalation.requested, and the
+//     subactor_grant.* family anchor through the work_item_id (and, where
+//     present, human_work_item_id) fields their writers put in the payload.
+//   - deterministic_error.* events return no anchor on purpose: they are
+//     governed by logs.* scopes, and a tree-scoped feed deliberately drops
+//     them rather than inventing a work_item relationship they do not have.
+func feedItemAnchors(item feed.Item) []uuid.UUID {
+	switch item.Kind {
+	case domain.EventWorkItemRelationAdded:
+		return relationIDs(item)
+	case domain.EventConvergenceVerdictRecorded:
+		return []uuid.UUID{item.SubjectID}
+	case domain.EventMessageCaptured,
+		domain.EventSignalReceived,
+		domain.EventEscalationRequested,
+		domain.EventSubactorGrantRequested,
+		domain.EventSubactorGrantGranted,
+		domain.EventSubactorGrantDenied,
+		domain.EventSubactorGrantEscalated:
+		return payloadWorkItemIDs(item)
+	default:
+		if item.SubjectKind == domain.SubjectWorkItem {
+			return []uuid.UUID{item.SubjectID}
+		}
+		return nil
+	}
+}
+
+// payloadWorkItemIDs extracts the work_item anchors that event writers
+// record in payloads whose subject is not a work_item.
+func payloadWorkItemIDs(item feed.Item) []uuid.UUID {
+	var payload struct {
+		WorkItemID      uuid.UUID `json:"work_item_id"`
+		HumanWorkItemID uuid.UUID `json:"human_work_item_id"`
+	}
+	var ids []uuid.UUID
+	if err := json.Unmarshal(item.Payload, &payload); err == nil {
+		if payload.WorkItemID != uuid.Nil {
+			ids = append(ids, payload.WorkItemID)
+		}
+		if payload.HumanWorkItemID != uuid.Nil {
+			ids = append(ids, payload.HumanWorkItemID)
+		}
+	}
+	return ids
 }
 
 func (s *Service) FilterFeedPage(ctx context.Context, actor domain.Token, page feed.Page) (feed.Page, error) {

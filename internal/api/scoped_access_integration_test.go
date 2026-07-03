@@ -16,6 +16,8 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/escalations"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -108,6 +110,34 @@ func TestRESTScopedWorkItemTreeAccessIntegration(t *testing.T) {
 		t.Fatalf("scoped feed omitted in-tree child A1: %s", feedRec.Body.String())
 	}
 
+	// Non-work_item-subject events reach the tree-scoped feed through
+	// their work_item anchors: an in-tree convergence verdict (subject
+	// kind "convergence") and escalation (subject kind "escalation") are
+	// visible, while their out-of-tree twins stay redacted.
+	appendTestVerdict(t, ctx, pool, writer, a1.ID, "in-tree verdict marker")
+	appendTestVerdict(t, ctx, pool, writer, b.ID, "out-of-tree verdict marker")
+	escSvc := escalations.NewService(pool, writer)
+	if _, err := escSvc.Request(ctx, escalations.RequestInput{WorkItemID: a1.ID, Reason: "in-tree-escalation-marker", Summary: "scoped feed regression", Actor: root}); err != nil {
+		t.Fatalf("escalate a1: %v", err)
+	}
+	if _, err := escSvc.Request(ctx, escalations.RequestInput{WorkItemID: b.ID, Reason: "out-of-tree-escalation-marker", Summary: "scoped feed regression", Actor: root}); err != nil {
+		t.Fatalf("escalate b: %v", err)
+	}
+	feedRec = doREST(t, server.Handler(), http.MethodGet, "/v1/feed?limit=50", scopedResult.Secret, "", nil)
+	if feedRec.Code != http.StatusOK {
+		t.Fatalf("scoped feed after anchored events: %d %s", feedRec.Code, feedRec.Body.String())
+	}
+	for _, want := range []string{"in-tree verdict marker", "in-tree-escalation-marker"} {
+		if !strings.Contains(feedRec.Body.String(), want) {
+			t.Fatalf("scoped feed omitted in-tree anchored event %q: %s", want, feedRec.Body.String())
+		}
+	}
+	for _, leak := range []string{"out-of-tree verdict marker", "out-of-tree-escalation-marker"} {
+		if strings.Contains(feedRec.Body.String(), leak) {
+			t.Fatalf("scoped feed leaked out-of-tree anchored event %q: %s", leak, feedRec.Body.String())
+		}
+	}
+
 	beforeDenied := totalEventCount(t, pool)
 	deniedTransition := doREST(t, server.Handler(), http.MethodPost, "/v1/work-items/"+b.ID.String()+"/transition", scopedResult.Secret, "deny-b", []byte(`{"to":"running","reason":"should not happen"}`))
 	assertRESTStatus(t, deniedTransition, http.StatusNotFound)
@@ -149,6 +179,38 @@ func TestRESTScopedWorkItemTreeAccessIntegration(t *testing.T) {
 	logRec := doREST(t, server.Handler(), http.MethodGet, "/v1/deterministic-errors", scopedResult.Secret, "", nil)
 	assertRESTStatus(t, logRec, http.StatusForbidden)
 	assertErrorCode(t, logRec, "insufficient_scope")
+}
+
+// appendTestVerdict records a minimal valid convergence.verdict_recorded
+// event for workItemID, with marker as the verdict reason so feed assertions
+// can distinguish in-tree from out-of-tree verdicts.
+func appendTestVerdict(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, workItemID uuid.UUID, marker string) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin verdict tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectConvergence,
+		SubjectID:   workItemID,
+		Kind:        domain.EventConvergenceVerdictRecorded,
+		Source:      domain.SourceSystem,
+		Payload: map[string]any{
+			"reducer_identity": "majority_vote",
+			"reducer_version":  1,
+			"attempt":          1,
+			"inputs_digest":    strings.Repeat("a", 64),
+			"reducer_config":   map[string]any{"signal_kind": "grader.pass"},
+			"verdict":          map[string]any{"disposition": "accept", "reason": marker},
+			"signals":          []any{map[string]any{"kind": "grader.pass", "pass": true}},
+		},
+	}); err != nil {
+		t.Fatalf("append verdict for %s: %v", workItemID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit verdict tx: %v", err)
+	}
 }
 
 func doREST(t *testing.T, handler http.Handler, method, path, token, key string, body []byte) *httptest.ResponseRecorder {
