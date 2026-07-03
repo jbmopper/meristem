@@ -1,13 +1,7 @@
 {
   "mcpServers": {
     "meristem": {
-      "command": "go",
-      "args": ["run", "./cmd/meristem", "mcp"],
-      "cwd": "/absolute/path/to/meristem",
-      "env": {
-        "MERISTEM_DATABASE_URL": "postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable",
-        "MERISTEM_TOKEN": "mrs_PASTE_AGENT_TOKEN_FROM_meristem_tokens_create"
-      }
+      "command": "/absolute/path/to/meristem/scripts/cursor-mcp-command.sh"
     }
   }
 }
