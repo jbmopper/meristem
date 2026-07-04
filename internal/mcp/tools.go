@@ -16,6 +16,7 @@ import (
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/policyprofile"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -43,6 +44,10 @@ func (s *Server) buildTools() []Tool {
 		s.toolInboxCapture(),
 		s.toolFeedRead(),
 		s.toolBacklogReadiness(),
+		s.toolRegistryList(),
+		s.toolRegistryGet(),
+		s.toolRegistryDefineTropism(),
+		s.toolRegistryDefineCultivar(),
 		s.toolDeterministicErrorsList(),
 		s.toolDeterministicErrorsGet(),
 		s.toolWorkItemsList(),
@@ -97,6 +102,124 @@ func (s *Server) toolBacklogReadiness() Tool {
 				Limit: limit,
 				AsOf:  time.Now().UTC(),
 			}), nil
+		},
+	}
+}
+
+func (s *Server) toolRegistryList() Tool {
+	return Tool{
+		Name:        "registry.list",
+		Description: "List current tropism and cultivar registry entries.",
+		InputSchema: schemaObject(nil, nil),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Registry == nil {
+				return nil, errors.New("registry service not configured")
+			}
+			var args struct{}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			return s.deps.Registry.List(ctx)
+		},
+	}
+}
+
+func (s *Server) toolRegistryGet() Tool {
+	return Tool{
+		Name:        "registry.get",
+		Description: "Fetch one registry entry by kind (tropism or cultivar) and name.",
+		InputSchema: schemaObject([]string{"kind", "name"}, map[string]any{
+			"kind": schemaString("Entry kind: tropism or cultivar."),
+			"name": schemaString("Registry name."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Registry == nil {
+				return nil, errors.New("registry service not configured")
+			}
+			var args struct {
+				Kind string `json:"kind"`
+				Name string `json:"name"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			switch args.Kind {
+			case "tropism":
+				item, err := s.deps.Registry.GetTropism(ctx, args.Name)
+				if err != nil {
+					return nil, registryToolErr(err)
+				}
+				return map[string]any{"tropism": item}, nil
+			case "cultivar":
+				item, err := s.deps.Registry.GetCultivar(ctx, args.Name)
+				if err != nil {
+					return nil, registryToolErr(err)
+				}
+				return map[string]any{"cultivar": item}, nil
+			default:
+				return nil, replayableToolErr(fmt.Errorf("invalid_kind: kind must be tropism or cultivar"))
+			}
+		},
+	}
+}
+
+func (s *Server) toolRegistryDefineTropism() Tool {
+	return Tool{
+		Name:        "registry.define_tropism",
+		Description: "Define the next version of a tropism registry entry.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"name", "version", "reducer"}, map[string]any{
+			"name":        schemaString("Tropism name ([a-z0-9][a-z0-9-]*)."),
+			"version":     schemaInt("Version. Starts at 1; existing names require current+1."),
+			"reducer":     schemaAny("Reducer reference object: {identity, version}."),
+			"params":      schemaAny("Reducer-specific JSON object. Defaults to {}."),
+			"description": schemaString("Human-readable description."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Registry == nil {
+				return nil, errors.New("registry service not configured")
+			}
+			var args registry.DefineTropismInput
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			item, fresh, err := s.deps.Registry.DefineTropism(ctx, actor, args)
+			if err != nil {
+				return nil, registryToolErr(err)
+			}
+			return map[string]any{"tropism": item, "defined": fresh}, nil
+		},
+	}
+}
+
+func (s *Server) toolRegistryDefineCultivar() Tool {
+	return Tool{
+		Name:        "registry.define_cultivar",
+		Description: "Define the next version of a cultivar registry entry.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"name", "version", "tropism", "profile", "xylem", "phloem"}, map[string]any{
+			"name":        schemaString("Cultivar name ([a-z0-9][a-z0-9-]*)."),
+			"version":     schemaInt("Version. Starts at 1; existing non-rootstock names require current+1."),
+			"rootstock":   schemaBool("Whether this cultivar is immutable rootstock."),
+			"tropism":     schemaAny("Tropism reference object: {name, version}."),
+			"profile":     schemaAny("Worker profile object: {briefing, scopes_template}."),
+			"xylem":       schemaAny("Budget envelope object: {max_attempts, max_wall_seconds, max_depth}."),
+			"phloem":      schemaString("Projection/reference used for context flow."),
+			"description": schemaString("Human-readable description."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Registry == nil {
+				return nil, errors.New("registry service not configured")
+			}
+			var args registry.DefineCultivarInput
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			item, fresh, err := s.deps.Registry.DefineCultivar(ctx, actor, args)
+			if err != nil {
+				return nil, registryToolErr(err)
+			}
+			return map[string]any{"cultivar": item, "defined": fresh}, nil
 		},
 	}
 }
@@ -719,6 +842,22 @@ func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uu
 		return err
 	}
 	return nil
+}
+
+func registryToolErr(err error) error {
+	switch {
+	case errors.Is(err, registry.ErrInvalidName),
+		errors.Is(err, registry.ErrInvalidVersion),
+		errors.Is(err, registry.ErrInvalidPayload),
+		errors.Is(err, registry.ErrUnknownReducer),
+		errors.Is(err, registry.ErrUnknownTropism),
+		errors.Is(err, registry.ErrUnknownCultivar),
+		errors.Is(err, registry.ErrVersionConflict),
+		errors.Is(err, registry.ErrRootstockImmutable):
+		return replayableToolErr(err)
+	default:
+		return err
+	}
 }
 
 // workItemDTO is the JSON shape returned by tools. It mirrors the HTTP

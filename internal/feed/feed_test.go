@@ -40,6 +40,9 @@ func TestExpectedKindsAreClassified(t *testing.T) {
 		domain.EventSubactorGrantEscalated,
 		domain.EventPatienceBreached,
 		domain.EventConvergenceVerdictRecorded,
+		domain.EventPolicyProfileSwitched,
+		domain.EventTropismDefined,
+		domain.EventCultivarDefined,
 	}
 	for _, kind := range expectedIncluded {
 		if !contains(IncludedKinds, kind) {

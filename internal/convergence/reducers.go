@@ -276,6 +276,106 @@ func (c AllPassChecklist) Reduce(signals []Signal) (Verdict, error) {
 	}, nil
 }
 
+const checksProposalValidKind = "checks_proposal.valid"
+
+// ChecksProposal reduces deterministic validation signals for a proposed
+// convergence-check list. The full proposal validator lands with the scribe
+// slice; R2 needs the reducer identity to be real, versioned, and testable so
+// the rootstock registry cannot point at a phantom reducer.
+type ChecksProposal struct{}
+
+func (ChecksProposal) Identity() string { return "checks_proposal" }
+func (ChecksProposal) Version() int     { return 1 }
+
+func (ChecksProposal) Reduce(signals []Signal) (Verdict, error) {
+	var sawPass bool
+	var failures []string
+	for _, s := range signals {
+		if s.Kind != checksProposalValidKind || s.Pass == nil {
+			continue
+		}
+		if *s.Pass {
+			sawPass = true
+			continue
+		}
+		reason := strings.TrimSpace(s.Raw)
+		if reason == "" {
+			reason = "proposal validation failed"
+		}
+		failures = append(failures, reason)
+	}
+	if len(failures) > 0 {
+		sort.Strings(failures)
+		return Verdict{
+			Disposition: domain.VerdictReject,
+			Reason:      strings.Join(failures, "; "),
+		}, nil
+	}
+	if sawPass {
+		return Verdict{
+			Disposition: domain.VerdictAccept,
+			Reason:      "checks proposal validated",
+		}, nil
+	}
+	return Verdict{
+		Disposition: domain.VerdictEscalate,
+		Reason:      "no checks_proposal.valid signal",
+	}, nil
+}
+
+const humanAckDecisionKind = "human_ack.decision"
+
+// HumanAck follows the owner's boolean decision signal. It is intentionally
+// tiny: the approval/notification substrate owns gathering the human decision;
+// this reducer only folds the recorded signal.
+type HumanAck struct{}
+
+func (HumanAck) Identity() string { return "human_ack" }
+func (HumanAck) Version() int     { return 1 }
+
+func (HumanAck) Reduce(signals []Signal) (Verdict, error) {
+	for _, s := range signals {
+		if s.Kind != humanAckDecisionKind || s.Pass == nil {
+			continue
+		}
+		if *s.Pass {
+			return Verdict{
+				Disposition: domain.VerdictAccept,
+				Reason:      "human acknowledged",
+			}, nil
+		}
+		reason := strings.TrimSpace(s.Raw)
+		if reason == "" {
+			reason = "human denied acknowledgement"
+		}
+		return Verdict{
+			Disposition: domain.VerdictReject,
+			Reason:      reason,
+		}, nil
+	}
+	return Verdict{
+		Disposition: domain.VerdictEscalate,
+		Reason:      "no human_ack.decision signal",
+	}, nil
+}
+
+// KnownReducer reports whether the named reducer semantics are available to
+// the registry. This is the closed code set R2's open data registry may point
+// at; parameterized reducers like all_pass_checklist are still constructed by
+// callers with their event-sourced params.
+func KnownReducer(identity string, version int) bool {
+	switch identity {
+	case (AllPassChecklist{}).Identity():
+		return version == (AllPassChecklist{}).Version()
+	case (ChecksProposal{}).Identity():
+		return version == (ChecksProposal{}).Version()
+	case (HumanAck{}).Identity():
+		return version == (HumanAck{}).Version()
+	default:
+		return false
+	}
+}
+
 // DefaultRegistry returns a registry pre-loaded with the parameter-free
 // canonical reducers, so a worker has a working set without bespoke wiring.
 //
@@ -290,5 +390,7 @@ func DefaultRegistry() *Registry {
 	// These cannot error: identities are non-empty and distinct.
 	_ = reg.Register(MajorityVote{})
 	_ = reg.Register(Unanimous{})
+	_ = reg.Register(ChecksProposal{})
+	_ = reg.Register(HumanAck{})
 	return reg
 }

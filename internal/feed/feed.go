@@ -46,6 +46,8 @@ var IncludedKinds = []string{
 	domain.EventPatienceBreached,
 	domain.EventConvergenceVerdictRecorded,
 	domain.EventPolicyProfileSwitched,
+	domain.EventTropismDefined,
+	domain.EventCultivarDefined,
 }
 
 // ExcludedKinds enumerates the event kinds the system explicitly *does not*

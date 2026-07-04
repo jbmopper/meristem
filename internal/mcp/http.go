@@ -37,6 +37,8 @@ func ReadOnlyHTTPTools() map[string]bool {
 	return map[string]bool{
 		"backlog.readiness":         true,
 		"feed.read":                 true,
+		"registry.list":             true,
+		"registry.get":              true,
 		"work_items.list":           true,
 		"work_items.get":            true,
 		"deterministic_errors.list": true,

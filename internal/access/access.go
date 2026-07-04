@@ -30,6 +30,7 @@ const (
 	ScopeFeedReadAssigned    = "feed.read_assigned"
 	ScopeInboxCapture        = "inbox.capture"
 	ScopePolicyProfileSwitch = "policy_profile.switch"
+	ScopeRegistryWrite       = "registry.write"
 
 	scopeWorkItemsTreePrefix = "work_items.tree:"
 )
@@ -60,6 +61,15 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		}
 		return hasScope(actor, ScopePolicyProfileSwitch)
 	}
+	if canonicalTool == "registry.define_tropism" || canonicalTool == "registry.define_cultivar" {
+		if actor.IsRoot {
+			return false
+		}
+		if legacyUnscoped(actor) {
+			return true
+		}
+		return hasScope(actor, ScopeRegistryWrite)
+	}
 	if actor.IsRoot || legacyUnscoped(actor) {
 		return true
 	}
@@ -72,6 +82,8 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 	case "deterministic_errors.list", "deterministic_errors.get":
 		return hasAny(scopes, "logs.read", "logs.read_details", "logs.read_restricted", "logs.read_masked", "logs.read_all")
 	case "backlog.readiness":
+		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
+	case "registry.list", "registry.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.list", "work_items.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
@@ -202,6 +214,9 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 //     switches are system-wide owner posture, not tree content. Tree-scoped
 //     workers learn the active envelope from /readyz (or their launcher);
 //     feed.read holders see switches on the unscoped feed.
+//   - tropism.defined and cultivar.defined are global registry writes, not
+//     tree content. Tree-scoped feeds drop them; registry.read-capable tools
+//     expose the current projection directly.
 //   - deterministic_error.* events return no anchor on purpose: they are
 //     governed by logs.* scopes, and a tree-scoped feed deliberately drops
 //     them rather than inventing a work_item relationship they do not have.
@@ -219,6 +234,9 @@ func feedItemAnchors(item feed.Item) []uuid.UUID {
 		domain.EventSubactorGrantDenied,
 		domain.EventSubactorGrantEscalated:
 		return payloadWorkItemIDs(item)
+	case domain.EventTropismDefined,
+		domain.EventCultivarDefined:
+		return nil
 	default:
 		if item.SubjectKind == domain.SubjectWorkItem {
 			return []uuid.UUID{item.SubjectID}

@@ -22,6 +22,7 @@ import (
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/policyprofile"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -48,6 +49,7 @@ type Deps struct {
 	DeterministicErrors *errorreporting.Service
 	Feed                *feed.Service
 	PolicyProfiles      *policyprofile.Service
+	Registry            *registry.Service
 	// MaxFeedWait caps feed.read watcher wait (mirrors GET /v1/feed). Zero
 	// falls back to safety.DefaultPolicy().MaxFeedWait in the tool.
 	MaxFeedWait time.Duration

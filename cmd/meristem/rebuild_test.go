@@ -60,16 +60,18 @@ func TestQuoteIdent(t *testing.T) {
 // before it silently turns into a "rebuild always passes" lie.
 func TestProjectionTables_Coverage(t *testing.T) {
 	want := map[string]bool{
-		"tokens":               true,
-		"work_items":           true,
-		"work_item_relations":  true,
-		"messages":             true,
-		"message_parts":        true,
-		"idempotency_keys":     true,
-		"signals":              true,
-		"deterministic_errors": true,
-		"convergence_verdicts": true,
+		"tokens":                true,
+		"work_items":            true,
+		"work_item_relations":   true,
+		"messages":              true,
+		"message_parts":         true,
+		"idempotency_keys":      true,
+		"signals":               true,
+		"deterministic_errors":  true,
+		"convergence_verdicts":  true,
 		"active_policy_profile": true,
+		"tropisms":              true,
+		"cultivars":             true,
 	}
 	if len(projectionTables) != len(want) {
 		t.Errorf("projectionTables length drift: have %d, expected %d", len(projectionTables), len(want))

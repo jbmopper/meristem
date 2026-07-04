@@ -29,6 +29,7 @@ import (
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/policyprofile"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/signals"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -69,6 +70,7 @@ type Server struct {
 	feed                  *feed.Service
 	mcpServer             *mcp.Server
 	policyProfiles        *policyprofile.Service
+	registry              *registry.Service
 	policy                safety.Policy
 }
 
@@ -103,6 +105,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.feed = feed.NewService(pool)
 		s.policyProfiles = policyprofile.NewService(pool, s.writer)
+		s.registry = registry.NewService(pool, s.writer)
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
@@ -112,6 +115,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 			DeterministicErrors: s.deterministicErrors,
 			Feed:                s.feed,
 			PolicyProfiles:      s.policyProfiles,
+			Registry:            s.registry,
 			MaxFeedWait:         s.policy.MaxFeedWait,
 		}, mcp.ServerInfo{Name: "meristem", Version: "dev"}, logger)
 	}
@@ -141,6 +145,11 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /v1/deterministic-errors", s.protected(http.HandlerFunc(s.handleListDeterministicErrors)))
 	s.mux.Handle("GET /v1/deterministic-errors/{id}", s.protected(http.HandlerFunc(s.handleGetDeterministicError)))
 	s.mux.Handle("GET /v1/backlog/readiness", s.protected(http.HandlerFunc(s.handleBacklogReadiness)))
+	s.mux.Handle("GET /v1/registry", s.protected(http.HandlerFunc(s.handleRegistryList)))
+	s.mux.Handle("GET /v1/registry/tropisms/{name}", s.protected(http.HandlerFunc(s.handleRegistryGetTropism)))
+	s.mux.Handle("POST /v1/registry/tropisms", s.commandWithAccess(s.canWriteRegistry("registry.define_tropism"), http.HandlerFunc(s.handleRegistryDefineTropism)))
+	s.mux.Handle("GET /v1/registry/cultivars/{name}", s.protected(http.HandlerFunc(s.handleRegistryGetCultivar)))
+	s.mux.Handle("POST /v1/registry/cultivars", s.commandWithAccess(s.canWriteRegistry("registry.define_cultivar"), http.HandlerFunc(s.handleRegistryDefineCultivar)))
 	s.mux.Handle("GET /v1/work-items", s.protected(http.HandlerFunc(s.handleListWorkItems)))
 	s.mux.Handle("POST /v1/work-items", s.commandWithAccess(s.canCreateWorkItem, http.HandlerFunc(s.handleCreateWorkItem)))
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))

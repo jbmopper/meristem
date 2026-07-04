@@ -54,6 +54,8 @@ var projectionTables = []string{
 	"deterministic_errors",
 	"convergence_verdicts",
 	"active_policy_profile",
+	"tropisms",
+	"cultivars",
 }
 
 func runRebuild(ctx context.Context, logger *slog.Logger, args []string) error {

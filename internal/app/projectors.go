@@ -10,6 +10,7 @@ import (
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projections"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/signals"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -18,16 +19,17 @@ import (
 // order. Feature packages own their projector code; the app package owns the
 // one place where the running system decides which projections are active.
 func NewProjectionRegistry() *projections.Registry {
-	registry := projections.NewRegistry()
-	auth.RegisterProjectors(registry)
-	errorreporting.RegisterProjectors(registry)
-	idempotency.RegisterProjectors(registry)
-	inbox.RegisterProjectors(registry)
-	workitems.RegisterProjectors(registry)
-	signals.RegisterProjectors(registry)
-	policyprofile.RegisterProjectors(registry)
-	convergence.RegisterProjectors(registry)
-	return registry
+	reg := projections.NewRegistry()
+	auth.RegisterProjectors(reg)
+	errorreporting.RegisterProjectors(reg)
+	idempotency.RegisterProjectors(reg)
+	inbox.RegisterProjectors(reg)
+	workitems.RegisterProjectors(reg)
+	signals.RegisterProjectors(reg)
+	policyprofile.RegisterProjectors(reg)
+	convergence.RegisterProjectors(reg)
+	registry.RegisterProjectors(reg)
+	return reg
 }
 
 // NewEventWriter returns an event writer backed by the full application

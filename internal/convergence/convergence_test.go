@@ -141,6 +141,62 @@ func TestAllPassChecklistFailureWins(t *testing.T) {
 	}
 }
 
+func TestSeededRegistryReducersRecordIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		reducer  Reducer
+		signals  []Signal
+		identity string
+		want     domain.Verdict
+	}{
+		{
+			name:     "checklist all",
+			reducer:  AllPassChecklist{Required: []string{"has_tests"}},
+			signals:  []Signal{{Kind: "checklist.item:has_tests", Pass: boolp(true)}},
+			identity: "all_pass_checklist",
+			want:     domain.VerdictAccept,
+		},
+		{
+			name:     "checks proposal",
+			reducer:  ChecksProposal{},
+			signals:  []Signal{{Kind: checksProposalValidKind, Pass: boolp(true)}},
+			identity: "checks_proposal",
+			want:     domain.VerdictAccept,
+		},
+		{
+			name:     "human ack",
+			reducer:  HumanAck{},
+			signals:  []Signal{{Kind: humanAckDecisionKind, Pass: boolp(true)}},
+			identity: "human_ack",
+			want:     domain.VerdictAccept,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			red, err := Run(tc.reducer, tc.signals, 1)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if red.ReducerIdentity != tc.identity || red.ReducerVersion != 1 {
+				t.Fatalf("reducer identity/version = %s@%d, want %s@1", red.ReducerIdentity, red.ReducerVersion, tc.identity)
+			}
+			if red.Verdict.Disposition != tc.want {
+				t.Fatalf("disposition = %q, want %q", red.Verdict.Disposition, tc.want)
+			}
+			payload := red.EventPayload()
+			if payload["reducer_identity"] != tc.identity || payload["reducer_version"] != 1 {
+				t.Fatalf("event payload did not preserve reducer identity: %#v", payload)
+			}
+			if !KnownReducer(tc.identity, 1) {
+				t.Fatalf("KnownReducer(%q, 1) = false", tc.identity)
+			}
+		})
+	}
+	if KnownReducer("judge_vote", 1) {
+		t.Fatal("reserved reducer judge_vote@1 must not be registered yet")
+	}
+}
+
 func TestRunPopulatesReductionAndDigestIsStable(t *testing.T) {
 	signals := []Signal{
 		{Kind: "grader.pass", Pass: boolp(true), Source: SignalSource{Model: "m", SampleID: "1"}},

@@ -57,6 +57,9 @@ const (
 	// the target profile's fingerprint so the audit answers "what envelope
 	// was active when" without recomputing.
 	EventPolicyProfileSwitched = "policy_profile.switched"
+
+	EventTropismDefined  = "tropism.defined"
+	EventCultivarDefined = "cultivar.defined"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -88,6 +91,8 @@ var AllEventKinds = []string{
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
 	EventPolicyProfileSwitched,
+	EventTropismDefined,
+	EventCultivarDefined,
 }
 
 const (
@@ -99,6 +104,8 @@ const (
 	SubjectDeterministicError = "deterministic_error"
 	SubjectEscalation         = "escalation"
 	SubjectSubactorGrant      = "subactor_grant"
+	SubjectTropism            = "tropism"
+	SubjectCultivar           = "cultivar"
 	// SubjectConvergence is the subject kind for a convergence verdict. The
 	// subject_id is the work_item being reduced; the attempt lives in the event
 	// payload, so (work_item_id, attempt, payload) remains the deterministic
