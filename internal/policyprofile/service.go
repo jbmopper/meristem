@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/domain"
@@ -63,6 +64,10 @@ func (s *Service) Active(ctx context.Context) (Active, error) {
 		name = stored
 	case errors.Is(err, pgx.ErrNoRows):
 		// fall through to steady
+	case isUndefinedTable(err):
+		// Pre-0014 databases have no projection table yet. Read paths fail
+		// closed to steady; switching still requires the migration because
+		// the projector must have somewhere to write.
 	default:
 		return Active{}, fmt.Errorf("policyprofile: read active profile: %w", err)
 	}
@@ -79,6 +84,11 @@ func (s *Service) Active(ctx context.Context) (Active, error) {
 		return Active{}, err
 	}
 	return Active{Name: name, Fingerprint: fp, Policy: policy}, nil
+}
+
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
 // SwitchInput describes one operator switch request.

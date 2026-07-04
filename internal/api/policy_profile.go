@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 )
@@ -23,6 +24,10 @@ func (s *Server) canSwitchPolicyProfile(w http.ResponseWriter, r *http.Request) 
 	}
 	if actor.IsRoot {
 		writeAPIError(w, http.StatusForbidden, "root_token_forbidden", "the root token only mints and revokes tokens; switch profiles with a non-root human token")
+		return false
+	}
+	if !access.ToolVisible(actor, "policy_profile.switch") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot switch policy profiles")
 		return false
 	}
 	return true

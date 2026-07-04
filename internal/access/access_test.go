@@ -29,6 +29,55 @@ func TestToolVisible_LegacyAndRootSeeExistingSurface(t *testing.T) {
 	}
 }
 
+func TestToolVisible_PolicyProfileSwitchRequiresHumanNonRootAndScope(t *testing.T) {
+	tests := []struct {
+		name  string
+		actor domain.Token
+		want  bool
+	}{
+		{
+			name:  "legacy_unscoped_human",
+			actor: domain.Token{ID: uuid.New(), Source: domain.SourceHuman},
+			want:  true,
+		},
+		{
+			name:  "root_human_denied",
+			actor: domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true},
+			want:  false,
+		},
+		{
+			name:  "agent_denied",
+			actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent},
+			want:  false,
+		},
+		{
+			name: "scoped_human_without_policy_scope_denied",
+			actor: domain.Token{
+				ID:     uuid.New(),
+				Source: domain.SourceHuman,
+				Scopes: []string{ScopeWorkItemsRead},
+			},
+			want: false,
+		},
+		{
+			name: "scoped_human_with_policy_scope_allowed",
+			actor: domain.Token{
+				ID:     uuid.New(),
+				Source: domain.SourceHuman,
+				Scopes: []string{ScopePolicyProfileSwitch},
+			},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ToolVisible(tc.actor, "policy_profile.switch"); got != tc.want {
+				t.Fatalf("ToolVisible(policy_profile.switch) = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 	root := uuid.New()
 	actor := domain.Token{

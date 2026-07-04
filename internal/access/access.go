@@ -21,14 +21,15 @@ import (
 )
 
 const (
-	ScopeWorkItemsRead     = "work_items.read"
-	ScopeWorkItemsReadAll  = "work_items.read_all"
-	ScopeWorkItemsWrite    = "work_items.write"
-	ScopeWorkItemsWriteAll = "work_items.write_all"
-	ScopeWorkItemsCreate   = "work_items.create"
-	ScopeFeedRead          = "feed.read"
-	ScopeFeedReadAssigned  = "feed.read_assigned"
-	ScopeInboxCapture      = "inbox.capture"
+	ScopeWorkItemsRead       = "work_items.read"
+	ScopeWorkItemsReadAll    = "work_items.read_all"
+	ScopeWorkItemsWrite      = "work_items.write"
+	ScopeWorkItemsWriteAll   = "work_items.write_all"
+	ScopeWorkItemsCreate     = "work_items.create"
+	ScopeFeedRead            = "feed.read"
+	ScopeFeedReadAssigned    = "feed.read_assigned"
+	ScopeInboxCapture        = "inbox.capture"
+	ScopePolicyProfileSwitch = "policy_profile.switch"
 
 	scopeWorkItemsTreePrefix = "work_items.tree:"
 )
@@ -51,7 +52,13 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 	if canonicalTool == "policy_profile.switch" {
 		// Evaluated before the root/legacy shortcut: the switch tool is
 		// human-and-non-root regardless of scope breadth.
-		return actor.Source == domain.SourceHuman && !actor.IsRoot
+		if actor.Source != domain.SourceHuman || actor.IsRoot {
+			return false
+		}
+		if legacyUnscoped(actor) {
+			return true
+		}
+		return hasScope(actor, ScopePolicyProfileSwitch)
 	}
 	if actor.IsRoot || legacyUnscoped(actor) {
 		return true

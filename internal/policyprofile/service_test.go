@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/safety"
@@ -62,5 +63,15 @@ func TestSubjectIDIsStable(t *testing.T) {
 	again := uuid.NewSHA1(uuid.NameSpaceURL, []byte("meristem|policy_profile|active"))
 	if SubjectID != again {
 		t.Fatalf("SubjectID must be deterministic: %s vs %s", SubjectID, again)
+	}
+}
+
+func TestIsUndefinedTable(t *testing.T) {
+	err := &pgconn.PgError{Code: "42P01"}
+	if !isUndefinedTable(err) {
+		t.Fatal("expected undefined-table pg error to be recognized")
+	}
+	if isUndefinedTable(errors.New("other")) {
+		t.Fatal("non-Postgres error should not be recognized as undefined table")
 	}
 }

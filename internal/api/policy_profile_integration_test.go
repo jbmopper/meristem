@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
@@ -53,6 +54,24 @@ func TestPolicyProfileSwitchIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent token: %v", err)
 	}
+	scopedHuman, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "profile-scoped-human",
+		Source: domain.SourceHuman,
+		Scopes: []string{access.ScopeWorkItemsRead},
+		Actor:  &root,
+	})
+	if err != nil {
+		t.Fatalf("create scoped human token: %v", err)
+	}
+	scopedOperator, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "profile-scoped-operator",
+		Source: domain.SourceHuman,
+		Scopes: []string{access.ScopePolicyProfileSwitch},
+		Actor:  &root,
+	})
+	if err != nil {
+		t.Fatalf("create scoped operator token: %v", err)
+	}
 
 	server := New(pool, nil)
 
@@ -81,6 +100,15 @@ func TestPolicyProfileSwitchIntegration(t *testing.T) {
 	assertErrorCode(t, rootDenied, "root_token_forbidden")
 	if after := totalEventCount(t, pool); after != before {
 		t.Fatalf("root-denied switch appended events: before=%d after=%d", before, after)
+	}
+
+	// Scoped human tokens fail closed unless explicitly granted the profile
+	// switch scope.
+	scopedDenied := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", scopedHuman.Secret, "profile-scoped-denied", []byte(`{"profile":"bring-up"}`))
+	assertRESTStatus(t, scopedDenied, http.StatusForbidden)
+	assertErrorCode(t, scopedDenied, "insufficient_scope")
+	if after := totalEventCount(t, pool); after != before {
+		t.Fatalf("scoped-denied switch appended events: before=%d after=%d", before, after)
 	}
 
 	// Operator switch to bring-up: attributed event + projection + readyz.
@@ -118,9 +146,10 @@ func TestPolicyProfileSwitchIntegration(t *testing.T) {
 	assertErrorCode(t, unknown, "invalid_policy_profile")
 
 	// Switch back: distinct action, second event, steady restored.
-	back := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", operator.Secret, "profile-switch-4", []byte(`{"profile":"steady"}`))
+	back := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", scopedOperator.Secret, "profile-switch-4", []byte(`{"profile":"steady"}`))
 	assertRESTStatus(t, back, http.StatusOK)
 	assertSwitchEventCount(t, pool, 2)
+	assertSwitchEventAttributed(t, pool, scopedOperator.Token.ID)
 	ready = doReadyz(t, server.Handler())
 	if ready["policy_profile"] != safety.ProfileSteady || ready["safety_policy"] != steadyFP {
 		t.Fatalf("switched-back readyz: want steady/%s, got %v", steadyFP, ready)

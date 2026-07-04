@@ -282,6 +282,7 @@ func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 		}
 	}
 	for _, hidden := range []string{
+		"policy_profile.switch",
 		"inbox.capture",
 		"deterministic_errors.list",
 		"deterministic_errors.get",
