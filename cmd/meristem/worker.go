@@ -1,7 +1,8 @@
 // `meristem worker --once` runs a single bounded-patience scan: it reads
-// every non-terminal work_item, compares dwell time against the per-state
-// budget, appends one patience.breached event per observed breach, and runs
-// checklist convergence for running work_items with suggested checks.
+// every non-terminal work_item, runs checklist convergence for running
+// work_items with suggested checks, compares remaining dwell time against the
+// per-state budget, appends one patience.breached event per observed breach,
+// and routes each breached state epoch to a human escalation.
 //
 // The intent of this slice is to land the kernel and the on-the-wire
 // signal: by adding the worker subcommand and the patience.breached event
@@ -102,6 +103,8 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		slog.Int("scanned", result.Scanned),
 		slog.Int("breaches_emitted", result.BreachesEmitted),
 		slog.Int("breaches_already_recorded", result.BreachesAlreadyRecorded),
+		slog.Int("patience_escalations_requested", result.PatienceEscalationsRequested),
+		slog.Int("patience_escalations_already_requested", result.PatienceEscalationsAlreadyRequested),
 		slog.Int("convergence_candidates", result.ConvergenceCandidatesScanned),
 		slog.Int("convergence_verdicts_recorded", result.ConvergenceVerdictsRecorded),
 		slog.Int("convergence_verdicts_already_recorded", result.ConvergenceVerdictsAlreadyRecorded),
@@ -110,10 +113,12 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		slog.Int("convergence_retries", result.ConvergenceRetries),
 		slog.Int("convergence_escalations", result.ConvergenceEscalations),
 	)
-	fmt.Fprintf(os.Stdout, "worker --once: scanned=%d emitted=%d already_recorded=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d\n",
+	fmt.Fprintf(os.Stdout, "worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d\n",
 		result.Scanned,
 		result.BreachesEmitted,
 		result.BreachesAlreadyRecorded,
+		result.PatienceEscalationsRequested,
+		result.PatienceEscalationsAlreadyRequested,
 		result.ConvergenceCandidatesScanned,
 		result.ConvergenceVerdictsRecorded+result.ConvergenceVerdictsAlreadyRecorded,
 		result.ConvergenceStaleInputsSkipped,
@@ -163,11 +168,12 @@ func workerUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
   MERISTEM_TOKEN=mrs_<system> meristem worker --once [--budget=DURATION]
 
-Runs a single bounded-patience scan. Reads every non-terminal work_item,
-compares dwell time to the per-state budget, appends one patience.breached
-event per observed breach, and runs checklist convergence for running
-work_items with suggested_convergence_checks. Idempotent: re-running with
-the same observations does not consume a new convergence attempt.
+Runs a single bounded-patience scan. Runs checklist convergence for running
+work_items with suggested_convergence_checks, then reads remaining
+non-terminal work_items, compares dwell time to the per-state budget, appends
+one patience.breached event per observed breach, and escalates breached state
+epochs to human attention. Idempotent: re-running with the same convergence
+signals does not consume a new convergence attempt.
 
   --budget=DURATION   override the per-state defaults with one uniform
                       budget applied to every non-terminal state. Intended

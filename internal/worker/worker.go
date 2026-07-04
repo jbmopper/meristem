@@ -1,7 +1,6 @@
 // Package worker drives the bounded-patience invariant: every non-terminal
-// work_item must either reach a terminal state, have its lengthening dwell
-// time recorded as a fact in the event log, or be reconciled through a declared
-// convergence pattern. v0 left this as a manual concern; the worker is the v1
+// work_item must either reach a terminal state or move onto a declared
+// escalation path. v0 left this as a manual concern; the worker is the v1
 // substrate that closes it.
 //
 // Scope of this slice:
@@ -10,7 +9,7 @@
 //   - Per-state patience budgets (Budgets), with sane defaults from
 //     DefaultBudgets so callers can run without configuration.
 //   - One patience.breached event per (work_item, state-epoch) breach
-//     observed.
+//     observed, followed by a deterministic human escalation for that epoch.
 //   - A narrow convergence pass for running work_items whose
 //     suggested_convergence_checks declare the all-pass checklist pattern.
 //     The worker records a convergence verdict before any lifecycle action.
@@ -40,6 +39,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/escalations"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/safety"
 )
@@ -149,9 +149,7 @@ func EvaluateBreaches(now time.Time, candidates []Candidate, budgets Budgets) []
 	return out
 }
 
-// Result is the outcome of a single ScanOnce call. The three counters are
-// disjoint by construction: a row is either skipped (no breach), freshly
-// emitted, or already on record.
+// Result is the outcome of a single ScanOnce call.
 type Result struct {
 	// Scanned is the count of non-terminal work_items inspected, including
 	// those that were not in breach.
@@ -166,6 +164,12 @@ type Result struct {
 	// `meristem worker --once` output can see "the scan saw N breaches; M
 	// were new this run."
 	BreachesAlreadyRecorded int
+	// PatienceEscalationsRequested is the count of fresh human escalations
+	// requested for breached state epochs.
+	PatienceEscalationsRequested int
+	// PatienceEscalationsAlreadyRequested is the count of breached state epochs
+	// whose deterministic escalation already existed.
+	PatienceEscalationsAlreadyRequested int
 
 	// ConvergenceCandidatesScanned is the count of running work_items
 	// with suggested convergence checks and therefore a chance to advance
@@ -178,8 +182,9 @@ type Result struct {
 	// observed but already present in the event log.
 	ConvergenceVerdictsAlreadyRecorded int
 	// ConvergenceStaleInputsSkipped is how many candidates had the same signal
-	// digest as the latest rejected verdict and were left running instead of
-	// consuming another attempt over stale inputs.
+	// digest as the latest rejected verdict and did not consume another
+	// convergence attempt over stale inputs. The later patience pass may still
+	// escalate the item if its state epoch is over budget.
 	ConvergenceStaleInputsSkipped int
 	// ConvergenceAccepts is how many candidates reached accept and moved to done.
 	ConvergenceAccepts int
@@ -191,7 +196,8 @@ type Result struct {
 	ConvergenceEscalations int
 }
 
-// Worker scans the work_items projection for breaches and emits events.
+// Worker scans the work_items projection for convergence opportunities and
+// patience breaches, then emits the events needed to move each item forward.
 //
 // Worker holds no state across calls; ScanOnce is safe to call concurrently
 // from multiple processes (each will independently observe the breach and
@@ -208,16 +214,17 @@ type Worker struct {
 }
 
 // New constructs a Worker. `actor` is the system-source token id to attach
-// to emitted events; nil is permitted and the events will record no
-// actor_token_id (the source field still attributes to "system"). A nil
-// `clock` defaults to time.Now; tests pass a fixed clock to make breach
-// observation deterministic.
+// to emitted events and mechanical escalations. A nil `clock` defaults to
+// time.Now; tests pass a fixed clock to make breach observation deterministic.
 func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid.UUID, clock func() time.Time) (*Worker, error) {
 	if pool == nil {
 		return nil, errors.New("worker: pool is required")
 	}
 	if writer == nil {
 		return nil, errors.New("worker: writer is required")
+	}
+	if actor == nil || *actor == uuid.Nil {
+		return nil, errors.New("worker: system actor token id is required")
 	}
 	if err := budgets.validate(); err != nil {
 		return nil, err
@@ -228,16 +235,30 @@ func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid
 	return &Worker{pool: pool, writer: writer, budgets: budgets, actor: actor, clock: clock}, nil
 }
 
-// ScanOnce runs one breach pass and one convergence pass. The breach pass reads
-// every non-terminal work_item with a budget once, evaluates each against
-// EvaluateBreaches, and emits one patience.breached event per observed breach.
-// The convergence pass reads running work_items with declared checklist checks,
-// records convergence.verdict_recorded, and only then transitions or escalates
-// according to the convergence budget. Each emitted fact lands in its own
-// transaction so a per-row failure does not abort the whole pass.
+// ScanOnce runs one convergence pass and one breach pass. The convergence pass
+// reads running work_items with declared checklist checks, records
+// convergence.verdict_recorded, and only then transitions or escalates according
+// to the convergence budget. The breach pass then reads every still
+// non-terminal work_item with a budget, emits one patience.breached event per
+// observed state epoch, and routes that epoch through the deterministic human
+// escalation path. Each emitted fact lands in its own transaction so a per-row
+// failure does not abort the whole pass.
 func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	now := w.clock().UTC()
 	out := Result{}
+
+	convergenceResult, err := w.scanConvergence(ctx)
+	if err != nil {
+		return out, fmt.Errorf("worker: convergence pass: %w", err)
+	}
+	out.ConvergenceCandidatesScanned = convergenceResult.ConvergenceCandidatesScanned
+	out.ConvergenceVerdictsRecorded = convergenceResult.ConvergenceVerdictsRecorded
+	out.ConvergenceVerdictsAlreadyRecorded = convergenceResult.ConvergenceVerdictsAlreadyRecorded
+	out.ConvergenceStaleInputsSkipped = convergenceResult.ConvergenceStaleInputsSkipped
+	out.ConvergenceAccepts = convergenceResult.ConvergenceAccepts
+	out.ConvergenceRetries = convergenceResult.ConvergenceRetries
+	out.ConvergenceEscalations = convergenceResult.ConvergenceEscalations
+
 	states := w.budgets.states()
 	if len(states) > 0 {
 		rows, err := w.pool.Query(ctx, `
@@ -276,20 +297,17 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 			} else {
 				out.BreachesAlreadyRecorded++
 			}
+			escalationFresh, err := w.escalateBreach(ctx, breach)
+			if err != nil {
+				return out, fmt.Errorf("worker: escalate breach for %s: %w", breach.Candidate.ID, err)
+			}
+			if escalationFresh {
+				out.PatienceEscalationsRequested++
+			} else {
+				out.PatienceEscalationsAlreadyRequested++
+			}
 		}
 	}
-
-	convergenceResult, err := w.scanConvergence(ctx)
-	if err != nil {
-		return out, fmt.Errorf("worker: convergence pass: %w", err)
-	}
-	out.ConvergenceCandidatesScanned = convergenceResult.ConvergenceCandidatesScanned
-	out.ConvergenceVerdictsRecorded = convergenceResult.ConvergenceVerdictsRecorded
-	out.ConvergenceVerdictsAlreadyRecorded = convergenceResult.ConvergenceVerdictsAlreadyRecorded
-	out.ConvergenceStaleInputsSkipped = convergenceResult.ConvergenceStaleInputsSkipped
-	out.ConvergenceAccepts = convergenceResult.ConvergenceAccepts
-	out.ConvergenceRetries = convergenceResult.ConvergenceRetries
-	out.ConvergenceEscalations = convergenceResult.ConvergenceEscalations
 
 	return out, nil
 }
@@ -346,4 +364,42 @@ func (w *Worker) emitBreach(ctx context.Context, b Breach) (bool, error) {
 		return false, err
 	}
 	return fresh, nil
+}
+
+// escalateBreach applies the default R3 timeout rule for a breached state
+// epoch: hand the item to the human operator by creating a durable escalation
+// and moving the original item to blocked. The reason and summary deliberately
+// exclude observed age, so re-scanning the same state epoch converges on the
+// same escalation id instead of creating chatter.
+func (w *Worker) escalateBreach(ctx context.Context, b Breach) (bool, error) {
+	actor := domain.Token{
+		ID:     *w.actor,
+		Source: domain.SourceSystem,
+	}
+	result, err := escalations.NewService(w.pool, w.writer).Request(ctx, escalations.RequestInput{
+		WorkItemID: b.Candidate.ID,
+		Reason:     patienceEscalationReason(b),
+		Summary:    patienceEscalationSummary(b),
+		Actor:      actor,
+	})
+	if err != nil {
+		return false, err
+	}
+	return result.Fresh, nil
+}
+
+func patienceEscalationReason(b Breach) string {
+	return fmt.Sprintf("patience budget breached: state=%s budget_seconds=%d state_entered_at_unix=%d",
+		b.Candidate.State,
+		int64(b.Budget.Seconds()),
+		b.Candidate.UpdatedAt.Unix(),
+	)
+}
+
+func patienceEscalationSummary(b Breach) string {
+	return fmt.Sprintf("Worker metronome observed state %s past its %s patience budget. State epoch: updated_at_unix=%d. Declared timeout rule: hand to human by blocking the item and creating this escalation.",
+		b.Candidate.State,
+		b.Budget,
+		b.Candidate.UpdatedAt.Unix(),
+	)
 }

@@ -215,10 +215,9 @@ are produced by projectors, not ad hoc migration DML.
 
 ### Slice B — worker integration (bounded patience) — implemented narrowly
 
-1. In `internal/worker`, after the existing `patience.breached` scan, the
-   worker now runs a convergence pass for `work_item`s in `running` with
-   nonempty `suggested_convergence_checks`. The worker is the deterministic
-   reducer's caller: it gathers signals from recorded
+1. In `internal/worker`, the worker first runs a convergence pass for
+   `work_item`s in `running` with nonempty `suggested_convergence_checks`. The
+   worker is the deterministic reducer's caller: it gathers signals from recorded
    `work_item.event_appended` checklist events and external-signal projections,
    calls `convergence.Run(...)`, appends the verdict event, then applies
    `Budget.Next(...)`:
@@ -229,10 +228,16 @@ are produced by projectors, not ad hoc migration DML.
      `failed`; `EscalateHandToHuman` → `blocked` + `human_review_status`
      blocked; `EscalateRequestApproval` → the approval system (v1; until
      approvals ship, treat as `blocked` with a reason, never auto-approve).
-2. Every transition is its own event (one state change = one event). The
+2. The worker then runs the patience metronome over remaining non-terminal
+   items. A breached state epoch appends `patience.breached` and immediately
+   routes through the default timeout rule: request a human escalation, create
+   the human-visible child, set `human_review_status=blocked`, and transition
+   the original item to `blocked`. The escalation reason excludes observed age,
+   so re-scanning the same state epoch converges on the same escalation id.
+3. Every transition is its own event (one state change = one event). The
    verdict event and the transition event are distinct.
-3. Where the work_item declares no checks, do nothing — convergence is opt-in
-   per item until a richer default policy is a separate, deliberate work_item.
+4. Where the work_item declares no checks, skip the convergence reducer; the
+   patience metronome still enforces the bounded timeout rule.
 
 ### Slice C — richer pattern declaration on a work_item
 

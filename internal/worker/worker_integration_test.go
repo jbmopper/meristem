@@ -25,16 +25,12 @@ const (
 	envTestDatabaseURL    = "MERISTEM_TEST_DATABASE_URL"
 )
 
-// TestScanOnceEmitsBreachAndIsIdempotent is the end-to-end pin: stand up a
-// fresh DB, seed three work_items at controlled ages, run ScanOnce twice,
-// and verify (1) the breaches we expect appear in the events table after
-// the first pass, (2) the second pass is a clean no-op on the wire (no
-// new event rows) and reports the same observations as already-recorded.
-//
-// This is the test that catches drift between the pure breach logic and
-// the SQL/event-emit composition. The fixed clock + deterministic ids
-// make every run reproducible.
-func TestScanOnceEmitsBreachAndIsIdempotent(t *testing.T) {
+// TestScanOnceEmitsBreachAndEscalates is the end-to-end pin: stand up a
+// fresh DB, seed three work_items at controlled ages, run ScanOnce, and
+// verify that breached state epochs are both recorded and mechanically routed
+// to human escalation. The fixed clock + deterministic ids make every run
+// reproducible.
+func TestScanOnceEmitsBreachAndEscalates(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
 
@@ -87,6 +83,7 @@ func TestScanOnceEmitsBreachAndIsIdempotent(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
+	beforeKinds := eventKindCounts(t, ctx, pool)
 	first, err := w.ScanOnce(ctx)
 	if err != nil {
 		t.Fatalf("ScanOnce first: %v", err)
@@ -106,10 +103,27 @@ func TestScanOnceEmitsBreachAndIsIdempotent(t *testing.T) {
 	if first.BreachesAlreadyRecorded != 0 {
 		t.Errorf("first.BreachesAlreadyRecorded = %d, want 0", first.BreachesAlreadyRecorded)
 	}
+	if first.PatienceEscalationsRequested != wantBreaches {
+		t.Errorf("first.PatienceEscalationsRequested = %d, want %d", first.PatienceEscalationsRequested, wantBreaches)
+	}
+	if first.PatienceEscalationsAlreadyRequested != 0 {
+		t.Errorf("first.PatienceEscalationsAlreadyRequested = %d, want 0", first.PatienceEscalationsAlreadyRequested)
+	}
 
 	if got := countEventsByKind(t, ctx, pool, domain.EventPatienceBreached); got != wantBreaches {
 		t.Errorf("events count for %s = %d after first pass, want %d", domain.EventPatienceBreached, got, wantBreaches)
 	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != wantBreaches {
+		t.Errorf("events count for %s = %d after first pass, want %d", domain.EventEscalationRequested, got, wantBreaches)
+	}
+	assertEventKindDeltaAllowed(t, beforeKinds, eventKindCounts(t, ctx, pool), map[string]bool{
+		domain.EventPatienceBreached:        true,
+		domain.EventEscalationRequested:     true,
+		domain.EventWorkItemCreated:         true,
+		domain.EventWorkItemRelationAdded:   true,
+		domain.EventWorkItemMetadataUpdated: true,
+		domain.EventWorkItemTransitioned:    true,
+	})
 
 	// Per-row check: the under-budget seed must not have a breach event.
 	for i, s := range seeds {
@@ -122,24 +136,41 @@ func TestScanOnceEmitsBreachAndIsIdempotent(t *testing.T) {
 			t.Errorf("planted[%d] (state=%s, dwell=%v): events for subject = %d, want %d",
 				i, s.state, s.dwell, got, want)
 		}
+		gotItem, err := workitems.NewService(pool, writer).Get(ctx, planted[i].id)
+		if err != nil {
+			t.Fatalf("get planted[%d]: %v", i, err)
+		}
+		wantState := s.state
+		wantReview := domain.HumanReviewWavedThrough
+		if s.expectHit {
+			wantState = domain.WorkItemBlocked
+			wantReview = domain.HumanReviewBlocked
+		}
+		if gotItem.State != wantState {
+			t.Errorf("planted[%d] state = %s, want %s", i, gotItem.State, wantState)
+		}
+		if gotItem.HumanReviewStatus != wantReview {
+			t.Errorf("planted[%d] human_review_status = %s, want %s", i, gotItem.HumanReviewStatus, wantReview)
+		}
 	}
 
-	// Second pass: same clock, same data; nothing new should land.
+	// Second pass: the breached rows have moved to blocked, so the same
+	// captured/running budgets produce no additional breach or escalation rows.
 	second, err := w.ScanOnce(ctx)
 	if err != nil {
 		t.Fatalf("ScanOnce second: %v", err)
 	}
-	if second.Scanned != len(seeds) {
-		t.Errorf("second.Scanned = %d, want %d", second.Scanned, len(seeds))
-	}
 	if second.BreachesEmitted != 0 {
 		t.Errorf("second.BreachesEmitted = %d, want 0 (idempotency)", second.BreachesEmitted)
 	}
-	if second.BreachesAlreadyRecorded != wantBreaches {
-		t.Errorf("second.BreachesAlreadyRecorded = %d, want %d", second.BreachesAlreadyRecorded, wantBreaches)
+	if second.PatienceEscalationsRequested != 0 {
+		t.Errorf("second.PatienceEscalationsRequested = %d, want 0", second.PatienceEscalationsRequested)
 	}
 	if got := countEventsByKind(t, ctx, pool, domain.EventPatienceBreached); got != wantBreaches {
 		t.Errorf("events count for %s = %d after second pass, want %d (no new rows)", domain.EventPatienceBreached, got, wantBreaches)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != wantBreaches {
+		t.Errorf("events count for %s = %d after second pass, want %d (no new rows)", domain.EventEscalationRequested, got, wantBreaches)
 	}
 }
 
@@ -324,6 +355,96 @@ func TestScanOnceConvergenceSkipsUnchangedRejectedInputs(t *testing.T) {
 	}
 }
 
+func TestScanOnceEscalatesStaleRejectedInputsAfterPatienceBudget(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-convergence-stale-budget")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "convergence stale reject over patience",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"missing_check"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	stateEnteredAt := time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, stateEnteredAt)
+	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemRunning: time.Hour,
+	}}
+
+	underBudgetWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time {
+		return stateEnteredAt.Add(30 * time.Minute)
+	})
+	if err != nil {
+		t.Fatalf("New under budget: %v", err)
+	}
+	first, err := underBudgetWorker.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce first: %v", err)
+	}
+	if first.ConvergenceVerdictsRecorded != 1 || first.ConvergenceRetries != 1 {
+		t.Fatalf("first result = %+v, want one rejected verdict and retry", first)
+	}
+	if first.BreachesEmitted != 0 || first.PatienceEscalationsRequested != 0 {
+		t.Fatalf("under-budget pass should not breach/escalate, got %+v", first)
+	}
+
+	overBudgetWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time {
+		return stateEnteredAt.Add(2 * time.Hour)
+	})
+	if err != nil {
+		t.Fatalf("New over budget: %v", err)
+	}
+	second, err := overBudgetWorker.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce second: %v", err)
+	}
+	if second.ConvergenceStaleInputsSkipped != 1 {
+		t.Fatalf("stale skips = %d, want 1", second.ConvergenceStaleInputsSkipped)
+	}
+	if second.ConvergenceVerdictsRecorded != 0 {
+		t.Fatalf("second verdicts recorded = %d, want 0", second.ConvergenceVerdictsRecorded)
+	}
+	if second.BreachesEmitted != 1 {
+		t.Fatalf("second breaches emitted = %d, want 1", second.BreachesEmitted)
+	}
+	if second.PatienceEscalationsRequested != 1 {
+		t.Fatalf("second patience escalations = %d, want 1", second.PatienceEscalationsRequested)
+	}
+	if countVerdictsForWorkItem(t, ctx, pool, item.ID) != 1 {
+		t.Fatal("unchanged rejected inputs should not create a duplicate verdict row")
+	}
+	if got := countEventsForSubject(t, ctx, pool, item.ID, domain.EventPatienceBreached); got != 1 {
+		t.Fatalf("patience breaches for item = %d, want 1", got)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
+		t.Fatalf("escalation requests = %d, want 1", got)
+	}
+	got, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if got.State != domain.WorkItemBlocked {
+		t.Fatalf("state = %q, want blocked", got.State)
+	}
+	if got.HumanReviewStatus != domain.HumanReviewBlocked {
+		t.Fatalf("human review status = %q, want blocked", got.HumanReviewStatus)
+	}
+}
+
 func TestScanOnceConvergenceBlocksAfterFreshFailedAttempts(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -451,6 +572,13 @@ func transitionWorkItem(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 	}
 }
 
+func setWorkItemTimestamps(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, ts time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE work_items SET created_at = $2, updated_at = $2 WHERE id = $1`, id, ts); err != nil {
+		t.Fatalf("set work_item timestamps: %v", err)
+	}
+}
+
 func countEventsByKind(t *testing.T, ctx context.Context, pool *pgxpool.Pool, kind string) int {
 	t.Helper()
 	var n int
@@ -467,6 +595,40 @@ func countEventsForSubject(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		t.Fatalf("count events subject=%s kind=%s: %v", id, kind, err)
 	}
 	return n
+}
+
+func eventKindCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool) map[string]int {
+	t.Helper()
+	rows, err := pool.Query(ctx, `SELECT kind, COUNT(*) FROM events GROUP BY kind`)
+	if err != nil {
+		t.Fatalf("event kind counts: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			t.Fatalf("scan event kind counts: %v", err)
+		}
+		out[kind] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate event kind counts: %v", err)
+	}
+	return out
+}
+
+func assertEventKindDeltaAllowed(t *testing.T, before, after map[string]int, allowed map[string]bool) {
+	t.Helper()
+	for kind, afterCount := range after {
+		if afterCount <= before[kind] {
+			continue
+		}
+		if !allowed[kind] {
+			t.Fatalf("unexpected event kind emitted by worker: %s delta=%d", kind, afterCount-before[kind])
+		}
+	}
 }
 
 func countVerdictsForWorkItem(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) int {
