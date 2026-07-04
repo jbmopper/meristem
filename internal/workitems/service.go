@@ -24,6 +24,10 @@ var (
 	// deeper has to be enforced here, before the relation event is
 	// appended, because the projector trusts the writer.
 	ErrRelationCycle = errors.New("workitems: relation would create a cycle")
+	// ErrConvergenceChecksRequired is returned when an item with no declared
+	// convergence checks tries to move into execution states. The scribe worker
+	// is the deterministic path for filling those checks.
+	ErrConvergenceChecksRequired = errors.New("workitems: convergence checks required")
 )
 
 type Service struct {
@@ -42,6 +46,7 @@ type CreateInput struct {
 	State                      domain.WorkItemState
 	SuggestedConvergenceChecks []string
 	HumanReviewStatus          domain.HumanReviewStatus
+	Cultivar                   string
 }
 
 type UpdateMetadataInput struct {
@@ -98,63 +103,79 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (domain.WorkItem, 
 }
 
 func (s *Service) SpawnChild(ctx context.Context, parentID uuid.UUID, in CreateInput) (domain.WorkItem, error) {
+	childID := newSubjectID(ctx, "child_work_item")
+	item, _, err := s.SpawnChildWithID(ctx, parentID, childID, in)
+	return item, err
+}
+
+// SpawnChildWithID creates a parent->child edge using a caller-provided child
+// id. Reconciler-owned children use this to make "one child per parent ever"
+// an identity property instead of a race against process memory.
+func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.UUID, in CreateInput) (domain.WorkItem, bool, error) {
 	if strings.TrimSpace(in.Title) == "" {
-		return domain.WorkItem{}, fmt.Errorf("workitems: title is required")
+		return domain.WorkItem{}, false, fmt.Errorf("workitems: title is required")
 	}
 	state := in.State
 	if state == "" {
 		state = domain.WorkItemCaptured
 	}
 	if !state.Valid() {
-		return domain.WorkItem{}, fmt.Errorf("workitems: invalid state %q", state)
+		return domain.WorkItem{}, false, fmt.Errorf("workitems: invalid state %q", state)
 	}
 	checks, err := normalizeSuggestedConvergenceChecks(in.SuggestedConvergenceChecks)
 	if err != nil {
-		return domain.WorkItem{}, err
+		return domain.WorkItem{}, false, err
 	}
 	humanReview, err := normalizeHumanReviewStatus(in.HumanReviewStatus)
 	if err != nil {
-		return domain.WorkItem{}, err
+		return domain.WorkItem{}, false, err
 	}
-	childID := newSubjectID(ctx, "child_work_item")
+	if childID == uuid.Nil {
+		return domain.WorkItem{}, false, fmt.Errorf("workitems: child id is required")
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return domain.WorkItem{}, err
+		return domain.WorkItem{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := scanWorkItem(ctx, tx, parentID); err != nil {
-		return domain.WorkItem{}, err
+		return domain.WorkItem{}, false, err
 	}
 	// Self-loops are blocked by the work_item_relations CHECK
 	// constraint, but check explicitly here for a clearer error than the
 	// generic constraint violation pgx would surface.
 	if childID == parentID {
-		return domain.WorkItem{}, ErrRelationCycle
+		return domain.WorkItem{}, false, ErrRelationCycle
 	}
 	cycle, err := childIsAncestorOf(ctx, tx, childID, parentID)
 	if err != nil {
-		return domain.WorkItem{}, err
+		return domain.WorkItem{}, false, err
 	}
 	if cycle {
-		return domain.WorkItem{}, ErrRelationCycle
+		return domain.WorkItem{}, false, ErrRelationCycle
 	}
-	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+	createdPayload := map[string]any{
+		"title":                        in.Title,
+		"body":                         in.Body,
+		"state":                        state,
+		"suggested_convergence_checks": checks,
+		"human_review_status":          humanReview,
+	}
+	if strings.TrimSpace(in.Cultivar) != "" {
+		createdPayload["cultivar"] = strings.TrimSpace(in.Cultivar)
+	}
+	_, createdFresh, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectWorkItem,
 		SubjectID:    childID,
 		Kind:         domain.EventWorkItemCreated,
 		Source:       sourceForActor(in.Actor),
 		ActorTokenID: &in.Actor.ID,
-		Payload: map[string]any{
-			"title":                        in.Title,
-			"body":                         in.Body,
-			"state":                        state,
-			"suggested_convergence_checks": checks,
-			"human_review_status":          humanReview,
-		},
-	}); err != nil {
-		return domain.WorkItem{}, err
+		Payload:      createdPayload,
+	})
+	if err != nil {
+		return domain.WorkItem{}, false, err
 	}
-	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+	_, relationFresh, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectWorkItem,
 		SubjectID:    parentID,
 		Kind:         domain.EventWorkItemRelationAdded,
@@ -164,13 +185,15 @@ func (s *Service) SpawnChild(ctx context.Context, parentID uuid.UUID, in CreateI
 			"parent_id": parentID,
 			"child_id":  childID,
 		},
-	}); err != nil {
-		return domain.WorkItem{}, err
+	})
+	if err != nil {
+		return domain.WorkItem{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return domain.WorkItem{}, err
+		return domain.WorkItem{}, false, err
 	}
-	return s.Get(ctx, childID)
+	item, err := s.Get(ctx, childID)
+	return item, createdFresh || relationFresh, err
 }
 
 func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, in UpdateMetadataInput) (domain.WorkItem, error) {
@@ -233,6 +256,9 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 	if !domain.CanTransition(current.State, to) {
 		return domain.WorkItem{}, fmt.Errorf("workitems: invalid transition from %s to %s", current.State, to)
 	}
+	if convergenceChecksRequired(current, to) {
+		return domain.WorkItem{}, fmt.Errorf("%w: item %s in %s needs a convergence-scribe child to define suggested_convergence_checks before moving to %s", ErrConvergenceChecksRequired, id, current.State, to)
+	}
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:   domain.SubjectWorkItem,
 		SubjectID:     id,
@@ -252,6 +278,23 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 		return domain.WorkItem{}, err
 	}
 	return s.Get(ctx, id)
+}
+
+func convergenceChecksRequired(current domain.WorkItem, to domain.WorkItemState) bool {
+	if len(current.SuggestedConvergenceChecks) > 0 {
+		return false
+	}
+	switch current.State {
+	case domain.WorkItemCaptured, domain.WorkItemTriaged:
+	default:
+		return false
+	}
+	switch to {
+	case domain.WorkItemCaptured, domain.WorkItemTriaged, domain.WorkItemBlocked, domain.WorkItemFailed, domain.WorkItemCanceled:
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind string, payload any, actor domain.Token) error {

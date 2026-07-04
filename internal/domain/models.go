@@ -50,6 +50,10 @@ const (
 	// re-fold the same signals. The persistence slice projects this kind into
 	// convergence_verdicts; worker emission remains separately gated.
 	EventConvergenceVerdictRecorded = "convergence.verdict_recorded"
+	// EventConvergenceChecksProposed records a scribe proposal for a parent
+	// work_item's suggested convergence checks. The deterministic reducer
+	// records its disposition separately as convergence.verdict_recorded.
+	EventConvergenceChecksProposed = "convergence.checks_proposed"
 
 	// EventPolicyProfileSwitched records an operator switching the active
 	// safety policy profile (bring-up vs steady). The subject is the
@@ -90,6 +94,7 @@ var AllEventKinds = []string{
 	EventSubactorGrantEscalated,
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
+	EventConvergenceChecksProposed,
 	EventPolicyProfileSwitched,
 	EventTropismDefined,
 	EventCultivarDefined,

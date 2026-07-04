@@ -21,6 +21,7 @@ func TestToolVisible_LegacyAndRootSeeExistingSurface(t *testing.T) {
 			"registry.list",
 			"registry.get",
 			"deterministic_errors.list",
+			"convergence.propose_checks",
 			"work_items.create",
 			"work_items.transition",
 		} {
@@ -101,6 +102,7 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 		"work_items.get",
 		"work_items.spawn_child",
 		"work_items.append_event",
+		"convergence.propose_checks",
 		"work_items.update_metadata",
 		"work_items.transition",
 	}
@@ -238,6 +240,7 @@ func TestFeedItemAnchorsCoverIncludedKinds(t *testing.T) {
 		domain.EventSubactorGrantEscalated:     {domain.SubjectSubactorGrant, payloadAnchored},
 		domain.EventPatienceBreached:           {domain.SubjectWorkItem, subjectAnchored},
 		domain.EventConvergenceVerdictRecorded: {domain.SubjectConvergence, subjectAnchored},
+		domain.EventConvergenceChecksProposed:  {domain.SubjectWorkItem, subjectAnchored},
 		// System-wide owner posture, not tree content: no anchor, dropped
 		// from tree-scoped feeds; visible to feed.read.
 		domain.EventPolicyProfileSwitched: {domain.SubjectPolicyProfile, nil},

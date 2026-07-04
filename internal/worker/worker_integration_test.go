@@ -14,6 +14,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -367,6 +368,112 @@ func TestScanOnceBlockedHumanReviewBreachesButDoesNotEscalate(t *testing.T) {
 	}
 }
 
+func TestScanOnceSpawnsDeterministicScribeChildForChecklessItem(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-scribe-spawn")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	parent, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "needs convergence definition",
+		State:             domain.WorkItemCaptured,
+		HumanReviewStatus: domain.HumanReviewWavedThrough,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	first, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce first: %v", err)
+	}
+	if first.ScribeCandidatesScanned != 1 || first.ScribeChildrenSpawned != 1 {
+		t.Fatalf("scribe first = candidates %d spawned %d already %d, want 1/1/0",
+			first.ScribeCandidatesScanned, first.ScribeChildrenSpawned, first.ScribeChildrenAlreadyPresent)
+	}
+	childID := singleChildForParent(t, ctx, pool, parent.ID)
+	if want := convergence.ScribeChildID(parent.ID); childID != want {
+		t.Fatalf("scribe child id = %s, want deterministic %s", childID, want)
+	}
+	child, err := service.Get(ctx, childID)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if child.State != domain.WorkItemTriaged {
+		t.Fatalf("child state = %s, want triaged", child.State)
+	}
+	if len(child.SuggestedConvergenceChecks) != 1 || child.SuggestedConvergenceChecks[0] != convergence.ScribeChildCheck {
+		t.Fatalf("child checks = %v, want [%s]", child.SuggestedConvergenceChecks, convergence.ScribeChildCheck)
+	}
+
+	second, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce second: %v", err)
+	}
+	if second.ScribeChildrenSpawned != 0 {
+		t.Fatalf("second spawned = %d, want 0", second.ScribeChildrenSpawned)
+	}
+	if got := countRelationsForParent(t, ctx, pool, parent.ID); got != 1 {
+		t.Fatalf("parent child count after repeat = %d, want 1", got)
+	}
+	if got := countRelationsForParent(t, ctx, pool, childID); got != 0 {
+		t.Fatalf("scribe child should not recurse; child count = %d", got)
+	}
+}
+
+func TestScanOnceDoesNotSpawnScribeForHumanReviewBlockedItem(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-scribe-human-blocked")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "owner-owned checkless item",
+		State:             domain.WorkItemTriaged,
+		HumanReviewStatus: domain.HumanReviewBlocked,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		result, err := w.ScanOnce(ctx)
+		if err != nil {
+			t.Fatalf("ScanOnce %d: %v", i+1, err)
+		}
+		if result.ScribeChildrenSpawned != 0 {
+			t.Fatalf("ScanOnce %d spawned = %d, want 0", i+1, result.ScribeChildrenSpawned)
+		}
+	}
+	if got := countRelationsForParent(t, ctx, pool, item.ID); got != 0 {
+		t.Fatalf("blocked item child count = %d, want 0", got)
+	}
+}
+
 func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -381,10 +488,11 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 	}
 	service := workitems.NewService(pool, writer)
 	item, err := service.Create(ctx, workitems.CreateInput{
-		Title:             "fertility check",
-		State:             domain.WorkItemCaptured,
-		HumanReviewStatus: domain.HumanReviewWavedThrough,
-		Actor:             systemTok.Token,
+		Title:                      "fertility check",
+		State:                      domain.WorkItemCaptured,
+		SuggestedConvergenceChecks: []string{"event:patience_probe"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
 	})
 	if err != nil {
 		t.Fatalf("create item: %v", err)

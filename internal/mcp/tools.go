@@ -12,6 +12,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/backlog"
+	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
@@ -55,6 +56,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolWorkItemsCreate(),
 		s.toolWorkItemsSpawnChild(),
 		s.toolWorkItemsAppendEvent(),
+		s.toolConvergenceProposeChecks(),
 		s.toolWorkItemsUpdateMetadata(),
 		s.toolWorkItemsTransition(),
 	}
@@ -654,6 +656,65 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 	}
 }
 
+func (s *Server) toolConvergenceProposeChecks() Tool {
+	return Tool{
+		Name:        "convergence.propose_checks",
+		Description: "Propose suggested convergence checks for a parent work item from its convergence-scribe child.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"id", "proposal_of", "checks", "classified"}, map[string]any{
+			"id":          schemaString("Parent work item uuid."),
+			"proposal_of": schemaString("Convergence-scribe child work item uuid."),
+			"checks": schemaStringArray(
+				"Proposed checks. Machine checks use cmd:, event:, or query:. Human checks use human-ack:.",
+			),
+			"classified": schemaAny("Array of {check, class}; class is machine or human."),
+			"rationale":  schemaString("Short rationale for the proposed checks."),
+			"cultivar":   schemaString("Launch metadata. Defaults to convergence-scribe@1."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.CheckProposals == nil {
+				return nil, errors.New("convergence proposal service not configured")
+			}
+			var args struct {
+				ID         string                            `json:"id"`
+				ProposalOf string                            `json:"proposal_of"`
+				Checks     []string                          `json:"checks"`
+				Classified []convergence.CheckClassification `json:"classified"`
+				Rationale  string                            `json:"rationale"`
+				Cultivar   string                            `json:"cultivar"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			proposalOf, err := parseUUID(args.ProposalOf, "proposal_of")
+			if err != nil {
+				return nil, err
+			}
+			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
+				return nil, err
+			}
+			result, err := s.deps.CheckProposals.ProposeChecks(ctx, id, convergence.ProposeChecksInput{
+				ProposalOf: proposalOf,
+				Checks:     args.Checks,
+				Classified: args.Classified,
+				Rationale:  args.Rationale,
+				Cultivar:   args.Cultivar,
+			}, actor)
+			if err != nil {
+				if errors.Is(err, convergence.ErrChecksProposalNotFound) {
+					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
+				}
+				return nil, err
+			}
+			return result, nil
+		},
+	}
+}
+
 func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 	return Tool{
 		Name:        "work_items.update_metadata",
@@ -743,6 +804,9 @@ func (s *Server) toolWorkItemsTransition() Tool {
 			if err != nil {
 				if errors.Is(err, workitems.ErrNotFound) {
 					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
+				}
+				if errors.Is(err, workitems.ErrConvergenceChecksRequired) {
+					return nil, replayableToolErr(err)
 				}
 				if strings.Contains(err.Error(), "invalid transition") {
 					return nil, replayableToolErr(err)

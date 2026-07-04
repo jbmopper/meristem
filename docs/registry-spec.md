@@ -1,11 +1,9 @@
 # Tropism and cultivar registry: R2 implementation spec
 
-Status: implementable spec, drafted 2026-07-04 by the Claude spec session for
+Status: implemented spec, drafted 2026-07-04 by the Claude spec session for
 work item `52bbc0ef` (R2, parent `c6ba707b`). Companion to
 [`docs/scribe-spec.md`](scribe-spec.md); the scribe's hardcoded
-`convergence-scribe@v1` constant is this registry's first seed fixture.
-Suggested implementation owner per the divvy plan: Codex, after the scribe
-slice or in parallel (the seam between them is one constant lookup).
+`convergence-scribe@1` constant is this registry's first seed fixture.
 
 R2 in one sentence: an open set of named, versioned cultivars over a closed
 set of reducer semantics, stored as events and projected — so the scribe
@@ -110,9 +108,9 @@ violating the token model.
 Anywhere a cultivar name is accepted, it is validated against the projection
 and refusal is structured:
 
-1. **Scribe pass** (scribe spec §1): resolves `convergence-scribe` from the
-   registry instead of the hardcoded constant. The constant is deleted in the
-   same PR that seeds the fixture — one lookup swap.
+1. **Scribe pass** (scribe spec §1): records `convergence-scribe@1`, matching
+   the seeded registry fixture. Later worker-profile/cultivar resolution swaps
+   this from a launch-metadata string to a registry lookup.
 2. **Dispatch entries** (R3 remainder, `b6526f08`): the reconciler names the
    handling cultivar in dispatch payloads; unknown name is impossible by
    construction because the rule data references the registry.

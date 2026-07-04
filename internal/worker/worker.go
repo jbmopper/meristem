@@ -177,6 +177,16 @@ type Result struct {
 	// these items, but does not recursively escalate them.
 	PatienceEscalationsSkippedAwaitingHuman int
 
+	// ScribeCandidatesScanned is the count of captured/triaged work_items
+	// missing suggested convergence checks that the scribe pass inspected.
+	ScribeCandidatesScanned int
+	// ScribeChildrenSpawned is the number of fresh convergence-scribe children
+	// created for checkless parent items.
+	ScribeChildrenSpawned int
+	// ScribeChildrenAlreadyPresent is the count of checkless parent items that
+	// already had their deterministic scribe child.
+	ScribeChildrenAlreadyPresent int
+
 	// ConvergenceCandidatesScanned is the count of running work_items
 	// with suggested convergence checks and therefore a chance to advance
 	// through the convergence loop in this pass.
@@ -253,6 +263,14 @@ func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid
 func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	now := w.clock().UTC()
 	out := Result{}
+
+	scribeResult, err := w.scanScribes(ctx)
+	if err != nil {
+		return out, fmt.Errorf("worker: scribe pass: %w", err)
+	}
+	out.ScribeCandidatesScanned = scribeResult.ScribeCandidatesScanned
+	out.ScribeChildrenSpawned = scribeResult.ScribeChildrenSpawned
+	out.ScribeChildrenAlreadyPresent = scribeResult.ScribeChildrenAlreadyPresent
 
 	convergenceResult, err := w.scanConvergence(ctx)
 	if err != nil {

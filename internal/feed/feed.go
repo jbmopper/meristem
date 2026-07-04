@@ -45,6 +45,7 @@ var IncludedKinds = []string{
 	domain.EventSubactorGrantEscalated,
 	domain.EventPatienceBreached,
 	domain.EventConvergenceVerdictRecorded,
+	domain.EventConvergenceChecksProposed,
 	domain.EventPolicyProfileSwitched,
 	domain.EventTropismDefined,
 	domain.EventCultivarDefined,

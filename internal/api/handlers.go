@@ -15,6 +15,7 @@ import (
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/backlog"
+	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/grants"
@@ -420,6 +421,35 @@ func (s *Server) handleAppendWorkItemEvent(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, map[string]any{"work_item_id": id, "appended": true})
 }
 
+func (s *Server) handleProposeConvergenceChecks(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	if s.checkProposals == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "service_unavailable", "convergence proposal service is not configured")
+		return
+	}
+	var req convergence.ProposeChecksInput
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	result, err := s.checkProposals.ProposeChecks(r.Context(), id, req, actor)
+	if err != nil {
+		if errors.Is(err, convergence.ErrChecksProposalNotFound) {
+			writeAPIError(w, http.StatusNotFound, "work_item_not_found", "work item not found")
+			return
+		}
+		writeAPIError(w, http.StatusBadRequest, "convergence_proposal_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
 func (s *Server) handleUpdateWorkItemMetadata(w http.ResponseWriter, r *http.Request) {
 	actor, ok := authenticatedToken(w, r)
 	if !ok {
@@ -470,6 +500,10 @@ func (s *Server) handleTransitionWorkItem(w http.ResponseWriter, r *http.Request
 	}
 	item, err := s.workItems.Transition(r.Context(), id, domain.WorkItemState(req.To), req.Reason, actor)
 	if err != nil {
+		if errors.Is(err, workitems.ErrConvergenceChecksRequired) {
+			writeAPIError(w, http.StatusConflict, "convergence_checks_required", err.Error())
+			return
+		}
 		if strings.Contains(err.Error(), "invalid transition") {
 			writeAPIError(w, http.StatusConflict, "invalid_transition", err.Error())
 			return
@@ -786,6 +820,10 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, workitems.ErrRelationCycle) {
 		writeAPIError(w, http.StatusConflict, "relation_cycle", err.Error())
+		return
+	}
+	if errors.Is(err, workitems.ErrConvergenceChecksRequired) {
+		writeAPIError(w, http.StatusConflict, "convergence_checks_required", err.Error())
 		return
 	}
 	if strings.Contains(err.Error(), "invalid state") {

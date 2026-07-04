@@ -16,6 +16,7 @@ func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(createdProjector{})
 	registry.Register(transitionedProjector{})
 	registry.Register(eventAppendedProjector{})
+	registry.Register(checksProposedProjector{})
 	registry.Register(relationAddedProjector{})
 	registry.Register(metadataUpdatedProjector{})
 }
@@ -107,6 +108,18 @@ type eventAppendedProjector struct{}
 func (eventAppendedProjector) Kind() string { return domain.EventWorkItemEventAppended }
 
 func (eventAppendedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	_, err := tx.Exec(ctx, `UPDATE work_items SET updated_at = $2 WHERE id = $1`, event.SubjectID, event.OccurredAt)
+	return err
+}
+
+type checksProposedProjector struct{}
+
+func (checksProposedProjector) Kind() string { return domain.EventConvergenceChecksProposed }
+
+func (checksProposedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectWorkItem {
+		return fmt.Errorf("convergence.checks_proposed: expected subject_kind %q, got %q", domain.SubjectWorkItem, event.SubjectKind)
+	}
 	_, err := tx.Exec(ctx, `UPDATE work_items SET updated_at = $2 WHERE id = $1`, event.SubjectID, event.OccurredAt)
 	return err
 }

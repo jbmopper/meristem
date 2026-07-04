@@ -72,7 +72,7 @@ func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
 		t.Fatalf("status = %d, want 200 body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "work_items.create") || strings.Contains(body, "work_items.transition") {
+	if strings.Contains(body, "work_items.create") || strings.Contains(body, "work_items.transition") || strings.Contains(body, "convergence.propose_checks") {
 		t.Fatalf("HTTP /mcp leaked write tools before idempotency contract: %s", body)
 	}
 	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "work_items.get") {

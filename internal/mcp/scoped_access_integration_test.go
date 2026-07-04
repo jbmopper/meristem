@@ -53,7 +53,11 @@ func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create A: %v", err)
 	}
-	a1, err := workSvc.SpawnChild(ctx, a.ID, workitems.CreateInput{Title: "A1", Actor: root})
+	a1, err := workSvc.SpawnChild(ctx, a.ID, workitems.CreateInput{
+		Title:                      "A1",
+		SuggestedConvergenceChecks: []string{"event:mcp_scoped_access"},
+		Actor:                      root,
+	})
 	if err != nil {
 		t.Fatalf("spawn A1: %v", err)
 	}

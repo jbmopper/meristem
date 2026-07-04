@@ -89,7 +89,7 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.create":
 		return scopes[ScopeWorkItemsCreate] || scopes[ScopeWorkItemsWriteAll]
-	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition":
+	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition", "convergence.propose_checks":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:
 		return false
@@ -205,6 +205,8 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 //
 //   - work_item-subject events anchor on their subject; relation events
 //     anchor on both endpoints so either side's tree sees the edge.
+//     convergence.checks_proposed is first-class, but still subject-anchored
+//     on the parent work_item whose checks are being proposed.
 //   - convergence.verdict_recorded uses subject_kind "convergence" but its
 //     subject_id *is* the judged work_item (see convergence.VerdictEventSpec).
 //   - message.captured, signal.received, escalation.requested, and the
@@ -224,6 +226,8 @@ func feedItemAnchors(item feed.Item) []uuid.UUID {
 	switch item.Kind {
 	case domain.EventWorkItemRelationAdded:
 		return relationIDs(item)
+	case domain.EventConvergenceChecksProposed:
+		return []uuid.UUID{item.SubjectID}
 	case domain.EventConvergenceVerdictRecorded:
 		return []uuid.UUID{item.SubjectID}
 	case domain.EventMessageCaptured,

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/events"
@@ -46,6 +47,7 @@ type Deps struct {
 	Idempotency         *idempotency.Middleware
 	Inbox               *inbox.Service
 	WorkItems           *workitems.Service
+	CheckProposals      *convergence.ChecksProposalService
 	DeterministicErrors *errorreporting.Service
 	Feed                *feed.Service
 	PolicyProfiles      *policyprofile.Service

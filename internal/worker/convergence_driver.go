@@ -90,7 +90,7 @@ func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, er
 			return result, err
 		}
 
-		signals, err := w.convergenceSignalsForItem(ctx, c.ID)
+		signals, err := w.convergenceSignalsForItem(ctx, c.ID, c.SuggestedConvergenceChecks)
 		if err != nil {
 			return result, err
 		}
@@ -248,7 +248,7 @@ func (w *Worker) latestConvergenceVerdict(ctx context.Context, workItemID uuid.U
 }
 
 // convergenceSignalsForItem gathers deterministic signals the reducer can consume.
-func (w *Worker) convergenceSignalsForItem(ctx context.Context, workItemID uuid.UUID) ([]convergence.Signal, error) {
+func (w *Worker) convergenceSignalsForItem(ctx context.Context, workItemID uuid.UUID, checks []string) ([]convergence.Signal, error) {
 	var out []convergence.Signal
 
 	fromAppended, err := w.convergenceSignalsFromEventAppended(ctx, workItemID)
@@ -262,7 +262,54 @@ func (w *Worker) convergenceSignalsForItem(ctx context.Context, workItemID uuid.
 		return nil, err
 	}
 	out = append(out, fromSignalRows...)
+
+	fromBuiltinQueries, err := w.convergenceSignalsFromBuiltinQueries(ctx, workItemID, checks)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, fromBuiltinQueries...)
 	return out, nil
+}
+
+func (w *Worker) convergenceSignalsFromBuiltinQueries(ctx context.Context, workItemID uuid.UUID, checks []string) ([]convergence.Signal, error) {
+	var out []convergence.Signal
+	for _, check := range checks {
+		if !strings.HasPrefix(check, "query:") {
+			continue
+		}
+		name := strings.TrimPrefix(check, "query:")
+		if !convergence.KnownQueryCheck(name) {
+			continue
+		}
+		pass, err := w.evaluateBuiltinQueryCheck(ctx, workItemID, name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, convergence.Signal{
+			Kind: "checklist.item:" + check,
+			Pass: &pass,
+		})
+	}
+	return out, nil
+}
+
+func (w *Worker) evaluateBuiltinQueryCheck(ctx context.Context, workItemID uuid.UUID, name string) (bool, error) {
+	switch name {
+	case "parent_checks_defined":
+		var ok bool
+		err := w.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM work_item_relations wir
+				JOIN work_items parent ON parent.id = wir.parent_id
+				WHERE wir.child_id = $1
+					AND jsonb_array_length(parent.suggested_convergence_checks) > 0
+			)
+		`, workItemID).Scan(&ok)
+		return ok, err
+	default:
+		return false, nil
+	}
 }
 
 func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workItemID uuid.UUID) ([]convergence.Signal, error) {

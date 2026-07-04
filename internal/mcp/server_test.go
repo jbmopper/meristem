@@ -152,6 +152,7 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 		"work_items.create",
 		"work_items.spawn_child",
 		"work_items.append_event",
+		"convergence.propose_checks",
 		"work_items.update_metadata",
 		"work_items.transition",
 	}
@@ -207,6 +208,7 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		"work_items_create",
 		"work_items_spawn_child",
 		"work_items_append_event",
+		"convergence_propose_checks",
 		"work_items_update_metadata",
 		"work_items_transition",
 	}
@@ -237,6 +239,7 @@ func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 		"work_items.create":          true,
 		"work_items.spawn_child":     true,
 		"work_items.append_event":    true,
+		"convergence.propose_checks": true,
 		"work_items.update_metadata": true,
 		"work_items.transition":      true,
 	}
@@ -288,6 +291,7 @@ func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 		"work_items.get",
 		"work_items.spawn_child",
 		"work_items.append_event",
+		"convergence.propose_checks",
 		"work_items.update_metadata",
 		"work_items.transition",
 	} {

@@ -92,7 +92,7 @@ func TestHandleHTTPMessageWithOptionsFiltersHTTPTools(t *testing.T) {
 		t.Fatalf("status = %d, want 200 body=%s", resp.Status, resp.Body)
 	}
 	body := string(resp.Body)
-	if strings.Contains(body, "work_items.create") || strings.Contains(body, "work_items.transition") {
+	if strings.Contains(body, "work_items.create") || strings.Contains(body, "work_items.transition") || strings.Contains(body, "convergence.propose_checks") {
 		t.Fatalf("HTTP read-only tool list leaked write tools: %s", body)
 	}
 	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "backlog.readiness") || !strings.Contains(body, "work_items.get") {

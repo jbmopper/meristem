@@ -1,9 +1,8 @@
 # Convergence scribe: R1 implementation spec
 
-Status: implementable spec, drafted 2026-07-04 by the Claude spec session for
+Status: implemented R1 spec, drafted 2026-07-04 by the Claude spec session for
 work item `d7d8f598` (R1, parent `c6ba707b`). Implements
-`docs/refresh-requirements.md` R1 against the codebase as of v1 tip `9c479c6`.
-Suggested implementation owner per the divvy plan: Codex.
+`docs/refresh-requirements.md` R1.
 
 R1 in one sentence: a work item arriving without convergence checks is a
 *state*, not an error — the system spawns a scribe child to propose checks, a
@@ -61,7 +60,7 @@ transaction, on fresh spawn only:
   - `human_review_status`: `waved_through`
 - `work_item.relation_added` (parent → scribe child)
 - the scribe child's cultivar recorded in the created payload as
-  `"cultivar": "convergence-scribe@v1"` — launch metadata, not schema
+  `"cultivar": "convergence-scribe@1"` — launch metadata, not schema
   identity, per the Cerberus reducer-contract rule
 
 Exclusions from the candidate set:
@@ -102,7 +101,7 @@ payload:
   checks:       ["...", ...]                  -- structural: the proposal
   classified:   [{check, class: machine|human}, ...]  -- structural: reducer validates
   rationale:    "<free text>"                 -- narrative
-  cultivar:     "convergence-scribe@v1"       -- launch metadata
+  cultivar:     "convergence-scribe@1"        -- launch metadata
 ```
 
 Appended by the scribe agent through the normal MCP
@@ -194,11 +193,11 @@ for queries the worker actually knows. With this, the existing checklist
 pass can verify and close the child even if the accept-transaction's
 transition raced.
 
-The `convergence-scribe@v1` cultivar is **hardcoded as the rootstock
+The `convergence-scribe@1` cultivar is **hardcoded as the rootstock
 constant for this slice** (title template, child checks, proposal contract,
-reducer id, budget). It migrates to R2's registry as seed data when the
-registry exists; the constant is the interim representation, and R2 should
-treat this spec's values as the first registry fixture.
+reducer id, budget) and matches the R2 seeded registry fixture. Dynamic
+resolution from registry data belongs to the later worker-profile/cultivar
+slices.
 
 ## Xylem accounting
 
@@ -225,7 +224,8 @@ treat this spec's values as the first registry fixture.
 
 ## Deferred, explicitly
 
-- Tropism/cultivar registry (R2): this spec hardcodes the one rootstock.
+- Dynamic worker-profile/cultivar resolution: this spec hardcodes the seeded
+  `convergence-scribe@1` rootstock string.
 - Dispatch feed entries for scribe children (R3 remainder): until then,
   launchers find them as `triaged` items in the tree.
 - Machine-grammar execution (`cmd:`/`query:` runners): validation only in

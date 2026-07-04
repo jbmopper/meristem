@@ -38,7 +38,7 @@ func TestTransitionCycleWithRepeatedPayloadIsNotSwallowed(t *testing.T) {
 	server := New(pool, nil)
 
 	created := doREST(t, server.Handler(), http.MethodPost, "/v1/work-items", tokenResult.Secret, "cycle-create",
-		[]byte(`{"title":"transition cycle regression"}`))
+		[]byte(`{"title":"transition cycle regression","suggested_convergence_checks":["event:cycle_regression"]}`))
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create work item: want 201, got %d body=%s", created.Code, created.Body.String())
 	}
