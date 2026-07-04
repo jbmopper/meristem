@@ -1,0 +1,5 @@
+-- 0015_repair_projection_drift rollback.
+--
+-- No-op by design. The up migration repairs projections from immutable events;
+-- the stale pre-repair projection values are not durable truth and should not
+-- be reconstructed by rollback.
