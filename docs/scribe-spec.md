@@ -57,7 +57,7 @@ transaction, on fresh spawn only:
   - body: templated — parent id, title, body excerpt, and the proposal
     contract (§3) so a small model needs no other context
   - state: `triaged` (it is born ready for pickup)
-  - `suggested_convergence_checks`: `["parent_checks_defined"]` (§5)
+  - `suggested_convergence_checks`: `["query:parent_checks_defined"]` (§5)
   - `human_review_status`: `waved_through`
 - `work_item.relation_added` (parent → scribe child)
 - the scribe child's cultivar recorded in the created payload as
@@ -131,14 +131,18 @@ Rules (v1, deliberately light for bring-up):
 
 - `checks` non-empty; every entry non-blank after trim (reuses the
   normalization in workitems)
-- every entry classified, and the classification is consistent:
+- every entry carries an explicit classification prefix, and the
+  classification is consistent (per refresh-requirements R1: executable *or
+  explicitly human-gated* — there is no default):
   - `machine` entries must match the machine grammar: a recognized prefix
     (`cmd:`, `event:`, `query:`) — these are verifiable by a worker without
     human judgment
-  - entries prefixed `human-ack:` are `human`
-  - **unprefixed prose is `human` by default** — bring-up compromise so the
-    existing corpus style ("integration test: ...") remains proposable; the
-    grammar tightens when R2's tropism registry lands
+  - `human` entries must be prefixed `human-ack:`
+  - **unprefixed prose is refused** with `unclassified_check` naming the
+    offending entry. The reducer governs *proposals* only — every proposal
+    is new text authored by the scribe, so there is no legacy-corpus
+    pressure here; hand-written checks on existing items are outside the
+    reducer's jurisdiction and remain untouched
 - at least one entry total; no duplicate entries
 - `proposal_of` names a live scribe child of the subject parent
 
@@ -152,7 +156,8 @@ existing budget/attempt semantics:
 - **accept** → same transaction: `work_item.metadata_updated` on the parent
   (from: `[]`, to: proposed checks; system source, worker actor, reducer
   identity in payload) + scribe child transitions to `done`
-  (`parent_checks_defined` is now literally true and machine-checkable)
+  (`query:parent_checks_defined` is now literally true and the checklist
+  pass can verify it)
 - **refuse** → verdict records the structured reason; scribe child stays
   `running`/`triaged`; the scribe may re-propose (new proposal event, new
   digest → fresh attempt). Stale identical re-proposals are skipped by the
@@ -168,10 +173,24 @@ refuses with `checks_already_defined` and the scribe child is transitioned
 
 ## 5. Terminating: the rootstock base case
 
-The scribe child is born with `["parent_checks_defined"]` — non-empty, so it
-never matches the scribe pass predicate. No scribe-for-a-scribe is possible
-*structurally*, not by filter. `parent_checks_defined` is machine-checkable
-(`query:` class: parent row has non-empty checks), so the existing checklist
+The scribe child is born with `["query:parent_checks_defined"]` — non-empty,
+so it never matches the scribe pass predicate. No scribe-for-a-scribe is
+possible *structurally*, not by filter.
+
+`query:` checks resolve against a small **builtin query set registered in
+code** (`internal/convergence`), each a pure predicate over projections,
+evaluated by the checklist pass the same way `checklist.item:<name>` signals
+are keyed today — the query name is the item name. The set ships with exactly
+one member in this slice:
+
+- `parent_checks_defined` — true iff the item's parent (via
+  `work_item_relations`) has non-empty `suggested_convergence_checks`
+
+Proposals naming a `query:` check outside the registered set are refused
+with `unknown_query_check` (same shape as the registry's `unknown_reducer`
+refusal in docs/registry-spec.md). This keeps the grammar honest: `query:`
+means "the worker can evaluate this without judgment," which is only true
+for queries the worker actually knows. With this, the existing checklist
 pass can verify and close the child even if the accept-transaction's
 transition raced.
 
@@ -195,8 +214,9 @@ treat this spec's values as the first registry fixture.
    one scribe child (repeat runs: zero new); parent transition to `planned`
    refused with `convergence_checks_required`; valid proposal → parent has
    checks, child `done`, parent may advance.
-2. Integration test: proposals that are empty, blank-entry, machine-classified
-   without grammar prefix, or duplicate-entry are refused with structured
+2. Integration test: proposals that are empty, blank-entry, unprefixed
+   (`unclassified_check`), naming an unregistered query
+   (`unknown_query_check`), or duplicate-entry are refused with structured
    reasons recorded in the verdict event; refusal does not mutate the parent.
 3. Integration test: scribe children and human-review-blocked items never
    receive scribe children (run two full scan cycles; count children).
