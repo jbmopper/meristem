@@ -157,6 +157,9 @@ func TestFeedItemAnchorsCoverIncludedKinds(t *testing.T) {
 		domain.EventSubactorGrantEscalated:     {domain.SubjectSubactorGrant, payloadAnchored},
 		domain.EventPatienceBreached:           {domain.SubjectWorkItem, subjectAnchored},
 		domain.EventConvergenceVerdictRecorded: {domain.SubjectConvergence, subjectAnchored},
+		// System-wide owner posture, not tree content: no anchor, dropped
+		// from tree-scoped feeds; visible to feed.read.
+		domain.EventPolicyProfileSwitched: {domain.SubjectPolicyProfile, nil},
 	}
 
 	for _, kind := range feed.IncludedKinds {

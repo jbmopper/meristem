@@ -184,6 +184,10 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 //   - message.captured, signal.received, escalation.requested, and the
 //     subactor_grant.* family anchor through the work_item_id (and, where
 //     present, human_work_item_id) fields their writers put in the payload.
+//   - policy_profile.switched has no work-item anchor on purpose: profile
+//     switches are system-wide owner posture, not tree content. Tree-scoped
+//     workers learn the active envelope from /readyz (or their launcher);
+//     feed.read holders see switches on the unscoped feed.
 //   - deterministic_error.* events return no anchor on purpose: they are
 //     governed by logs.* scopes, and a tree-scoped feed deliberately drops
 //     them rather than inventing a work_item relationship they do not have.

@@ -29,6 +29,7 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/worker"
 )
@@ -55,12 +56,11 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 
 	fs := flag.NewFlagSet("worker --once", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	// --budget=DURATION overrides the per-state defaults with a single
+	// --budget=DURATION overrides the per-state budgets with a single
 	// uniform budget applied to every non-terminal state. The intent is
 	// operator/CI verification ("show me what the worker sees right now
 	// against an aggressively tight budget"), not production policy.
-	// Production budgets stay in DefaultBudgets() until configuration
-	// support lands in a later slice.
+	// Production budgets come from the active policy profile.
 	uniformBudget := fs.Duration("budget", 0, "uniform budget applied to every non-terminal state (overrides defaults; for verification)")
 	if err := fs.Parse(args); err != nil {
 		workerUsage(os.Stderr)
@@ -85,7 +85,17 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		return err
 	}
 
-	budgets := worker.DefaultBudgets()
+	// Budgets come from the active policy profile (bring-up vs steady),
+	// resolved from the event-sourced projection; an un-switched or
+	// pre-0014 database resolves to steady, which equals the previous
+	// hardcoded defaults. --budget still overrides everything for
+	// operator/CI verification runs.
+	profileSvc := policyprofile.NewService(pool, writer)
+	active, err := profileSvc.Active(ctx)
+	if err != nil {
+		return fmt.Errorf("worker: resolve active policy profile: %w", err)
+	}
+	budgets := worker.Budgets{ByState: active.Policy.PatienceBudgets}
 	if *uniformBudget > 0 {
 		budgets = uniformBudgets(*uniformBudget)
 	}

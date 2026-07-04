@@ -8,6 +8,7 @@ import (
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/signals"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -24,6 +25,7 @@ func NewProjectionRegistry() *projections.Registry {
 	inbox.RegisterProjectors(registry)
 	workitems.RegisterProjectors(registry)
 	signals.RegisterProjectors(registry)
+	policyprofile.RegisterProjectors(registry)
 	convergence.RegisterProjectors(registry)
 	return registry
 }

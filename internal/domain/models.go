@@ -50,6 +50,13 @@ const (
 	// re-fold the same signals. The persistence slice projects this kind into
 	// convergence_verdicts; worker emission remains separately gated.
 	EventConvergenceVerdictRecorded = "convergence.verdict_recorded"
+
+	// EventPolicyProfileSwitched records an operator switching the active
+	// safety policy profile (bring-up vs steady). The subject is the
+	// singleton policy_profile aggregate; the payload carries from/to and
+	// the target profile's fingerprint so the audit answers "what envelope
+	// was active when" without recomputing.
+	EventPolicyProfileSwitched = "policy_profile.switched"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -80,6 +87,7 @@ var AllEventKinds = []string{
 	EventSubactorGrantEscalated,
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
+	EventPolicyProfileSwitched,
 }
 
 const (
@@ -96,6 +104,10 @@ const (
 	// payload, so (work_item_id, attempt, payload) remains the deterministic
 	// event identity while the projection can index verdicts by work_item_id.
 	SubjectConvergence = "convergence"
+	// SubjectPolicyProfile is the singleton aggregate for the active safety
+	// policy profile; every switch event shares one well-known subject id
+	// (see internal/policyprofile.SubjectID).
+	SubjectPolicyProfile = "policy_profile"
 )
 
 // Verdict is the disposition produced by a deterministic convergence

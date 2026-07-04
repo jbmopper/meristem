@@ -28,6 +28,7 @@ import (
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
+	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/signals"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -67,6 +68,7 @@ type Server struct {
 	deterministicErrors   *errorreporting.Service
 	feed                  *feed.Service
 	mcpServer             *mcp.Server
+	policyProfiles        *policyprofile.Service
 	policy                safety.Policy
 }
 
@@ -100,6 +102,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.grants = grants.NewIssuanceService(pool, s.writer, s.authService, s.escalations)
 		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.feed = feed.NewService(pool)
+		s.policyProfiles = policyprofile.NewService(pool, s.writer)
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
@@ -130,6 +133,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
+	s.mux.Handle("POST /v1/policy-profile", s.commandWithAccess(s.canSwitchPolicyProfile, http.HandlerFunc(s.handleSwitchPolicyProfile)))
 	s.mux.Handle("POST /v1/tokens/revoke-all", s.commandWithAccess(s.canPanicRevokeTokens, http.HandlerFunc(s.handlePanicRevokeTokens)))
 	s.mux.Handle("GET /v1/feed", s.protected(http.HandlerFunc(s.handleFeed)))
 	s.mux.Handle("GET /v1/feed/stream", s.protected(http.HandlerFunc(s.handleFeedStream)))
@@ -245,12 +249,22 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	profileName := safety.ProfileSteady
 	policyID, _ := s.policy.Fingerprint()
+	if s.policyProfiles != nil {
+		if active, err := s.policyProfiles.Active(ctx); err == nil {
+			profileName = active.Name
+			policyID = active.Fingerprint
+		} else {
+			s.logger.Warn("resolve active policy profile failed", slog.String("error", err.Error()))
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"status":        "ok",
-		"database":      "ok",
-		"safety":        "ok",
-		"safety_policy": policyID,
+		"status":         "ok",
+		"database":       "ok",
+		"safety":         "ok",
+		"safety_policy":  policyID,
+		"policy_profile": profileName,
 	})
 }
 
