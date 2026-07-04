@@ -14,6 +14,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/grants"
@@ -279,6 +280,34 @@ func (s *Server) handleListWorkItems(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toWorkItemResponse(item))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func (s *Server) handleBacklogReadiness(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !s.canListWorkItems(w, r, actor) {
+		return
+	}
+	limit, ok := parseReadinessLimit(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.workItems.List(r.Context(), "", limit)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "backlog_readiness_failed", "could not read backlog readiness")
+		return
+	}
+	items, err = s.filterWorkItems(r.Context(), actor, items)
+	if err != nil {
+		writeAccessError(w, err, "token cannot read backlog readiness")
+		return
+	}
+	writeJSON(w, http.StatusOK, backlog.Summarize(items, backlog.Options{
+		Limit: limit,
+		AsOf:  time.Now().UTC(),
+	}))
 }
 
 func (s *Server) handleCreateWorkItem(w http.ResponseWriter, r *http.Request) {
@@ -661,6 +690,26 @@ func parseLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
 	limit, err := strconv.Atoi(raw)
 	if err != nil || limit < 0 {
 		writeAPIError(w, http.StatusBadRequest, "invalid_limit", "limit must be a non-negative integer")
+		return 0, false
+	}
+	return limit, true
+}
+
+func parseReadinessLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return 200, true
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid_limit", "limit must be a non-negative integer")
+		return 0, false
+	}
+	if limit == 0 {
+		return 200, true
+	}
+	if limit > 200 {
+		writeAPIError(w, http.StatusBadRequest, "invalid_limit", "limit must be <= 200")
 		return 0, false
 	}
 	return limit, true

@@ -140,6 +140,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /v1/feed/stream", s.protected(http.HandlerFunc(s.handleFeedStream)))
 	s.mux.Handle("GET /v1/deterministic-errors", s.protected(http.HandlerFunc(s.handleListDeterministicErrors)))
 	s.mux.Handle("GET /v1/deterministic-errors/{id}", s.protected(http.HandlerFunc(s.handleGetDeterministicError)))
+	s.mux.Handle("GET /v1/backlog/readiness", s.protected(http.HandlerFunc(s.handleBacklogReadiness)))
 	s.mux.Handle("GET /v1/work-items", s.protected(http.HandlerFunc(s.handleListWorkItems)))
 	s.mux.Handle("POST /v1/work-items", s.commandWithAccess(s.canCreateWorkItem, http.HandlerFunc(s.handleCreateWorkItem)))
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))

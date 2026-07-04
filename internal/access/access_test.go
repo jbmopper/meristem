@@ -92,6 +92,7 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 	}
 	visible := []string{
 		"feed.read",
+		"backlog.readiness",
 		"work_items.list",
 		"work_items.get",
 		"work_items.spawn_child",

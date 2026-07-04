@@ -20,6 +20,7 @@ Currently shipped:
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
 - `meristem healthcheck` — `/readyz` probe binary, used by the `meristem` container's HEALTHCHECK directive (the runtime image is distroless, so the probe ships as a subcommand).
 - Deterministic error/log read views — `GET /v1/deterministic-errors` and MCP `deterministic_errors.*`, filtered by `logs.*` token scopes.
+- Backlog readiness read view — `GET /v1/backlog/readiness` and MCP `backlog.readiness`, folded from visible `work_items`.
 - v0 schema baseline (`tokens`, `work_items`, `work_item_relations`, `messages`, `message_parts`, `events`, `idempotency_keys`, `signals`).
 - `Dockerfile` + `docker-compose.yml` profiles for in-container deploys, plus a Caddy-based TLS topology.
 - `pkg/meristem` — minimal Go client for `POST /v1/signals` (handles bearer auth, idempotency-key generation, replay detection, and structured error decoding).
@@ -29,9 +30,10 @@ Currently shipped:
 The single source of truth lives at [`docs/spec.md`](docs/spec.md). The agent-facing distillation is [`AGENTS.md`](AGENTS.md). Operator notes for resource limits are in [`docs/safety.md`](docs/safety.md), and the deterministic error reporting guide is in [`docs/deterministic-errors.md`](docs/deterministic-errors.md). Bring-up and shutdown are in [`docs/operations.md`](docs/operations.md). The copy/paste bootstrap text for MCP-connected workers is in [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md). The subactor delegation reducer is documented in [`docs/subactor-grants.md`](docs/subactor-grants.md), and the durable human handoff path is in [`docs/escalations.md`](docs/escalations.md). The signals contract that other projects integrate against lives at [`docs/signals.md`](docs/signals.md), backed by the JSON Schema at [`docs/schemas/meristem.work_spec.v1.json`](docs/schemas/meristem.work_spec.v1.json).
 
 Project coordination now lives in meristem itself: live `work_item`s, appended
-events, transitions, and `/v1/feed`. Markdown coordination notes under
-`docs/coord/` are outage-only fallback or historical archive material, not the
-current backlog.
+events, transitions, `/v1/feed`, and the derived backlog-readiness view
+documented in [`docs/backlog-readiness.md`](docs/backlog-readiness.md).
+Markdown coordination notes under `docs/coord/` are outage-only fallback or
+historical archive material, not the current backlog.
 
 ## Layout
 

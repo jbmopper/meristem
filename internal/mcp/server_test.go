@@ -140,6 +140,7 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 		"policy_profile.switch",
 		"inbox.capture",
 		"feed.read",
+		"backlog.readiness",
 		"deterministic_errors.list",
 		"deterministic_errors.get",
 		"work_items.list",
@@ -190,6 +191,7 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		"policy_profile_switch",
 		"inbox_capture",
 		"feed_read",
+		"backlog_readiness",
 		"deterministic_errors_list",
 		"deterministic_errors_get",
 		"work_items_list",
@@ -271,6 +273,7 @@ func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 	got := toolNameSet(result.Tools)
 	for _, want := range []string{
 		"feed.read",
+		"backlog.readiness",
 		"work_items.list",
 		"work_items.get",
 		"work_items.spawn_child",

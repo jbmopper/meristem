@@ -35,6 +35,7 @@ type HTTPOptions struct {
 
 func ReadOnlyHTTPTools() map[string]bool {
 	return map[string]bool{
+		"backlog.readiness":         true,
 		"feed.read":                 true,
 		"work_items.list":           true,
 		"work_items.get":            true,

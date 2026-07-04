@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/access"
+	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
@@ -41,6 +42,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolPolicyProfileSwitch(),
 		s.toolInboxCapture(),
 		s.toolFeedRead(),
+		s.toolBacklogReadiness(),
 		s.toolDeterministicErrorsList(),
 		s.toolDeterministicErrorsGet(),
 		s.toolWorkItemsList(),
@@ -57,6 +59,46 @@ func (s *Server) buildTools() []Tool {
 		}
 	}
 	return tools
+}
+
+func (s *Server) toolBacklogReadiness() Tool {
+	return Tool{
+		Name:        "backlog.readiness",
+		Description: "Summarize visible backlog readiness groups from the work_items projection.",
+		InputSchema: schemaObject(nil, map[string]any{
+			"limit": schemaInt("Max visible work items to classify (0-200). Defaults to 200."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.WorkItems == nil {
+				return nil, errors.New("workitems service not configured")
+			}
+			var args struct {
+				Limit int `json:"limit"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			limit := args.Limit
+			if limit == 0 {
+				limit = 200
+			}
+			if limit < 0 || limit > 200 {
+				return nil, replayableToolErr(errors.New("limit must be between 0 and 200"))
+			}
+			items, err := s.deps.WorkItems.List(ctx, "", limit)
+			if err != nil {
+				return nil, err
+			}
+			items, err = s.filterWorkItems(ctx, actor, items)
+			if err != nil {
+				return nil, err
+			}
+			return backlog.Summarize(items, backlog.Options{
+				Limit: limit,
+				AsOf:  time.Now().UTC(),
+			}), nil
+		},
+	}
 }
 
 func (s *Server) toolInboxCapture() Tool {

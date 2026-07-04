@@ -71,6 +71,8 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return scopes[ScopeFeedRead] || (scopes[ScopeFeedReadAssigned] && hasWorkItemTreeScope(actor))
 	case "deterministic_errors.list", "deterministic_errors.get":
 		return hasAny(scopes, "logs.read", "logs.read_details", "logs.read_restricted", "logs.read_masked", "logs.read_all")
+	case "backlog.readiness":
+		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.list", "work_items.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.create":
