@@ -231,7 +231,13 @@ now done. The spec list and seeded backlog must not drift silently.
 Use `docs/coord/` only as an outage fallback when meristem itself is
 unreachable. If you must write a fallback note there, keep it short, mark it as
 temporary, and replay the durable facts into meristem as soon as the system is
-back. Closed or historical fallback notes belong in `docs/coord/archive/`.
+back. Follow `docs/coord/outage-protocol.md` for the exact outage file format
+and re-entry procedure. At session start or re-entry, check for unresolved
+incident files matching `docs/coord/outage-YYYYMMDD.md`; any such file without a
+resolved footer means replay is owed before new coordination work continues.
+Closed or historical fallback notes belong in `docs/coord/archive/`. A
+side-channel may report only substrate liveness, such as "API down" or "API
+back up"; it is never durable coordination state.
 
 ## When in doubt
 
