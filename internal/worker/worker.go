@@ -110,9 +110,10 @@ func (b Budgets) states() []string {
 // evaluation. Exported so the pure decision logic in EvaluateBreaches can
 // be unit-tested without a database.
 type Candidate struct {
-	ID        uuid.UUID
-	State     domain.WorkItemState
-	UpdatedAt time.Time
+	ID                uuid.UUID
+	State             domain.WorkItemState
+	UpdatedAt         time.Time
+	HumanReviewStatus domain.HumanReviewStatus
 }
 
 // Breach is the per-row outcome of EvaluateBreaches: a candidate that
@@ -170,6 +171,11 @@ type Result struct {
 	// PatienceEscalationsAlreadyRequested is the count of breached state epochs
 	// whose deterministic escalation already existed.
 	PatienceEscalationsAlreadyRequested int
+	// PatienceEscalationsSkippedAwaitingHuman is the count of breached items
+	// that were already waiting on owner input and therefore reached the
+	// human-review fixed point. The worker still records patience.breached for
+	// these items, but does not recursively escalate them.
+	PatienceEscalationsSkippedAwaitingHuman int
 
 	// ConvergenceCandidatesScanned is the count of running work_items
 	// with suggested convergence checks and therefore a chance to advance
@@ -241,8 +247,9 @@ func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid
 // to the convergence budget. The breach pass then reads every still
 // non-terminal work_item with a budget, emits one patience.breached event per
 // observed state epoch, and routes that epoch through the deterministic human
-// escalation path. Each emitted fact lands in its own transaction so a per-row
-// failure does not abort the whole pass.
+// escalation path unless the item is already waiting on owner review. Each
+// emitted fact lands in its own transaction so a per-row failure does not abort
+// the whole pass.
 func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	now := w.clock().UTC()
 	out := Result{}
@@ -262,7 +269,7 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	states := w.budgets.states()
 	if len(states) > 0 {
 		rows, err := w.pool.Query(ctx, `
-			SELECT id, state, updated_at
+			SELECT id, state, updated_at, human_review_status
 			FROM work_items
 			WHERE state = ANY($1::text[])
 			ORDER BY updated_at ASC
@@ -274,11 +281,13 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 		for rows.Next() {
 			var c Candidate
 			var st string
-			if err := rows.Scan(&c.ID, &st, &c.UpdatedAt); err != nil {
+			var review string
+			if err := rows.Scan(&c.ID, &st, &c.UpdatedAt, &review); err != nil {
 				rows.Close()
 				return Result{}, fmt.Errorf("worker: scan work_items row: %w", err)
 			}
 			c.State = domain.WorkItemState(st)
+			c.HumanReviewStatus = domain.HumanReviewStatus(review)
 			candidates = append(candidates, c)
 		}
 		rows.Close()
@@ -296,6 +305,10 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 				out.BreachesEmitted++
 			} else {
 				out.BreachesAlreadyRecorded++
+			}
+			if breach.Candidate.HumanReviewStatus == domain.HumanReviewBlocked {
+				out.PatienceEscalationsSkippedAwaitingHuman++
+				continue
 			}
 			escalationFresh, err := w.escalateBreach(ctx, breach)
 			if err != nil {

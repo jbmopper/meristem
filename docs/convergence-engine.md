@@ -229,11 +229,14 @@ are produced by projectors, not ad hoc migration DML.
      blocked; `EscalateRequestApproval` → the approval system (v1; until
      approvals ship, treat as `blocked` with a reason, never auto-approve).
 2. The worker then runs the patience metronome over remaining non-terminal
-   items. A breached state epoch appends `patience.breached` and immediately
-   routes through the default timeout rule: request a human escalation, create
-   the human-visible child, set `human_review_status=blocked`, and transition
-   the original item to `blocked`. The escalation reason excludes observed age,
-   so re-scanning the same state epoch converges on the same escalation id.
+   items. A breached state epoch appends `patience.breached`. If the item is
+   not already `human_review_status=blocked`, the same tick routes through the
+   default timeout rule: request a human escalation, create the human-visible
+   child, set `human_review_status=blocked`, and transition the original item
+   to `blocked`. Items already waiting on human review are the fixed point:
+   the worker keeps recording breach observations for owner visibility, but it
+   never recursively escalates them. The escalation reason excludes observed
+   age, so re-scanning the same state epoch converges on the same escalation id.
 3. Every transition is its own event (one state change = one event). The
    verdict event and the transition event are distinct.
 4. Where the work_item declares no checks, skip the convergence reducer; the

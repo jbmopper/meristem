@@ -236,6 +236,161 @@ func TestScanOnceReBreachesAfterStateRotation(t *testing.T) {
 	}
 }
 
+func TestScanOnceBlockedHumanReviewBreachesButDoesNotEscalate(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-human-review-fixed-point")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "waiting on human",
+		State:             domain.WorkItemCaptured,
+		HumanReviewStatus: domain.HumanReviewBlocked,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Hour))
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	if result.PatienceEscalationsSkippedAwaitingHuman != 1 {
+		t.Fatalf("skipped awaiting human = %d, want 1", result.PatienceEscalationsSkippedAwaitingHuman)
+	}
+	if result.PatienceEscalationsRequested != 0 {
+		t.Fatalf("patience escalations requested = %d, want 0", result.PatienceEscalationsRequested)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 0 {
+		t.Fatalf("escalation requests = %d, want 0", got)
+	}
+	if got := countRelationsForParent(t, ctx, pool, item.ID); got != 0 {
+		t.Fatalf("relations for waiting item = %d, want 0", got)
+	}
+	got, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if got.State != domain.WorkItemCaptured {
+		t.Fatalf("state = %s, want captured", got.State)
+	}
+	if got.HumanReviewStatus != domain.HumanReviewBlocked {
+		t.Fatalf("human_review_status = %s, want blocked", got.HumanReviewStatus)
+	}
+}
+
+func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-escalation-child-fixed-point")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "fertility check",
+		State:             domain.WorkItemCaptured,
+		HumanReviewStatus: domain.HumanReviewWavedThrough,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Hour))
+	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: time.Hour,
+		domain.WorkItemBlocked:  time.Hour,
+	}}
+	firstWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New first: %v", err)
+	}
+	first, err := firstWorker.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce first: %v", err)
+	}
+	if first.PatienceEscalationsRequested != 1 {
+		t.Fatalf("first patience escalations = %d, want 1", first.PatienceEscalationsRequested)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
+		t.Fatalf("escalation requests after first = %d, want 1", got)
+	}
+	childID := singleChildForParent(t, ctx, pool, item.ID)
+
+	secondNow := now.Add(2 * time.Hour)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, secondNow.Add(-2*time.Hour))
+	setWorkItemTimestamps(t, ctx, pool, childID, secondNow.Add(-2*time.Hour))
+	secondWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return secondNow })
+	if err != nil {
+		t.Fatalf("New second: %v", err)
+	}
+	second, err := secondWorker.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce second: %v", err)
+	}
+	if second.BreachesEmitted != 2 {
+		t.Fatalf("second breaches emitted = %d, want 2", second.BreachesEmitted)
+	}
+	if second.PatienceEscalationsSkippedAwaitingHuman != 2 {
+		t.Fatalf("second skipped awaiting human = %d, want 2", second.PatienceEscalationsSkippedAwaitingHuman)
+	}
+	if second.PatienceEscalationsRequested != 0 {
+		t.Fatalf("second patience escalations = %d, want 0", second.PatienceEscalationsRequested)
+	}
+
+	thirdNow := now.Add(4 * time.Hour)
+	thirdWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return thirdNow })
+	if err != nil {
+		t.Fatalf("New third: %v", err)
+	}
+	third, err := thirdWorker.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce third: %v", err)
+	}
+	if third.PatienceEscalationsRequested != 0 {
+		t.Fatalf("third patience escalations = %d, want 0", third.PatienceEscalationsRequested)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
+		t.Fatalf("escalation requests after later scans = %d, want 1", got)
+	}
+	if got := countRelationsForParent(t, ctx, pool, item.ID); got != 1 {
+		t.Fatalf("children of original = %d, want 1", got)
+	}
+	if got := countRelationsForParent(t, ctx, pool, childID); got != 0 {
+		t.Fatalf("children of human attention item = %d, want 0", got)
+	}
+	if got := countHumanAttentionItems(t, ctx, pool); got != 1 {
+		t.Fatalf("human attention items = %d, want 1", got)
+	}
+}
+
 func TestScanOnceConvergenceAcceptsAndPersistsVerdict(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -636,6 +791,33 @@ func countVerdictsForWorkItem(t *testing.T, ctx context.Context, pool *pgxpool.P
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM convergence_verdicts WHERE work_item_id = $1`, id).Scan(&n); err != nil {
 		t.Fatalf("count convergence_verdicts for %s: %v", id, err)
+	}
+	return n
+}
+
+func countRelationsForParent(t *testing.T, ctx context.Context, pool *pgxpool.Pool, parentID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM work_item_relations WHERE parent_id = $1`, parentID).Scan(&n); err != nil {
+		t.Fatalf("count relations for parent %s: %v", parentID, err)
+	}
+	return n
+}
+
+func singleChildForParent(t *testing.T, ctx context.Context, pool *pgxpool.Pool, parentID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT child_id FROM work_item_relations WHERE parent_id = $1`, parentID).Scan(&id); err != nil {
+		t.Fatalf("single child for parent %s: %v", parentID, err)
+	}
+	return id
+}
+
+func countHumanAttentionItems(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM work_items WHERE title LIKE 'Human attention:%'`).Scan(&n); err != nil {
+		t.Fatalf("count human attention items: %v", err)
 	}
 	return n
 }
