@@ -529,16 +529,7 @@ func looksSemanticToolError(err error) bool {
 		strings.Contains(message, "unknown field"),
 		strings.Contains(message, "must be a valid uuid"),
 		strings.HasPrefix(message, "payload:"),
-		strings.HasPrefix(message, "insufficient_scope:"),
-		strings.Contains(message, "not found"),
-		strings.HasPrefix(message, "relation cycle:"),
-		strings.Contains(message, "requires a human-source token"),
-		strings.Contains(message, "title is required"),
-		strings.Contains(message, "invalid state"),
-		strings.Contains(message, "invalid transition"),
-		strings.Contains(message, "event kind is required"),
-		strings.Contains(message, "suggested_convergence_checks"),
-		strings.Contains(message, "invalid human_review_status"):
+		strings.HasPrefix(message, "insufficient_scope:"):
 		return true
 	default:
 		return false

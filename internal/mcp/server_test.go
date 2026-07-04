@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -532,6 +533,15 @@ func TestServer_ParseUUID_RejectsBadInput(t *testing.T) {
 	}
 	if _, err := parseUUID(uuid.New().String(), "id"); err != nil {
 		t.Fatalf("expected ok, got %v", err)
+	}
+}
+
+func TestMutationToolErrorStatus_DoesNotTreatBareNotFoundAsSemantic(t *testing.T) {
+	if got := mutationToolErrorStatus(errors.New("pgx: prepared statement not found")); got != http.StatusInternalServerError {
+		t.Fatalf("bare not found infrastructure error status = %d, want %d", got, http.StatusInternalServerError)
+	}
+	if got := mutationToolErrorStatus(replayableToolErr(errors.New("work item 00000000-0000-0000-0000-000000000000 not found"))); got != http.StatusOK {
+		t.Fatalf("wrapped replayable not-found status = %d, want %d", got, http.StatusOK)
 	}
 }
 

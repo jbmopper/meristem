@@ -64,6 +64,49 @@ func TestMCPMutationInfrastructureErrorIsNotCached(t *testing.T) {
 	}
 }
 
+func TestMCPMutationInfrastructureNotFoundErrorIsNotCached(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	actor := createMCPTestActor(t, ctx, pool, writer, "mcp-infra-not-found")
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	s.actor = actor
+
+	calls := 0
+	addTestMutationTool(s, Tool{
+		Name:    "test.not_found_infra",
+		Mutates: true,
+		Handler: func(context.Context, domain.Token, json.RawMessage) (any, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New("pgx: prepared statement not found")
+			}
+			return map[string]any{"calls": calls}, nil
+		},
+	})
+
+	args := map[string]any{"idempotency_key": "infra-not-found-retry"}
+	if isError, text := callToolForTest(t, s, "test.not_found_infra", args); !isError || text != "pgx: prepared statement not found" {
+		t.Fatalf("first call should return uncached infrastructure not-found error, isError=%t text=%q", isError, text)
+	}
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:test.not_found_infra", "infra-not-found-retry"); got != 0 {
+		t.Fatalf("infrastructure not-found failure was recorded in idempotency_keys: got %d rows", got)
+	}
+
+	if isError, text := callToolForTest(t, s, "test.not_found_infra", args); isError || text != `{"calls":2}` {
+		t.Fatalf("retry should re-execute and succeed, isError=%t text=%q", isError, text)
+	}
+	if calls != 2 {
+		t.Fatalf("handler calls = %d, want 2", calls)
+	}
+}
+
 func TestMCPMutationSemanticToolErrorIsCached(t *testing.T) {
 	ctx := context.Background()
 	pool := newMCPIntegrationPool(t)
@@ -87,6 +130,38 @@ func TestMCPMutationSemanticToolErrorIsCached(t *testing.T) {
 	}
 	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.create", "semantic-replay"); got != 1 {
 		t.Fatalf("semantic error should record one idempotency row, got %d", got)
+	}
+}
+
+func TestMCPMutationSemanticWorkItemNotFoundIsCached(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	actor := createMCPTestActor(t, ctx, pool, writer, "mcp-semantic-not-found")
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems:   workitems.NewService(pool, writer),
+	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	s.actor = actor
+
+	missingID := uuid.New()
+	args := map[string]any{
+		"idempotency_key": "semantic-not-found-replay",
+		"id":              missingID.String(),
+		"to":              string(domain.WorkItemRunning),
+	}
+	want := "work item " + missingID.String() + " not found"
+	for i := 0; i < 2; i++ {
+		if isError, text := callToolForTest(t, s, "work_items.transition", args); !isError || text != want {
+			t.Fatalf("call %d should replay semantic not-found tool error, isError=%t text=%q", i+1, isError, text)
+		}
+	}
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.transition", "semantic-not-found-replay"); got != 1 {
+		t.Fatalf("semantic not-found error should record one idempotency row, got %d", got)
 	}
 }
 

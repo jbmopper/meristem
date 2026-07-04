@@ -81,7 +81,7 @@ func (s *Server) toolInboxCapture() Tool {
 				return nil, err
 			}
 			if actor.Source != "" && actor.Source != domain.SourceHuman {
-				return nil, errors.New("inbox.capture requires a human-source token")
+				return nil, replayableToolErr(errors.New("inbox.capture requires a human-source token"))
 			}
 			res, err := s.deps.Inbox.CaptureText(ctx, actor, args.Text)
 			if err != nil {
@@ -346,6 +346,9 @@ func (s *Server) toolWorkItemsCreate() Tool {
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
+			if err := validateWorkItemCreateArgs(args.Title, args.State, args.SuggestedConvergenceChecks, args.HumanReviewStatus); err != nil {
+				return nil, err
+			}
 			if err := s.canCreateWorkItem(ctx, actor); err != nil {
 				return nil, err
 			}
@@ -400,6 +403,9 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
+			if err := validateWorkItemCreateArgs(args.Title, args.State, args.SuggestedConvergenceChecks, args.HumanReviewStatus); err != nil {
+				return nil, err
+			}
 			parent, err := parseUUID(args.ParentID, "parent_id")
 			if err != nil {
 				return nil, err
@@ -417,10 +423,10 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 			})
 			if err != nil {
 				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, fmt.Errorf("parent work item %s not found", parent)
+					return nil, replayableToolErr(fmt.Errorf("parent work item %s not found", parent))
 				}
 				if errors.Is(err, workitems.ErrRelationCycle) {
-					return nil, fmt.Errorf("relation cycle: parent %s descends from child", parent)
+					return nil, replayableToolErr(fmt.Errorf("relation cycle: parent %s descends from child", parent))
 				}
 				return nil, err
 			}
@@ -459,18 +465,21 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 			if err != nil {
 				return nil, err
 			}
+			if strings.TrimSpace(args.Kind) == "" {
+				return nil, replayableToolErr(errors.New("workitems: event kind is required"))
+			}
 			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
 				return nil, err
 			}
 			var payload any
 			if len(args.Payload) > 0 {
 				if err := json.Unmarshal(args.Payload, &payload); err != nil {
-					return nil, fmt.Errorf("payload: %w", err)
+					return nil, replayableToolErr(fmt.Errorf("payload: %w", err))
 				}
 			}
 			if err := s.deps.WorkItems.AppendEvent(ctx, id, args.Kind, payload, actor); err != nil {
 				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, fmt.Errorf("work item %s not found", id)
+					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
 				}
 				return nil, err
 			}
@@ -509,6 +518,9 @@ func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 			if err != nil {
 				return nil, err
 			}
+			if err := validateWorkItemMetadataArgs(args.SuggestedConvergenceChecks, args.HumanReviewStatus); err != nil {
+				return nil, err
+			}
 			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
 				return nil, err
 			}
@@ -519,7 +531,7 @@ func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 			})
 			if err != nil {
 				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, fmt.Errorf("work item %s not found", id)
+					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
 				}
 				return nil, err
 			}
@@ -554,13 +566,20 @@ func (s *Server) toolWorkItemsTransition() Tool {
 			if err != nil {
 				return nil, err
 			}
+			to := domain.WorkItemState(args.To)
+			if !to.Valid() {
+				return nil, replayableToolErr(fmt.Errorf("workitems: invalid state %q", to))
+			}
 			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
 				return nil, err
 			}
-			item, err := s.deps.WorkItems.Transition(ctx, id, domain.WorkItemState(args.To), args.Reason, actor)
+			item, err := s.deps.WorkItems.Transition(ctx, id, to, args.Reason, actor)
 			if err != nil {
 				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, fmt.Errorf("work item %s not found", id)
+					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
+				}
+				if strings.Contains(err.Error(), "invalid transition") {
+					return nil, replayableToolErr(err)
 				}
 				return nil, err
 			}
@@ -578,7 +597,7 @@ func (s *Server) filterFeedItems(ctx context.Context, actor domain.Token, items 
 	}
 	filtered, err := s.deps.Access.FilterFeedItems(ctx, actor, items)
 	if errors.Is(err, access.ErrDenied) {
-		return nil, fmt.Errorf("insufficient_scope: token cannot read feed")
+		return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read feed"))
 	}
 	return filtered, err
 }
@@ -592,7 +611,7 @@ func (s *Server) filterFeedPage(ctx context.Context, actor domain.Token, page fe
 	}
 	filtered, err := s.deps.Access.FilterFeedPage(ctx, actor, page)
 	if errors.Is(err, access.ErrDenied) {
-		return feed.Page{}, fmt.Errorf("insufficient_scope: token cannot read feed")
+		return feed.Page{}, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read feed"))
 	}
 	return filtered, err
 }
@@ -606,7 +625,7 @@ func (s *Server) filterWorkItems(ctx context.Context, actor domain.Token, items 
 	}
 	filtered, err := s.deps.Access.FilterWorkItems(ctx, actor, items)
 	if errors.Is(err, access.ErrDenied) {
-		return nil, fmt.Errorf("insufficient_scope: token cannot read work_items")
+		return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read work_items"))
 	}
 	return filtered, err
 }
@@ -620,7 +639,7 @@ func (s *Server) canReadWorkItem(ctx context.Context, actor domain.Token, id uui
 	}
 	if err := s.deps.Access.CanReadWorkItem(ctx, actor, id); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return fmt.Errorf("work item %s not found", id)
+			return replayableToolErr(fmt.Errorf("work item %s not found", id))
 		}
 		return err
 	}
@@ -636,7 +655,7 @@ func (s *Server) canCreateWorkItem(ctx context.Context, actor domain.Token) erro
 	}
 	if err := s.deps.Access.CanCreateWorkItem(ctx, actor); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return fmt.Errorf("insufficient_scope: token cannot create top-level work_items")
+			return replayableToolErr(fmt.Errorf("insufficient_scope: token cannot create top-level work_items"))
 		}
 		return err
 	}
@@ -652,7 +671,7 @@ func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uu
 	}
 	if err := s.deps.Access.CanWriteWorkItem(ctx, actor, id); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return fmt.Errorf("work item %s not found", id)
+			return replayableToolErr(fmt.Errorf("work item %s not found", id))
 		}
 		return err
 	}
@@ -754,6 +773,39 @@ func parseUUID(raw, field string) (uuid.UUID, error) {
 	return id, nil
 }
 
+func validateWorkItemCreateArgs(title, state string, checks []string, humanReview string) error {
+	if strings.TrimSpace(title) == "" {
+		return replayableToolErr(errors.New("workitems: title is required"))
+	}
+	if err := validateWorkItemStateArg(state); err != nil {
+		return err
+	}
+	return validateWorkItemMetadataArgs(checks, humanReview)
+}
+
+func validateWorkItemMetadataArgs(checks []string, humanReview string) error {
+	for i, check := range checks {
+		if strings.TrimSpace(check) == "" {
+			return replayableToolErr(fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i))
+		}
+	}
+	if humanReview != "" && !domain.HumanReviewStatus(humanReview).Valid() {
+		return replayableToolErr(fmt.Errorf("workitems: invalid human_review_status %q", humanReview))
+	}
+	return nil
+}
+
+func validateWorkItemStateArg(state string) error {
+	if state == "" {
+		return nil
+	}
+	parsed := domain.WorkItemState(state)
+	if !parsed.Valid() {
+		return replayableToolErr(fmt.Errorf("workitems: invalid state %q", parsed))
+	}
+	return nil
+}
+
 func schemaObject(required []string, properties map[string]any) map[string]any {
 	out := map[string]any{
 		"type":                 "object",
@@ -839,7 +891,10 @@ func (s *Server) toolPolicyProfileSwitch() Tool {
 				return nil, err
 			}
 			if args.Profile == "" {
-				return nil, errors.New("profile_required: profile is required")
+				return nil, replayableToolErr(errors.New("profile_required: profile is required"))
+			}
+			if _, err := safety.ProfileByName(args.Profile); err != nil {
+				return nil, replayableToolErr(err)
 			}
 			active, switched, err := s.deps.PolicyProfiles.Switch(ctx, policyprofile.SwitchInput{
 				To:    args.Profile,
