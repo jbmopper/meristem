@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -362,8 +363,10 @@ func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.
 		RequestHash: req.RequestHash,
 		Run: func(callCtx context.Context) (int, []byte, error) {
 			payload, err := tool.Handler(callCtx, actor, arguments)
+			status := http.StatusOK
 			var toolResult map[string]any
 			if err != nil {
+				status = mutationToolErrorStatus(err)
 				toolResult = toolErrorResult(err.Error())
 			} else {
 				toolResult = toolSuccessResult(payload)
@@ -372,7 +375,7 @@ func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.
 			if err != nil {
 				return 0, nil, fmt.Errorf("marshal MCP tool result: %w", err)
 			}
-			return 200, encoded, nil
+			return status, encoded, nil
 		},
 	})
 	if err != nil {
@@ -476,6 +479,67 @@ func toolErrorResult(message string) map[string]any {
 			{"type": "text", "text": message},
 		},
 		"isError": true,
+	}
+}
+
+type replayableToolError struct {
+	err error
+}
+
+func (e replayableToolError) Error() string {
+	return e.err.Error()
+}
+
+func (e replayableToolError) Unwrap() error {
+	return e.err
+}
+
+func replayableToolErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return replayableToolError{err: err}
+}
+
+func mutationToolErrorStatus(err error) int {
+	if err == nil || isReplayableToolError(err) || looksSemanticToolError(err) {
+		return http.StatusOK
+	}
+	return http.StatusInternalServerError
+}
+
+func isReplayableToolError(err error) bool {
+	var replayable replayableToolError
+	return errors.As(err, &replayable)
+}
+
+// looksSemanticToolError recognizes refusals that mean "the tool reached a
+// deterministic conclusion" and are therefore safe to pin under the caller's
+// idempotency key. Unknown errors are treated as infrastructure failures so a
+// same-key retry can re-execute after transient database/projector trouble.
+func looksSemanticToolError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	switch {
+	case strings.HasPrefix(message, "invalid arguments:"),
+		strings.Contains(message, "unknown field"),
+		strings.Contains(message, "must be a valid uuid"),
+		strings.HasPrefix(message, "payload:"),
+		strings.HasPrefix(message, "insufficient_scope:"),
+		strings.Contains(message, "not found"),
+		strings.HasPrefix(message, "relation cycle:"),
+		strings.Contains(message, "requires a human-source token"),
+		strings.Contains(message, "title is required"),
+		strings.Contains(message, "invalid state"),
+		strings.Contains(message, "invalid transition"),
+		strings.Contains(message, "event kind is required"),
+		strings.Contains(message, "suggested_convergence_checks"),
+		strings.Contains(message, "invalid human_review_status"):
+		return true
+	default:
+		return false
 	}
 }
 
