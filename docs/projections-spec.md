@@ -49,19 +49,25 @@ payload:
   type:      "feed"                             -- structural: only "feed" in this slice ("brief" reserved)
   rootstock: true                               -- structural: same immutability rule as cultivars
   filter:                                       -- structural: the expression
-    kinds:        ["dispatch.requested"]        -- exact kinds, and/or:
+    kinds:        ["escalation.requested"]      -- exact kinds, and/or:
     kind_classes: ["decision"]                  -- taxonomy classes
-    subject_scope: "tree"                       -- "tree" (anchored via feedItemAnchors
-                                                --   against the caller's tree scopes)
-                                                --   | "all" (requires feed.read)
   description: "<free text>"                    -- narrative
 ```
 
-Filter semantics: `kinds ∪ kind_classes` selects; `subject_scope` decides
-whether the existing tree-anchoring filter applies. No payload-level
-predicates in this slice — selection stays cheap, indexable, and obviously
-deterministic. Projection rows land in a `projections` table via the normal
-projector pattern; replay rebuilds identically.
+Filter semantics: `kinds ∪ kind_classes` selects. **Projections select
+content; they never grant or narrow authority.** There is no scope field:
+every projection read passes through the caller's existing access reduction
+(`FilterFeedItems`/`feedItemAnchors` for `feed.read_assigned` tokens,
+unfiltered for `feed.read`/root/legacy), identical to today's feed. A
+projection therefore cannot show a token anything its scopes would hide,
+and cannot hide tree content from a token that could see it on the default
+feed — visibility has exactly one owner, the access reducer. (Per-tree or
+per-subject view narrowing, if a consumer ever needs it beyond what token
+scoping provides, arrives later as read-time *parameters*, not stored
+authority.) No payload-level predicates in this slice — selection stays
+cheap, indexable, and obviously deterministic. Projection rows land in a
+`projections` table via the normal projector pattern; replay rebuilds
+identically.
 
 A definition whose `kinds` contains an unknown kind, or whose class names
 are not in the taxonomy, is refused at append with `unknown_kind` /
@@ -79,9 +85,9 @@ optional `projection` argument:
   the implementation may literally define it that way to collapse code paths)
 - present → resolve name against the projection table (`unknown_projection:
   no projection named X; consult projections.list` on miss), apply the
-  filter, then apply the caller's access exactly as today:
-  `subject_scope: tree` composes with `FilterFeedItems`/`feedItemAnchors`;
-  `subject_scope: all` requires the `feed.read` scope
+  filter, then apply the caller's access reduction exactly as today — a
+  `feed.read_assigned` token reads any projection and sees its in-tree
+  subset; `feed.read` sees the whole view
 - cursor semantics unchanged and cursors are **per-projection** (the cursor
   token embeds the projection name+version; a cursor from one projection is
   refused on another with `cursor_projection_mismatch` — this closes the
@@ -103,12 +109,15 @@ Long-poll/SSE paths reuse the same resolved filter; no new transport.
 
 ## Seed fixtures (R8 tie-in)
 
-- `activity@1` — the current default feed, `subject_scope: all` (rootstock)
-- `dispatch@1` — `kinds: [dispatch.requested]`, `subject_scope: tree`
-  (rootstock). The `dispatch.requested` kind itself ships with the R3
-  remainder; seeding the projection first is harmless (empty view)
-- `owner-attention@1` — `kinds: [escalation.requested, patience.breached]`,
-  `subject_scope: all` (rootstock) — the owner's nudge feed
+- `activity@1` — the current default feed: `kinds` = today's
+  `IncludedKinds` (rootstock). Backs the no-argument read path for every
+  token class, since access reduction is unchanged
+- `owner-attention@1` — `kinds: [escalation.requested, patience.breached]`
+  (rootstock) — the owner's nudge feed
+- `dispatch@1` — **not seeded in this slice.** It references
+  `dispatch.requested`, which does not exist yet, and seeding it would
+  contradict this spec's own `unknown_kind` validation. The R3 remainder
+  (`b6526f08`) ships the kind and this fixture together
 - `work-item-brief@1` — **reserved name only** (`type: "brief"` refused at
   append in this slice); R2's phloem ref stays a string that now has a
   registry to eventually resolve against
@@ -118,9 +127,11 @@ Long-poll/SSE paths reuse the same resolved filter; no new transport.
 1. Integration test: define a projection via API, read it via
    `feed.read?projection=`, rebuild the projections table from events —
    byte-identical; cursor from one projection refused on another.
-2. Integration test: scoped token reading a `tree` projection sees exactly
-   the in-tree subset (composition with feedItemAnchors); `all` projection
-   without `feed.read` scope is denied.
+2. Integration test: a `feed.read_assigned` token reading any projection —
+   including `activity@1` via the no-argument default path — sees exactly
+   the same in-tree subset it sees today; a `feed.read` token sees the
+   whole view. Projections grant nothing and hide nothing that token
+   scopes do not.
 3. Taxonomy partition test: every kind in `domain.AllEventKinds` classified
    exactly once; `admin` kinds refused in definitions.
 4. Archive replay: June-2026 dump classified by the taxonomy — >90% of
