@@ -136,6 +136,7 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 	}
 
 	expected := []string{
+		"policy_profile.switch",
 		"inbox.capture",
 		"feed.read",
 		"deterministic_errors.list",
@@ -185,6 +186,7 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	}
 
 	expected := []string{
+		"policy_profile_switch",
 		"inbox_capture",
 		"feed_read",
 		"deterministic_errors_list",
@@ -217,6 +219,7 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 	s := newTestServer(t)
 	mutations := map[string]bool{
+		"policy_profile.switch":      true,
 		"inbox.capture":              true,
 		"work_items.create":          true,
 		"work_items.spawn_child":     true,

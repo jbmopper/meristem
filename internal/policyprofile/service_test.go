@@ -33,6 +33,17 @@ func TestSwitchRequiresHumanSource(t *testing.T) {
 	}
 }
 
+func TestSwitchRefusesRootToken(t *testing.T) {
+	s := NewService(nil, nil)
+	_, _, err := s.Switch(context.Background(), SwitchInput{
+		To:    safety.ProfileBringUp,
+		Actor: domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true},
+	})
+	if !errors.Is(err, ErrRootForbidden) {
+		t.Fatalf("expected ErrRootForbidden for root token, got %v", err)
+	}
+}
+
 func TestSwitchRefusesUnknownProfileBeforeDB(t *testing.T) {
 	s := NewService(nil, nil)
 	_, _, err := s.Switch(context.Background(), SwitchInput{

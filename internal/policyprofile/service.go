@@ -26,7 +26,13 @@ import (
 // event stream.
 var SubjectID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("meristem|policy_profile|active"))
 
-var ErrHumanRequired = errors.New("policyprofile: profile switch requires a human token")
+var (
+	ErrHumanRequired = errors.New("policyprofile: profile switch requires a human token")
+	// ErrRootForbidden enforces spec principle 7: the root token only mints
+	// and revokes tokens. Operating posture is switched with an ordinary
+	// non-root human token.
+	ErrRootForbidden = errors.New("policyprofile: root token cannot switch profiles; use a non-root human token")
+)
 
 // Service reads and switches the active profile.
 type Service struct {
@@ -82,13 +88,17 @@ type SwitchInput struct {
 }
 
 // Switch appends policy_profile.switched after validating the target profile
-// and the actor. Only human-source tokens may switch: the profile is the
-// owner's declared posture, and agents must never quietly re-mellow the
-// system they are being measured by. Switching to the already-active profile
-// is a no-op that appends nothing.
+// and the actor. Only non-root human-source tokens may switch: the profile is
+// the owner's declared posture, agents must never quietly re-mellow the
+// system they are being measured by, and the root token stays confined to
+// token mint/revoke per spec principle 7. Switching to the already-active
+// profile is a no-op that appends nothing.
 func (s *Service) Switch(ctx context.Context, in SwitchInput) (Active, bool, error) {
 	if in.Actor.Source != "" && in.Actor.Source != domain.SourceHuman {
 		return Active{}, false, ErrHumanRequired
+	}
+	if in.Actor.IsRoot {
+		return Active{}, false, ErrRootForbidden
 	}
 	target, err := safety.ProfileByName(in.To)
 	if err != nil {

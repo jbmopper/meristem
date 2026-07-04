@@ -37,6 +37,14 @@ func TestPolicyProfileSwitchIntegration(t *testing.T) {
 		t.Fatalf("create root token: %v", err)
 	}
 	root := rootResult.Token
+	operator, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "profile-operator",
+		Source: domain.SourceHuman,
+		Actor:  &root,
+	})
+	if err != nil {
+		t.Fatalf("create operator token: %v", err)
+	}
 	agent, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
 		Name:   "profile-agent",
 		Source: domain.SourceAgent,
@@ -66,8 +74,17 @@ func TestPolicyProfileSwitchIntegration(t *testing.T) {
 		t.Fatalf("denied switch appended events: before=%d after=%d", before, after)
 	}
 
-	// Human switch to bring-up: attributed event + projection + readyz.
-	switched := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", rootResult.Secret, "profile-switch-1", []byte(`{"profile":"bring-up"}`))
+	// Root cannot switch either: principle 7 confines root to token
+	// mint/revoke. The refusal appends nothing.
+	rootDenied := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", rootResult.Secret, "profile-root-denied", []byte(`{"profile":"bring-up"}`))
+	assertRESTStatus(t, rootDenied, http.StatusForbidden)
+	assertErrorCode(t, rootDenied, "root_token_forbidden")
+	if after := totalEventCount(t, pool); after != before {
+		t.Fatalf("root-denied switch appended events: before=%d after=%d", before, after)
+	}
+
+	// Operator switch to bring-up: attributed event + projection + readyz.
+	switched := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", operator.Secret, "profile-switch-1", []byte(`{"profile":"bring-up"}`))
 	assertRESTStatus(t, switched, http.StatusOK)
 	var resp policyProfileResponse
 	if err := json.Unmarshal(switched.Body.Bytes(), &resp); err != nil {
@@ -77,14 +94,14 @@ func TestPolicyProfileSwitchIntegration(t *testing.T) {
 		t.Fatalf("switch response: %+v (want bring-up/%s/switched)", resp, bringUpFP)
 	}
 	assertSwitchEventCount(t, pool, 1)
-	assertSwitchEventAttributed(t, pool, root.ID)
+	assertSwitchEventAttributed(t, pool, operator.Token.ID)
 	ready = doReadyz(t, server.Handler())
 	if ready["policy_profile"] != safety.ProfileBringUp || ready["safety_policy"] != bringUpFP {
 		t.Fatalf("post-switch readyz: want bring-up/%s, got %v", bringUpFP, ready)
 	}
 
 	// Re-switch to the active profile: no-op, no new event.
-	again := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", rootResult.Secret, "profile-switch-2", []byte(`{"profile":"bring-up"}`))
+	again := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", operator.Secret, "profile-switch-2", []byte(`{"profile":"bring-up"}`))
 	assertRESTStatus(t, again, http.StatusOK)
 	var againResp policyProfileResponse
 	if err := json.Unmarshal(again.Body.Bytes(), &againResp); err != nil {
@@ -96,12 +113,12 @@ func TestPolicyProfileSwitchIntegration(t *testing.T) {
 	assertSwitchEventCount(t, pool, 1)
 
 	// Unknown profile is a structured refusal.
-	unknown := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", rootResult.Secret, "profile-switch-3", []byte(`{"profile":"mellow"}`))
+	unknown := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", operator.Secret, "profile-switch-3", []byte(`{"profile":"mellow"}`))
 	assertRESTStatus(t, unknown, http.StatusUnprocessableEntity)
 	assertErrorCode(t, unknown, "invalid_policy_profile")
 
 	// Switch back: distinct action, second event, steady restored.
-	back := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", rootResult.Secret, "profile-switch-4", []byte(`{"profile":"steady"}`))
+	back := doREST(t, server.Handler(), http.MethodPost, "/v1/policy-profile", operator.Secret, "profile-switch-4", []byte(`{"profile":"steady"}`))
 	assertRESTStatus(t, back, http.StatusOK)
 	assertSwitchEventCount(t, pool, 2)
 	ready = doReadyz(t, server.Handler())

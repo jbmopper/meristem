@@ -14,6 +14,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -37,6 +38,7 @@ type Tool struct {
 
 func (s *Server) buildTools() []Tool {
 	tools := []Tool{
+		s.toolPolicyProfileSwitch(),
 		s.toolInboxCapture(),
 		s.toolFeedRead(),
 		s.toolDeterministicErrorsList(),
@@ -816,4 +818,41 @@ func schemaBool(description string) map[string]any {
 
 func schemaAny(description string) map[string]any {
 	return map[string]any{"description": description}
+}
+
+func (s *Server) toolPolicyProfileSwitch() Tool {
+	return Tool{
+		Name:        "policy_profile.switch",
+		Description: "Switch the active safety policy profile (bring-up or steady). Human, non-root tokens only.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"profile"}, map[string]any{
+			"profile": schemaString("Target profile name: bring-up or steady."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.PolicyProfiles == nil {
+				return nil, errors.New("policy profile service not configured")
+			}
+			var args struct {
+				Profile string `json:"profile"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			if args.Profile == "" {
+				return nil, errors.New("profile_required: profile is required")
+			}
+			active, switched, err := s.deps.PolicyProfiles.Switch(ctx, policyprofile.SwitchInput{
+				To:    args.Profile,
+				Actor: actor,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"profile":     active.Name,
+				"fingerprint": active.Fingerprint,
+				"switched":    switched,
+			}, nil
+		},
+	}
 }

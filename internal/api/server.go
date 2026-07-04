@@ -111,6 +111,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 			WorkItems:           s.workItems,
 			DeterministicErrors: s.deterministicErrors,
 			Feed:                s.feed,
+			PolicyProfiles:      s.policyProfiles,
 			MaxFeedWait:         s.policy.MaxFeedWait,
 		}, mcp.ServerInfo{Name: "meristem", Version: "dev"}, logger)
 	}

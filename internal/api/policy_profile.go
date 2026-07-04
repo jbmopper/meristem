@@ -21,6 +21,10 @@ func (s *Server) canSwitchPolicyProfile(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, http.StatusForbidden, "human_token_required", "policy profile switches require a human token")
 		return false
 	}
+	if actor.IsRoot {
+		writeAPIError(w, http.StatusForbidden, "root_token_forbidden", "the root token only mints and revokes tokens; switch profiles with a non-root human token")
+		return false
+	}
 	return true
 }
 
@@ -54,6 +58,10 @@ func (s *Server) handleSwitchPolicyProfile(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, policyprofile.ErrHumanRequired) {
 			writeAPIError(w, http.StatusForbidden, "human_token_required", "policy profile switches require a human token")
+			return
+		}
+		if errors.Is(err, policyprofile.ErrRootForbidden) {
+			writeAPIError(w, http.StatusForbidden, "root_token_forbidden", "the root token only mints and revokes tokens; switch profiles with a non-root human token")
 			return
 		}
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_policy_profile", err.Error())
