@@ -401,7 +401,10 @@ v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the 
 - ◻︎ APNs (or Web Push) for approval requests, with email/SMS fallback.
 - ◻︎ Minimal web UI: feed, work-item detail, approve/deny, dead-letter view.
 - ✅ iPhone Shortcut posting to `/v1/inbox/messages`.
-- 🚧 MCP server with REST parity ✅ for read/triage paths; write paths with approval requests open.
+- 🚧 MCP server with REST parity ✅ for read/triage paths and substrate
+  `work_item` mutations over stdio; artifact attachment, approval
+  request/decision tools, and approval-gated connector write actions remain
+  open.
 - ◻︎ Nightly Postgres dumps to object storage; documented and rehearsed restore.
 - 🚧 Single-VM deploy with TLS, disk encryption, and object overflow.
 
