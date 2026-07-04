@@ -96,14 +96,10 @@ func (s *Server) handleCaptureMessage(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "message_capture_failed", err.Error())
 		return
 	}
-	capturedAt := time.Now().UTC()
-	if item, err := s.workItems.Get(r.Context(), result.WorkItemID); err == nil {
-		capturedAt = item.CreatedAt
-	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"message_id":   result.MessageID,
 		"work_item_id": result.WorkItemID,
-		"captured_at":  capturedAt,
+		"captured_at":  result.CapturedAt,
 	})
 }
 

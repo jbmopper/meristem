@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,7 @@ func NewService(pool *pgxpool.Pool, writer *events.Writer) *Service {
 type CaptureResult struct {
 	MessageID  uuid.UUID
 	WorkItemID uuid.UUID
+	CapturedAt time.Time
 }
 
 func (s *Service) CaptureText(ctx context.Context, actor domain.Token, text string) (CaptureResult, error) {
@@ -76,7 +78,11 @@ func (s *Service) CaptureText(ctx context.Context, actor domain.Token, text stri
 	if err := tx.Commit(ctx); err != nil {
 		return CaptureResult{}, err
 	}
-	return CaptureResult{MessageID: messageID, WorkItemID: workItemID}, nil
+	var capturedAt time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT created_at FROM work_items WHERE id = $1`, workItemID).Scan(&capturedAt); err != nil {
+		return CaptureResult{}, fmt.Errorf("inbox: read captured work item timestamp: %w", err)
+	}
+	return CaptureResult{MessageID: messageID, WorkItemID: workItemID, CapturedAt: capturedAt}, nil
 }
 
 func sourceForActor(actor domain.Token) domain.Source {

@@ -132,6 +132,7 @@ func (s *Server) toolInboxCapture() Tool {
 			return map[string]any{
 				"message_id":   res.MessageID,
 				"work_item_id": res.WorkItemID,
+				"captured_at":  res.CapturedAt,
 			}, nil
 		},
 	}
