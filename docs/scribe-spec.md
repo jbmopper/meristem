@@ -150,8 +150,8 @@ On the worker's next convergence pass over the scribe child (or evaluated
 inline by the propose endpoint — implementation may choose; the reducer is
 pure either way), the verdict is recorded through the existing
 `convergence.verdict_recorded` machinery with reducer identity
-`checks_proposal.v1`, inputs digest over the proposal payload, and the
-existing budget/attempt semantics:
+`checks_proposal`, reducer version `1`, inputs digest over the proposal
+payload, and the existing budget/attempt semantics:
 
 - **accept** → same transaction: `work_item.metadata_updated` on the parent
   (from: `[]`, to: proposed checks; system source, worker actor, reducer

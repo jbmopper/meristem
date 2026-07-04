@@ -27,24 +27,25 @@ subject_id: uuid5(ns, "tropism|" + name)     -- one subject per name; versions a
 payload:
   name:        "checklist-all"               -- structural
   version:     2                              -- structural, monotonic per name
-  reducer_id:  "checklist.v1"                 -- structural: must name a registered reducer implementation
+  reducer:     {identity: "all_pass_checklist", version: 1}  -- structural: must name a registered reducer implementation
   params:      { ... }                        -- structural: reducer-specific config (e.g. budget defaults)
   description: "<free text>"                  -- narrative
 ```
 
 A tropism *instance* parameterizes a reducer *implementation*. The reducer
-implementations are code — the closed set, versioned by id, each a pure
-function with unit tests (`internal/convergence`). v1 registered reducer ids:
+implementations are code — the closed set, versioned by `(identity, version)`,
+each a pure function with unit tests (`internal/convergence`). v1 registered
+reducers:
 
-- `checklist.v1` — existing all-pass checklist (already shipped)
-- `checks_proposal.v1` — the scribe validation reducer (scribe spec §4)
-- `human_ack.v1` — trivially: verdict follows an owner decision event
+- `all_pass_checklist@1` — existing all-pass checklist (already shipped)
+- `checks_proposal@1` — the scribe validation reducer (scribe spec §4)
+- `human_ack@1` — trivially: verdict follows an owner decision event
 
-Reserved, not implemented in this slice: `run_to_green.v1`, `judge_vote.v1`
-(blocked on the heterogeneous-panel open question), `external_signal.v1`.
-Defining a tropism whose `reducer_id` is not registered is refused at append
-time with `unknown_reducer` — the registry cannot point at semantics that do
-not exist.
+Reserved, not implemented in this slice: `run_to_green@1`, `judge_vote@1`
+(blocked on the heterogeneous-panel open question), `external_signal@1`.
+Defining a tropism whose reducer `(identity, version)` is not registered is
+refused at append time with `unknown_reducer` — the registry cannot point at
+semantics that do not exist.
 
 ### `cultivar.defined`
 
@@ -86,20 +87,23 @@ New REST/MCP surface, mutating, idempotency-key required:
 - `registry.list` / `registry.get` (read; visible to any work-items-capable token)
 
 Authority for this slice: writes require a new scope `registry.write`, held
-by the owner's tokens and (per R8) the seed token. **R5's self-extension flow
-is explicitly out of scope here** — when it lands, worker-proposed cultivars
-arrive through the grant reducer + review gate and end in the same
-`cultivar.defined` append, so the event contract needs no change.
+by operator-authorized client tokens and (per R8) the seed token. The root
+token does not participate here; it remains limited to minting and revoking
+tokens. **R5's self-extension flow is explicitly out of scope here** — when it
+lands, worker-proposed cultivars arrive through the grant reducer + review gate
+and end in the same `cultivar.defined` append, so the event contract needs no
+change.
 
 Versioning rule: a `*.defined` append for an existing name must carry
 `version = current + 1`, else refused with `version_conflict`. Nothing is
 ever mutated or deleted; deactivation is a future `cultivar.retired` event
 kind, reserved now, not implemented.
 
-**Rootstock immutability:** entries with `rootstock: true` refuse
-redefinition unless the actor is the root token. This is the R1/refresh-doc
-rule ("changing rootstock is an owner-approved migration") enforced at the
-only write seam.
+**Rootstock immutability:** entries with `rootstock: true` refuse redefinition
+in this slice. Changing rootstock is an owner-approved migration represented by
+a future explicit migration/approval path, not by broadening the root token's
+authority. This enforces the R1/refresh-doc rule at the only write seam without
+violating the token model.
 
 ## Consumption seams
 
@@ -123,9 +127,9 @@ registry.list` — satisfying R2's third convergence check verbatim.
 
 `meristem seed` plants, idempotently:
 
-- tropisms: `checklist-all@1` (reducer `checklist.v1`, current default
-  budget), `checks-proposal@1` (reducer `checks_proposal.v1`),
-  `human-ack@1` (reducer `human_ack.v1`)
+- tropisms: `checklist-all@1` (reducer `all_pass_checklist@1`, current default
+  budget), `checks-proposal@1` (reducer `checks_proposal@1`),
+  `human-ack@1` (reducer `human_ack@1`)
 - cultivars (all `rootstock: true`):
   - `convergence-scribe@1` — exactly the values in scribe spec §5
   - `human-attention@1` — the escalation-item shape the metronome already
@@ -143,8 +147,9 @@ ids + discriminator-free payloads that legitimately never repeat).
    verdict and the reducer-identity field in `convergence.verdict_recorded`.
 3. Integration test: scribe pass and dispatch writer refuse an unknown
    cultivar name with `unknown_cultivar` naming `registry.list`; registry
-   write with unregistered `reducer_id` refused with `unknown_reducer`;
-   non-root redefinition of a rootstock cultivar refused.
+   write with unregistered reducer `(identity, version)` refused with `unknown_reducer`;
+   any redefinition of a rootstock cultivar refused (no actor may redefine
+   rootstock in this slice, per the immutability rule).
 4. Seed idempotency: second `meristem seed` run appends zero fresh registry
    events.
 
