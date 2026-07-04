@@ -3,6 +3,7 @@ package feed
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -17,6 +18,12 @@ import (
 // found that fabricated-but-syntactically-valid v0 cursors were silently
 // returning empty pages.
 var ErrInvalidCursor = errors.New("invalid cursor")
+
+// ErrCursorProjectionMismatch is returned when a cursor issued for one feed
+// projection is replayed against another projection, or against the default
+// unprojected feed. Projection cursors are deliberately scoped so a consumer
+// cannot silently skip or replay history by mixing feeds.
+var ErrCursorProjectionMismatch = errors.New("cursor projection mismatch")
 
 // cursor is the SERVER-SIDE shape of an opaque resume token. Consumers
 // MUST treat the encoded form as a verbatim blob; the encoding is an
@@ -35,7 +42,9 @@ var ErrInvalidCursor = errors.New("invalid cursor")
 // consumer (db27a9c9) will re-bootstrap via its isInvalidCursorErr
 // recovery path.
 type cursor struct {
-	seq int64
+	seq        int64
+	projection string
+	version    int
 }
 
 const cursorRawSize = 8
@@ -67,4 +76,71 @@ func decodeCursor(s string) (cursor, error) {
 		return cursor{}, fmt.Errorf("%w: negative seq", ErrInvalidCursor)
 	}
 	return cursor{seq: seq}, nil
+}
+
+type projectionCursorEnvelope struct {
+	Version    int    `json:"v"`
+	Seq        int64  `json:"seq"`
+	Projection string `json:"projection"`
+	Definition int    `json:"definition"`
+}
+
+func encodeProjectionCursor(seq int64, projection string, version int) string {
+	raw, _ := json.Marshal(projectionCursorEnvelope{
+		Version:    1,
+		Seq:        seq,
+		Projection: projection,
+		Definition: version,
+	})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeCursorForProjection(s string, projection string, version int) (cursor, error) {
+	if projection == "" {
+		decoded, err := decodeCursor(s)
+		if err == nil {
+			return decoded, nil
+		}
+		scoped, scopedErr := decodeProjectionCursor(s)
+		if scopedErr == nil && scoped.projection != "" {
+			return cursor{}, fmt.Errorf("%w: cursor belongs to projection %q", ErrCursorProjectionMismatch, scoped.projection)
+		}
+		return cursor{}, err
+	}
+	scoped, err := decodeProjectionCursor(s)
+	if err != nil {
+		if _, legacyErr := decodeCursor(s); legacyErr == nil {
+			return cursor{}, fmt.Errorf("%w: unprojected cursor cannot be used with projection %q", ErrCursorProjectionMismatch, projection)
+		}
+		return cursor{}, err
+	}
+	if scoped.projection != projection || scoped.version != version {
+		return cursor{}, fmt.Errorf("%w: cursor belongs to %s@%d, requested %s@%d",
+			ErrCursorProjectionMismatch, scoped.projection, scoped.version, projection, version)
+	}
+	return scoped, nil
+}
+
+func decodeProjectionCursor(s string) (cursor, error) {
+	if s == "" {
+		return cursor{}, ErrInvalidCursor
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return cursor{}, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+	}
+	var env projectionCursorEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return cursor{}, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+	}
+	if env.Version != 1 {
+		return cursor{}, fmt.Errorf("%w: unsupported projection cursor version %d", ErrInvalidCursor, env.Version)
+	}
+	if env.Seq < 0 {
+		return cursor{}, fmt.Errorf("%w: negative seq", ErrInvalidCursor)
+	}
+	if env.Projection == "" || env.Definition < 1 {
+		return cursor{}, fmt.Errorf("%w: missing projection identity", ErrInvalidCursor)
+	}
+	return cursor{seq: env.Seq, projection: env.Projection, version: env.Definition}, nil
 }

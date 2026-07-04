@@ -141,6 +141,9 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 		"inbox.capture",
 		"feed.read",
 		"backlog.readiness",
+		"projections.list",
+		"projections.get",
+		"projections.define",
 		"registry.list",
 		"registry.get",
 		"registry.define_tropism",
@@ -197,6 +200,9 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		"inbox_capture",
 		"feed_read",
 		"backlog_readiness",
+		"projections_list",
+		"projections_get",
+		"projections_define",
 		"registry_list",
 		"registry_get",
 		"registry_define_tropism",
@@ -234,6 +240,7 @@ func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 	mutations := map[string]bool{
 		"policy_profile.switch":      true,
 		"inbox.capture":              true,
+		"projections.define":         true,
 		"registry.define_tropism":    true,
 		"registry.define_cultivar":   true,
 		"work_items.create":          true,
@@ -287,6 +294,8 @@ func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 	for _, want := range []string{
 		"feed.read",
 		"backlog.readiness",
+		"projections.list",
+		"projections.get",
 		"work_items.list",
 		"work_items.get",
 		"work_items.spawn_child",
@@ -304,6 +313,7 @@ func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 		"inbox.capture",
 		"deterministic_errors.list",
 		"deterministic_errors.get",
+		"projections.define",
 		"work_items.create",
 	} {
 		if got[hidden] {

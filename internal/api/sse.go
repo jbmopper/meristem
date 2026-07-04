@@ -65,11 +65,33 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 	if cursorStr == "" {
 		cursorStr = r.URL.Query().Get("cursor")
 	}
+	projectionName := r.URL.Query().Get("projection")
+	var projectionNameForCursor string
+	var projectionVersion int
+	var projectionFilter *feed.ProjectionFilter
+	if projectionName != "" {
+		if s.projections == nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "projections_unavailable", "projection service is not configured")
+			return
+		}
+		projection, err := s.projections.Get(r.Context(), projectionName)
+		if err != nil {
+			writeProjectionError(w, err)
+			return
+		}
+		projectionNameForCursor = projection.Name
+		projectionVersion = projection.Version
+		projectionFilter = &projection.Filter
+	}
 
-	fromSeq, err := s.feed.ResolveStreamStart(r.Context(), cursorStr)
+	fromSeq, err := s.feed.ResolveStreamStartForProjection(r.Context(), cursorStr, projectionNameForCursor, projectionVersion)
 	if err != nil {
 		if errors.Is(err, feed.ErrInvalidCursor) {
 			writeAPIError(w, http.StatusBadRequest, "invalid_cursor", "cursor is malformed; reconnect without Last-Event-ID to start a fresh stream")
+			return
+		}
+		if errors.Is(err, feed.ErrCursorProjectionMismatch) {
+			writeAPIError(w, http.StatusBadRequest, "cursor_projection_mismatch", "cursor was issued for a different feed projection")
 			return
 		}
 		writeAPIError(w, http.StatusInternalServerError, "stream_start_failed", "could not resolve stream start position")
@@ -123,7 +145,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		items, err := s.feed.Tail(r.Context(), fromSeq, sseBatchSize)
+		items, err := s.feed.TailFiltered(r.Context(), fromSeq, sseBatchSize, projectionFilter)
 		if err != nil {
 			// Don't write an error frame; the client can't do anything
 			// useful with mid-stream errors anyway. Just drop the
@@ -144,7 +166,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 			for i := range items {
-				if !writeSSEFrame(w, &items[i]) {
+				if !writeSSEFrame(w, &items[i], projectionNameForCursor, projectionVersion) {
 					return
 				}
 			}
@@ -194,7 +216,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 // already true; the assertion is documentary.
 //
 // Returns false if the write failed (caller should give up the loop).
-func writeSSEFrame(w http.ResponseWriter, item *feed.Item) bool {
+func writeSSEFrame(w http.ResponseWriter, item *feed.Item, projectionName string, projectionVersion int) bool {
 	payload, err := json.Marshal(item)
 	if err != nil {
 		// Marshalling can only realistically fail on a payload with an
@@ -203,8 +225,11 @@ func writeSSEFrame(w http.ResponseWriter, item *feed.Item) bool {
 		// rather than blocking the whole stream.
 		return true
 	}
-	if _, err := fmt.Fprintf(w, "id: %s\nevent: feed\ndata: %s\n\n",
-		feed.EncodeCursor(item.Seq), payload); err != nil {
+	cursor := feed.EncodeCursor(item.Seq)
+	if projectionName != "" {
+		cursor = feed.EncodeCursorForProjection(item.Seq, projectionName, projectionVersion)
+	}
+	if _, err := fmt.Fprintf(w, "id: %s\nevent: feed\ndata: %s\n\n", cursor, payload); err != nil {
 		return false
 	}
 	return true

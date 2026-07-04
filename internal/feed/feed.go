@@ -49,6 +49,7 @@ var IncludedKinds = []string{
 	domain.EventPolicyProfileSwitched,
 	domain.EventTropismDefined,
 	domain.EventCultivarDefined,
+	domain.EventProjectionDefined,
 }
 
 // ExcludedKinds enumerates the event kinds the system explicitly *does not*
@@ -103,9 +104,12 @@ const (
 // after-cursor, optional bounded long-poll). When both are zero, callers
 // should use List instead — the back-compat snapshot path.
 type ListOptions struct {
-	Cursor string
-	Wait   time.Duration
-	Limit  int
+	Cursor            string
+	Wait              time.Duration
+	Limit             int
+	ProjectionName    string
+	ProjectionVersion int
+	Filter            *ProjectionFilter
 }
 
 // Page is the watcher-mode response. NextCursor MUST be round-tripped
@@ -117,6 +121,7 @@ type Page struct {
 	Items      []Item `json:"items"`
 	NextCursor string `json:"next_cursor"`
 	HasMore    bool   `json:"has_more"`
+	nextSeq    int64
 }
 
 // List returns the most recent feed-visible events, newest first. The kind
@@ -127,6 +132,64 @@ func (s *Service) List(ctx context.Context, limit int) ([]Item, error) {
 	if limit <= 0 || limit > maxLimit {
 		limit = defaultLimit
 	}
+	return s.legacyList(ctx, limit)
+}
+
+func (s *Service) ListFiltered(ctx context.Context, filter ProjectionFilter, limit int) ([]Item, error) {
+	if limit <= 0 || limit > maxLimit {
+		limit = defaultLimit
+	}
+	return s.list(ctx, limit, &filter)
+}
+
+func (s *Service) list(ctx context.Context, limit int, filter *ProjectionFilter) ([]Item, error) {
+	kinds := IncludedKinds
+	if filter != nil {
+		kinds = filter.QueryKinds()
+	}
+	beforeSeq := int64(0)
+	out := make([]Item, 0, limit)
+	for len(out) < limit {
+		rows, err := s.pool.Query(ctx, `
+		SELECT id, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload, seq
+		FROM events
+		WHERE kind = ANY($1::text[])
+		AND ($2::bigint = 0 OR seq < $2)
+		ORDER BY seq DESC
+		LIMIT $3
+	`, kinds, beforeSeq, maxLimit)
+		if err != nil {
+			return nil, err
+		}
+		scanned := 0
+		for rows.Next() {
+			scanned++
+			item, err := scanItem(rows, true)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			beforeSeq = item.Seq
+			if filter == nil || filter.Matches(item) {
+				out = append(out, item)
+				if len(out) == limit {
+					break
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		if scanned < maxLimit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) legacyList(ctx context.Context, limit int) ([]Item, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload
 		FROM events
@@ -188,9 +251,16 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 		wait = maxWait
 	}
 
+	projectionName := opts.ProjectionName
+	projectionVersion := opts.ProjectionVersion
+	var filter *ProjectionFilter
+	if opts.Filter != nil && projectionName != "" {
+		filter = opts.Filter
+	}
+
 	var cur cursor
 	if opts.Cursor != "" {
-		decoded, err := decodeCursor(opts.Cursor)
+		decoded, err := decodeCursorForProjection(opts.Cursor, projectionName, projectionVersion)
 		if err != nil {
 			return Page{}, err
 		}
@@ -214,23 +284,27 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 		if err != nil {
 			return Page{}, err
 		}
-		cur = head
+		cur = cursor{seq: head.seq, projection: projectionName, version: projectionVersion}
 	}
 
 	deadline := time.Now().Add(wait)
 	for {
-		page, err := s.queryAfter(ctx, cur, limit)
+		page, err := s.queryAfter(ctx, cur, limit, filter)
 		if err != nil {
 			return Page{}, err
 		}
 		if len(page.Items) > 0 {
 			return page, nil
 		}
+		if page.nextSeq > cur.seq {
+			cur.seq = page.nextSeq
+		}
 		if wait == 0 || !time.Now().Before(deadline) {
 			return Page{
 				Items:      []Item{},
-				NextCursor: encodeCursor(cur.seq),
+				NextCursor: encodeCursorFor(cur.seq, projectionName, projectionVersion),
 				HasMore:    false,
+				nextSeq:    cur.seq,
 			}, nil
 		}
 		select {
@@ -289,6 +363,13 @@ func EncodeCursor(seq int64) string {
 	return encodeCursor(seq)
 }
 
+// EncodeCursorForProjection returns the opaque cursor shape for a named feed
+// projection. It is public for the SSE handler, which stamps event ids outside
+// the feed package.
+func EncodeCursorForProjection(seq int64, projection string, version int) string {
+	return encodeCursorFor(seq, projection, version)
+}
+
 // ResolveStreamStart decodes cursorStr into the seq the SSE handler will
 // use as its "strictly after" point. Empty cursorStr means "from now":
 // the function returns the current MAX(seq) so the stream sees only
@@ -300,6 +381,10 @@ func EncodeCursor(seq int64) string {
 // exists as a separate entry point because the SSE handler doesn't want
 // the long-poll loop, just the start position.
 func (s *Service) ResolveStreamStart(ctx context.Context, cursorStr string) (int64, error) {
+	return s.ResolveStreamStartForProjection(ctx, cursorStr, "", 0)
+}
+
+func (s *Service) ResolveStreamStartForProjection(ctx context.Context, cursorStr string, projectionName string, projectionVersion int) (int64, error) {
 	if cursorStr == "" {
 		head, err := s.head(ctx)
 		if err != nil {
@@ -307,7 +392,7 @@ func (s *Service) ResolveStreamStart(ctx context.Context, cursorStr string) (int
 		}
 		return head.seq, nil
 	}
-	decoded, err := decodeCursor(cursorStr)
+	decoded, err := decodeCursorForProjection(cursorStr, projectionName, projectionVersion)
 	if err != nil {
 		return 0, err
 	}
@@ -331,10 +416,14 @@ func (s *Service) ResolveStreamStart(ctx context.Context, cursorStr string) (int
 // Item.Seq is populated; the SSE handler stamps it onto the SSE id frame
 // via EncodeCursor.
 func (s *Service) Tail(ctx context.Context, fromSeq int64, limit int) ([]Item, error) {
+	return s.TailFiltered(ctx, fromSeq, limit, nil)
+}
+
+func (s *Service) TailFiltered(ctx context.Context, fromSeq int64, limit int, filter *ProjectionFilter) ([]Item, error) {
 	if limit <= 0 || limit > maxLimit {
 		limit = defaultLimit
 	}
-	page, err := s.queryAfter(ctx, cursor{seq: fromSeq}, limit)
+	page, err := s.queryAfter(ctx, cursor{seq: fromSeq}, limit, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -349,48 +438,100 @@ func (s *Service) Tail(ctx context.Context, fromSeq int64, limit int) ([]Item, e
 // id ordering.
 //
 // limit+1 is fetched to compute HasMore without a separate COUNT query.
-func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int) (Page, error) {
-	rows, err := s.pool.Query(ctx, `
+func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int, filter *ProjectionFilter) (Page, error) {
+	kinds := IncludedKinds
+	if filter != nil {
+		kinds = filter.QueryKinds()
+	}
+	batchLimit := maxLimit + 1
+	items := make([]Item, 0, limit+1)
+	fromSeq := cur.seq
+	scannedSeq := cur.seq
+	for len(items) <= limit {
+		rows, err := s.pool.Query(ctx, `
 		SELECT id, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload, seq
 		FROM events
 		WHERE kind = ANY($1::text[])
 		AND seq > $2
 		ORDER BY seq ASC
 		LIMIT $3
-	`, IncludedKinds, cur.seq, limit+1)
-	if err != nil {
-		return Page{}, err
-	}
-	defer rows.Close()
-	items := make([]Item, 0, limit)
-	for rows.Next() {
-		var item Item
-		var source string
-		if err := rows.Scan(&item.EventID, &item.OccurredAt, &item.ActorTokenID, &source, &item.SubjectKind, &item.SubjectID, &item.Kind, &item.Payload, &item.Seq); err != nil {
+	`, kinds, fromSeq, batchLimit)
+		if err != nil {
 			return Page{}, err
 		}
-		item.Source = domain.Source(source)
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return Page{}, err
+		scanned := 0
+		for rows.Next() {
+			scanned++
+			item, err := scanItem(rows, true)
+			if err != nil {
+				rows.Close()
+				return Page{}, err
+			}
+			scannedSeq = item.Seq
+			if filter == nil || filter.Matches(item) {
+				items = append(items, item)
+				if len(items) > limit {
+					break
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return Page{}, err
+		}
+		rows.Close()
+		if len(items) > limit || scanned < batchLimit {
+			break
+		}
+		fromSeq = scannedSeq
 	}
 
 	hasMore := len(items) > limit
 	if hasMore {
 		items = items[:limit]
 	}
+	nextSeq := scannedSeq
 	if len(items) == 0 {
 		return Page{
 			Items:      []Item{},
-			NextCursor: encodeCursor(cur.seq),
+			NextCursor: encodeCursorFor(nextSeq, cur.projection, cur.version),
 			HasMore:    false,
+			nextSeq:    nextSeq,
 		}, nil
 	}
 	last := items[len(items)-1]
+	if hasMore {
+		nextSeq = last.Seq
+	}
 	return Page{
 		Items:      items,
-		NextCursor: encodeCursor(last.Seq),
+		NextCursor: encodeCursorFor(nextSeq, cur.projection, cur.version),
 		HasMore:    hasMore,
+		nextSeq:    nextSeq,
 	}, nil
+}
+
+type itemScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanItem(row itemScanner, includeSeq bool) (Item, error) {
+	var item Item
+	var source string
+	if includeSeq {
+		if err := row.Scan(&item.EventID, &item.OccurredAt, &item.ActorTokenID, &source, &item.SubjectKind, &item.SubjectID, &item.Kind, &item.Payload, &item.Seq); err != nil {
+			return Item{}, err
+		}
+	} else if err := row.Scan(&item.EventID, &item.OccurredAt, &item.ActorTokenID, &source, &item.SubjectKind, &item.SubjectID, &item.Kind, &item.Payload); err != nil {
+		return Item{}, err
+	}
+	item.Source = domain.Source(source)
+	return item, nil
+}
+
+func encodeCursorFor(seq int64, projection string, version int) string {
+	if projection == "" {
+		return encodeCursor(seq)
+	}
+	return encodeProjectionCursor(seq, projection, version)
 }

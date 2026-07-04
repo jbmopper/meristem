@@ -29,6 +29,7 @@ func TestExpectedKindsAreClassified(t *testing.T) {
 		domain.EventWorkItemTransitioned,
 		domain.EventWorkItemEventAppended,
 		domain.EventWorkItemRelationAdded,
+		domain.EventWorkItemMetadataUpdated,
 		domain.EventSignalReceived,
 		domain.EventDeterministicErrorReported,
 		domain.EventDeterministicErrorMasked,
@@ -40,9 +41,11 @@ func TestExpectedKindsAreClassified(t *testing.T) {
 		domain.EventSubactorGrantEscalated,
 		domain.EventPatienceBreached,
 		domain.EventConvergenceVerdictRecorded,
+		domain.EventConvergenceChecksProposed,
 		domain.EventPolicyProfileSwitched,
 		domain.EventTropismDefined,
 		domain.EventCultivarDefined,
+		domain.EventProjectionDefined,
 	}
 	for _, kind := range expectedIncluded {
 		if !contains(IncludedKinds, kind) {
@@ -59,6 +62,45 @@ func TestExpectedKindsAreClassified(t *testing.T) {
 		if !contains(ExcludedKinds, kind) {
 			t.Errorf("kind %q expected in ExcludedKinds but missing", kind)
 		}
+	}
+}
+
+func TestKindClassTaxonomyCoversEveryDomainKind(t *testing.T) {
+	for _, kind := range domain.AllEventKinds {
+		if _, _, ok := StaticKindClass(kind); !ok {
+			t.Errorf("event kind %q has no R6 taxonomy class", kind)
+		}
+	}
+}
+
+func TestProjectionFilterRejectsAdminKindsAndClasses(t *testing.T) {
+	for _, tc := range []ProjectionFilter{
+		{Kinds: []string{domain.EventTokenCreated}},
+		{Kinds: []string{domain.EventDeterministicErrorReported}},
+		{KindClasses: []string{KindClassAdmin}},
+	} {
+		if _, err := NormalizeProjectionFilter(tc); err == nil {
+			t.Fatalf("NormalizeProjectionFilter(%+v) succeeded; admin events must not be projectable", tc)
+		}
+	}
+}
+
+func TestProjectionFilterClassifiesWorkItemEventAppendedByInnerKind(t *testing.T) {
+	progress, err := NormalizeProjectionFilter(ProjectionFilter{KindClasses: []string{KindClassProgress}})
+	if err != nil {
+		t.Fatalf("progress filter: %v", err)
+	}
+	decision, err := NormalizeProjectionFilter(ProjectionFilter{KindClasses: []string{KindClassDecision}})
+	if err != nil {
+		t.Fatalf("decision filter: %v", err)
+	}
+	progressItem := Item{Kind: domain.EventWorkItemEventAppended, Payload: []byte(`{"inner_kind":"agent.progress"}`)}
+	coordinationItem := Item{Kind: domain.EventWorkItemEventAppended, Payload: []byte(`{"inner_kind":"coordination.claimed"}`)}
+	if !progress.Matches(progressItem) || progress.Matches(coordinationItem) {
+		t.Fatalf("progress filter did not split work_item.event_appended by inner_kind")
+	}
+	if !decision.Matches(coordinationItem) || decision.Matches(progressItem) {
+		t.Fatalf("decision filter did not split work_item.event_appended by inner_kind")
 	}
 }
 

@@ -30,6 +30,7 @@ import (
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/policyprofile"
+	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/signals"
@@ -72,6 +73,7 @@ type Server struct {
 	feed                  *feed.Service
 	mcpServer             *mcp.Server
 	policyProfiles        *policyprofile.Service
+	projections           *projectiondefs.Service
 	registry              *registry.Service
 	policy                safety.Policy
 }
@@ -108,6 +110,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.checkProposals = convergence.NewChecksProposalService(pool, s.writer)
 		s.feed = feed.NewService(pool)
 		s.policyProfiles = policyprofile.NewService(pool, s.writer)
+		s.projections = projectiondefs.NewService(pool, s.writer)
 		s.registry = registry.NewService(pool, s.writer)
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
@@ -119,6 +122,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 			DeterministicErrors: s.deterministicErrors,
 			Feed:                s.feed,
 			PolicyProfiles:      s.policyProfiles,
+			Projections:         s.projections,
 			Registry:            s.registry,
 			MaxFeedWait:         s.policy.MaxFeedWait,
 		}, mcp.ServerInfo{Name: "meristem", Version: "dev"}, logger)
@@ -150,6 +154,9 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /v1/deterministic-errors/{id}", s.protected(http.HandlerFunc(s.handleGetDeterministicError)))
 	s.mux.Handle("GET /v1/backlog/readiness", s.protected(http.HandlerFunc(s.handleBacklogReadiness)))
 	s.mux.Handle("GET /v1/registry", s.protected(http.HandlerFunc(s.handleRegistryList)))
+	s.mux.Handle("GET /v1/projections", s.protected(http.HandlerFunc(s.handleProjectionsList)))
+	s.mux.Handle("GET /v1/projections/{name}", s.protected(http.HandlerFunc(s.handleProjectionsGet)))
+	s.mux.Handle("POST /v1/registry/projections", s.commandWithAccess(s.canWriteRegistry("projections.define"), http.HandlerFunc(s.handleProjectionsDefine)))
 	s.mux.Handle("GET /v1/registry/tropisms/{name}", s.protected(http.HandlerFunc(s.handleRegistryGetTropism)))
 	s.mux.Handle("POST /v1/registry/tropisms", s.commandWithAccess(s.canWriteRegistry("registry.define_tropism"), http.HandlerFunc(s.handleRegistryDefineTropism)))
 	s.mux.Handle("GET /v1/registry/cultivars/{name}", s.protected(http.HandlerFunc(s.handleRegistryGetCultivar)))

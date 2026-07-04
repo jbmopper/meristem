@@ -18,6 +18,8 @@ func TestToolVisible_LegacyAndRootSeeExistingSurface(t *testing.T) {
 		for _, tool := range []string{
 			"inbox.capture",
 			"feed.read",
+			"projections.list",
+			"projections.get",
 			"registry.list",
 			"registry.get",
 			"deterministic_errors.list",
@@ -98,6 +100,8 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 		"backlog.readiness",
 		"registry.list",
 		"registry.get",
+		"projections.list",
+		"projections.get",
 		"work_items.list",
 		"work_items.get",
 		"work_items.spawn_child",
@@ -117,6 +121,7 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 		"deterministic_errors.get",
 		"registry.define_tropism",
 		"registry.define_cultivar",
+		"projections.define",
 		"work_items.create",
 	}
 	for _, tool := range hidden {
@@ -127,11 +132,13 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 }
 
 func TestToolVisible_RegistryWriteRequiresScope(t *testing.T) {
-	if ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true}, "registry.define_tropism") {
-		t.Fatal("root token must not see registry writes")
+	if ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true}, "registry.define_tropism") ||
+		ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true}, "projections.define") {
+		t.Fatal("root token must not see registry/projection writes")
 	}
-	if !ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceAgent}, "registry.define_tropism") {
-		t.Fatal("legacy unscoped non-root token should keep bootstrap registry write access until rotated")
+	if !ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceAgent}, "registry.define_tropism") ||
+		!ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceAgent}, "projections.define") {
+		t.Fatal("legacy unscoped non-root token should keep bootstrap registry/projection write access until rotated")
 	}
 	readActor := domain.Token{
 		ID:     uuid.New(),
@@ -144,10 +151,13 @@ func TestToolVisible_RegistryWriteRequiresScope(t *testing.T) {
 	if ToolVisible(readActor, "registry.define_tropism") {
 		t.Fatal("registry.define_tropism visible without registry.write")
 	}
+	if ToolVisible(readActor, "projections.define") {
+		t.Fatal("projections.define visible without registry.write")
+	}
 	writeActor := readActor
 	writeActor.Scopes = append(writeActor.Scopes, ScopeRegistryWrite)
-	if !ToolVisible(writeActor, "registry.define_tropism") || !ToolVisible(writeActor, "registry.define_cultivar") {
-		t.Fatal("registry write tools should be visible with registry.write")
+	if !ToolVisible(writeActor, "registry.define_tropism") || !ToolVisible(writeActor, "registry.define_cultivar") || !ToolVisible(writeActor, "projections.define") {
+		t.Fatal("registry/projection write tools should be visible with registry.write")
 	}
 }
 
@@ -244,10 +254,11 @@ func TestFeedItemAnchorsCoverIncludedKinds(t *testing.T) {
 		// System-wide owner posture, not tree content: no anchor, dropped
 		// from tree-scoped feeds; visible to feed.read.
 		domain.EventPolicyProfileSwitched: {domain.SubjectPolicyProfile, nil},
-		// Global registry writes, not tree content. Tree-scoped feeds read
-		// current registry state through registry.list/get instead.
-		domain.EventTropismDefined:  {domain.SubjectTropism, nil},
-		domain.EventCultivarDefined: {domain.SubjectCultivar, nil},
+		// Global registry/projection writes, not tree content. Tree-scoped
+		// feeds read current state through registry/projections tools instead.
+		domain.EventTropismDefined:    {domain.SubjectTropism, nil},
+		domain.EventCultivarDefined:   {domain.SubjectCultivar, nil},
+		domain.EventProjectionDefined: {domain.SubjectProjection, nil},
 	}
 
 	for _, kind := range feed.IncludedKinds {

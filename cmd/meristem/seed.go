@@ -19,6 +19,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
 )
@@ -172,6 +173,9 @@ func runSeedV1(ctx context.Context, logger *slog.Logger, args []string) error {
 		for _, item := range registrySeedCultivars {
 			fmt.Fprintf(os.Stdout, "%s\tregistry:cultivar:%s@%d\n", registry.CultivarSubjectID(item.Name), item.Name, item.Version)
 		}
+		for _, item := range projectionSeedDefinitions {
+			fmt.Fprintf(os.Stdout, "%s\tprojection:%s@%d\n", projectiondefs.SubjectID(item.Name), item.Name, item.Version)
+		}
 		return nil
 	}
 
@@ -205,6 +209,10 @@ func runSeedV1(ctx context.Context, logger *slog.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
+	projectionCreated, projectionReplayed, err := seedProjectionFixtures(ctx, pool, writer, systemTok)
+	if err != nil {
+		return err
+	}
 	logger.Info("seeded v1 substrate",
 		slog.Int("created", created),
 		slog.Int("replayed", replayed),
@@ -212,9 +220,12 @@ func runSeedV1(ctx context.Context, logger *slog.Logger, args []string) error {
 		slog.Int("registry_created", registryCreated),
 		slog.Int("registry_replayed", registryReplayed),
 		slog.Int("registry_total", registrySeedTotal()),
+		slog.Int("projection_created", projectionCreated),
+		slog.Int("projection_replayed", projectionReplayed),
+		slog.Int("projection_total", projectionSeedTotal()),
 	)
-	fmt.Fprintf(os.Stdout, "seed v1: work_items_created=%d work_items_replayed=%d work_items_total=%d registry_created=%d registry_replayed=%d registry_total=%d\n",
-		created, replayed, len(v1SubstrateItems), registryCreated, registryReplayed, registrySeedTotal())
+	fmt.Fprintf(os.Stdout, "seed v1: work_items_created=%d work_items_replayed=%d work_items_total=%d registry_created=%d registry_replayed=%d registry_total=%d projection_created=%d projection_replayed=%d projection_total=%d\n",
+		created, replayed, len(v1SubstrateItems), registryCreated, registryReplayed, registrySeedTotal(), projectionCreated, projectionReplayed, projectionSeedTotal())
 	return nil
 }
 

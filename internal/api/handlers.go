@@ -20,6 +20,7 @@ import (
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -195,9 +196,31 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cursor := q.Get("cursor")
 	waitStr := q.Get("wait")
+	projectionName := q.Get("projection")
+	var projection *projectiondefs.Projection
+	if projectionName != "" {
+		if s.projections == nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "projections_unavailable", "projection service is not configured")
+			return
+		}
+		item, err := s.projections.Get(r.Context(), projectionName)
+		if err != nil {
+			writeProjectionError(w, err)
+			return
+		}
+		projection = &item
+	}
 
 	if cursor == "" && waitStr == "" {
-		items, err := s.feed.List(r.Context(), limit)
+		var (
+			items []feed.Item
+			err   error
+		)
+		if projection != nil {
+			items, err = s.feed.ListFiltered(r.Context(), projection.Filter, limit)
+		} else {
+			items, err = s.feed.List(r.Context(), limit)
+		}
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
 			return
@@ -230,13 +253,20 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	page, err := s.feed.Page(r.Context(), feed.ListOptions{
-		Cursor: cursor,
-		Wait:   wait,
-		Limit:  limit,
+		Cursor:            cursor,
+		Wait:              wait,
+		Limit:             limit,
+		ProjectionName:    projectionNameForFeed(projection),
+		ProjectionVersion: projectionVersionForFeed(projection),
+		Filter:            projectionFilterForFeed(projection),
 	})
 	if err != nil {
 		if errors.Is(err, feed.ErrInvalidCursor) {
 			writeAPIError(w, http.StatusBadRequest, "invalid_cursor", "cursor is malformed; obtain a fresh one from a feed response")
+			return
+		}
+		if errors.Is(err, feed.ErrCursorProjectionMismatch) {
+			writeAPIError(w, http.StatusBadRequest, "cursor_projection_mismatch", "cursor was issued for a different feed projection")
 			return
 		}
 		writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
@@ -248,6 +278,27 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+func projectionNameForFeed(p *projectiondefs.Projection) string {
+	if p == nil {
+		return ""
+	}
+	return p.Name
+}
+
+func projectionVersionForFeed(p *projectiondefs.Projection) int {
+	if p == nil {
+		return 0
+	}
+	return p.Version
+}
+
+func projectionFilterForFeed(p *projectiondefs.Projection) *feed.ProjectionFilter {
+	if p == nil {
+		return nil
+	}
+	return &p.Filter
 }
 
 func (s *Server) handleListWorkItems(w http.ResponseWriter, r *http.Request) {

@@ -62,8 +62,9 @@ const (
 	// was active when" without recomputing.
 	EventPolicyProfileSwitched = "policy_profile.switched"
 
-	EventTropismDefined  = "tropism.defined"
-	EventCultivarDefined = "cultivar.defined"
+	EventTropismDefined    = "tropism.defined"
+	EventCultivarDefined   = "cultivar.defined"
+	EventProjectionDefined = "projection.defined"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -98,6 +99,7 @@ var AllEventKinds = []string{
 	EventPolicyProfileSwitched,
 	EventTropismDefined,
 	EventCultivarDefined,
+	EventProjectionDefined,
 }
 
 const (
@@ -111,6 +113,7 @@ const (
 	SubjectSubactorGrant      = "subactor_grant"
 	SubjectTropism            = "tropism"
 	SubjectCultivar           = "cultivar"
+	SubjectProjection         = "projection"
 	// SubjectConvergence is the subject kind for a convergence verdict. The
 	// subject_id is the work_item being reduced; the attempt lives in the event
 	// payload, so (work_item_id, attempt, payload) remains the deterministic

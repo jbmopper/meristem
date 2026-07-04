@@ -72,6 +72,7 @@ func TestProjectionTables_Coverage(t *testing.T) {
 		"active_policy_profile": true,
 		"tropisms":              true,
 		"cultivars":             true,
+		"projections":           true,
 	}
 	if len(projectionTables) != len(want) {
 		t.Errorf("projectionTables length drift: have %d, expected %d", len(projectionTables), len(want))

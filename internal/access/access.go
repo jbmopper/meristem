@@ -61,7 +61,7 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		}
 		return hasScope(actor, ScopePolicyProfileSwitch)
 	}
-	if canonicalTool == "registry.define_tropism" || canonicalTool == "registry.define_cultivar" {
+	if canonicalTool == "registry.define_tropism" || canonicalTool == "registry.define_cultivar" || canonicalTool == "projections.define" {
 		if actor.IsRoot {
 			return false
 		}
@@ -83,7 +83,7 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return hasAny(scopes, "logs.read", "logs.read_details", "logs.read_restricted", "logs.read_masked", "logs.read_all")
 	case "backlog.readiness":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
-	case "registry.list", "registry.get":
+	case "registry.list", "registry.get", "projections.list", "projections.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.list", "work_items.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
@@ -216,9 +216,9 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 //     switches are system-wide owner posture, not tree content. Tree-scoped
 //     workers learn the active envelope from /readyz (or their launcher);
 //     feed.read holders see switches on the unscoped feed.
-//   - tropism.defined and cultivar.defined are global registry writes, not
-//     tree content. Tree-scoped feeds drop them; registry.read-capable tools
-//     expose the current projection directly.
+//   - tropism.defined, cultivar.defined, and projection.defined are global
+//     registry writes, not tree content. Tree-scoped feeds drop them; registry
+//     and projection read tools expose the current projections directly.
 //   - deterministic_error.* events return no anchor on purpose: they are
 //     governed by logs.* scopes, and a tree-scoped feed deliberately drops
 //     them rather than inventing a work_item relationship they do not have.
@@ -239,7 +239,8 @@ func feedItemAnchors(item feed.Item) []uuid.UUID {
 		domain.EventSubactorGrantEscalated:
 		return payloadWorkItemIDs(item)
 	case domain.EventTropismDefined,
-		domain.EventCultivarDefined:
+		domain.EventCultivarDefined,
+		domain.EventProjectionDefined:
 		return nil
 	default:
 		if item.SubjectKind == domain.SubjectWorkItem {

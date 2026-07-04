@@ -80,3 +80,23 @@ func TestCursorMonotonicEncoding(t *testing.T) {
 		t.Errorf("encoded cursors should be lexicographically monotonic with seq: %q !< %q", earlier, later)
 	}
 }
+
+func TestProjectionCursorScopesProjectionIdentity(t *testing.T) {
+	c := encodeProjectionCursor(42, "activity", 1)
+	decoded, err := decodeCursorForProjection(c, "activity", 1)
+	if err != nil {
+		t.Fatalf("decode projection cursor: %v", err)
+	}
+	if decoded.seq != 42 || decoded.projection != "activity" || decoded.version != 1 {
+		t.Fatalf("decoded cursor = %+v", decoded)
+	}
+	if _, err := decodeCursorForProjection(c, "owner-attention", 1); !errors.Is(err, ErrCursorProjectionMismatch) {
+		t.Fatalf("expected projection mismatch for another projection, got %v", err)
+	}
+	if _, err := decodeCursorForProjection(c, "", 0); !errors.Is(err, ErrCursorProjectionMismatch) {
+		t.Fatalf("expected projection mismatch on default feed, got %v", err)
+	}
+	if _, err := decodeCursorForProjection(encodeCursor(42), "activity", 1); !errors.Is(err, ErrCursorProjectionMismatch) {
+		t.Fatalf("expected mismatch when using default cursor on projection, got %v", err)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/policyprofile"
+	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -45,6 +46,9 @@ func (s *Server) buildTools() []Tool {
 		s.toolInboxCapture(),
 		s.toolFeedRead(),
 		s.toolBacklogReadiness(),
+		s.toolProjectionsList(),
+		s.toolProjectionsGet(),
+		s.toolProjectionsDefine(),
 		s.toolRegistryList(),
 		s.toolRegistryGet(),
 		s.toolRegistryDefineTropism(),
@@ -104,6 +108,80 @@ func (s *Server) toolBacklogReadiness() Tool {
 				Limit: limit,
 				AsOf:  time.Now().UTC(),
 			}), nil
+		},
+	}
+}
+
+func (s *Server) toolProjectionsList() Tool {
+	return Tool{
+		Name:        "projections.list",
+		Description: "List current named feed projections.",
+		InputSchema: schemaObject(nil, nil),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Projections == nil {
+				return nil, errors.New("projection service not configured")
+			}
+			var args struct{}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			return s.deps.Projections.List(ctx)
+		},
+	}
+}
+
+func (s *Server) toolProjectionsGet() Tool {
+	return Tool{
+		Name:        "projections.get",
+		Description: "Fetch one named feed projection.",
+		InputSchema: schemaObject([]string{"name"}, map[string]any{
+			"name": schemaString("Projection name."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Projections == nil {
+				return nil, errors.New("projection service not configured")
+			}
+			var args struct {
+				Name string `json:"name"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			item, err := s.deps.Projections.Get(ctx, args.Name)
+			if err != nil {
+				return nil, projectionToolErr(err)
+			}
+			return map[string]any{"projection": item}, nil
+		},
+	}
+}
+
+func (s *Server) toolProjectionsDefine() Tool {
+	return Tool{
+		Name:        "projections.define",
+		Description: "Define the next version of a named feed projection.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"name", "version", "filter"}, map[string]any{
+			"name":        schemaString("Projection name ([a-z0-9][a-z0-9-]*)."),
+			"version":     schemaInt("Version. Starts at 1; existing names require current+1."),
+			"type":        schemaString("Projection type. Only feed is accepted; defaults to feed."),
+			"rootstock":   schemaBool("Whether this definition is immutable rootstock."),
+			"filter":      schemaAny("Feed filter object: {kinds, kind_classes}. Admin kinds/classes are refused."),
+			"description": schemaString("Human-readable description."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Projections == nil {
+				return nil, errors.New("projection service not configured")
+			}
+			var args projectiondefs.DefineInput
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			item, fresh, err := s.deps.Projections.Define(ctx, actor, args)
+			if err != nil {
+				return nil, projectionToolErr(err)
+			}
+			return map[string]any{"projection": item, "defined": fresh}, nil
 		},
 	}
 }
@@ -269,24 +347,45 @@ func (s *Server) toolFeedRead() Tool {
 		Description: "Read feed-visible events. Default: snapshot (newest first). " +
 			"Pass cursor and/or wait (Go duration, e.g. 30s) for watcher mode — same contract as GET /v1/feed (oldest-first page, next_cursor, has_more).",
 		InputSchema: schemaObject(nil, map[string]any{
-			"limit":  schemaInt("Max items (1-200). Defaults to 50."),
-			"cursor": schemaString("Opaque cursor from a prior next_cursor or SSE id. Omit for snapshot mode."),
-			"wait":   schemaString("Long-poll cap as a Go duration (e.g. 10s). Use with watcher semantics; server-capped."),
+			"limit":      schemaInt("Max items (1-200). Defaults to 50."),
+			"projection": schemaString("Optional named feed projection."),
+			"cursor":     schemaString("Opaque cursor from a prior next_cursor or SSE id. Omit for snapshot mode."),
+			"wait":       schemaString("Long-poll cap as a Go duration (e.g. 10s). Use with watcher semantics; server-capped."),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.Feed == nil {
 				return nil, errors.New("feed service not configured")
 			}
 			var args struct {
-				Limit  int    `json:"limit"`
-				Cursor string `json:"cursor"`
-				Wait   string `json:"wait"`
+				Limit      int    `json:"limit"`
+				Projection string `json:"projection"`
+				Cursor     string `json:"cursor"`
+				Wait       string `json:"wait"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
+			var projection *projectiondefs.Projection
+			if args.Projection != "" {
+				if s.deps.Projections == nil {
+					return nil, errors.New("projection service not configured")
+				}
+				item, err := s.deps.Projections.Get(ctx, args.Projection)
+				if err != nil {
+					return nil, projectionToolErr(err)
+				}
+				projection = &item
+			}
 			if args.Cursor == "" && args.Wait == "" {
-				items, err := s.deps.Feed.List(ctx, args.Limit)
+				var (
+					items []feed.Item
+					err   error
+				)
+				if projection != nil {
+					items, err = s.deps.Feed.ListFiltered(ctx, projection.Filter, args.Limit)
+				} else {
+					items, err = s.deps.Feed.List(ctx, args.Limit)
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -315,13 +414,19 @@ func (s *Server) toolFeedRead() Tool {
 				return nil, fmt.Errorf("feed.read: wait exceeds server limit (%s)", maxWait)
 			}
 			page, err := s.deps.Feed.Page(ctx, feed.ListOptions{
-				Cursor: args.Cursor,
-				Wait:   wait,
-				Limit:  args.Limit,
+				Cursor:            args.Cursor,
+				Wait:              wait,
+				Limit:             args.Limit,
+				ProjectionName:    projectionNameForTool(projection),
+				ProjectionVersion: projectionVersionForTool(projection),
+				Filter:            projectionFilterForTool(projection),
 			})
 			if err != nil {
 				if errors.Is(err, feed.ErrInvalidCursor) {
 					return nil, fmt.Errorf("feed.read: invalid_cursor: %w", err)
+				}
+				if errors.Is(err, feed.ErrCursorProjectionMismatch) {
+					return nil, fmt.Errorf("feed.read: cursor_projection_mismatch: %w", err)
 				}
 				return nil, err
 			}
@@ -922,6 +1027,44 @@ func registryToolErr(err error) error {
 	default:
 		return err
 	}
+}
+
+func projectionToolErr(err error) error {
+	switch {
+	case errors.Is(err, projectiondefs.ErrInvalidName),
+		errors.Is(err, projectiondefs.ErrInvalidVersion),
+		errors.Is(err, projectiondefs.ErrInvalidPayload),
+		errors.Is(err, projectiondefs.ErrUnknownProjection),
+		errors.Is(err, projectiondefs.ErrUnknownKind),
+		errors.Is(err, projectiondefs.ErrUnknownKindClass),
+		errors.Is(err, projectiondefs.ErrNotProjectable),
+		errors.Is(err, projectiondefs.ErrVersionConflict),
+		errors.Is(err, projectiondefs.ErrRootstockImmutable):
+		return replayableToolErr(err)
+	default:
+		return err
+	}
+}
+
+func projectionNameForTool(p *projectiondefs.Projection) string {
+	if p == nil {
+		return ""
+	}
+	return p.Name
+}
+
+func projectionVersionForTool(p *projectiondefs.Projection) int {
+	if p == nil {
+		return 0
+	}
+	return p.Version
+}
+
+func projectionFilterForTool(p *projectiondefs.Projection) *feed.ProjectionFilter {
+	if p == nil {
+		return nil
+	}
+	return &p.Filter
 }
 
 // workItemDTO is the JSON shape returned by tools. It mirrors the HTTP

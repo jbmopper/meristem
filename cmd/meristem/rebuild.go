@@ -56,6 +56,7 @@ var projectionTables = []string{
 	"active_policy_profile",
 	"tropisms",
 	"cultivars",
+	"projections",
 }
 
 func runRebuild(ctx context.Context, logger *slog.Logger, args []string) error {
