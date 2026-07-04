@@ -22,13 +22,25 @@ func TestProjectionDefinitionFeedsAndCursorMismatchIntegration(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	tokenResult, err := auth.NewService(pool, app.NewEventWriter()).CreateToken(ctx, auth.CreateTokenInput{
-		Name:   "projection-api",
+	authSvc := auth.NewService(pool, app.NewEventWriter())
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "projection-root",
 		IsRoot: true,
 		Source: domain.SourceHuman,
 	})
 	if err != nil {
-		t.Fatalf("create token: %v", err)
+		t.Fatalf("create root token: %v", err)
+	}
+	root := rootResult.Token
+	// Registry/projection defines deny root by design (access.ToolVisible);
+	// the definer is an ordinary non-root human operator token.
+	tokenResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "projection-api",
+		Source: domain.SourceHuman,
+		Actor:  &root,
+	})
+	if err != nil {
+		t.Fatalf("create operator token: %v", err)
 	}
 	server := New(pool, nil)
 
