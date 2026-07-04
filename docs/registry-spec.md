@@ -1,0 +1,159 @@
+# Tropism and cultivar registry: R2 implementation spec
+
+Status: implementable spec, drafted 2026-07-04 by the Claude spec session for
+work item `52bbc0ef` (R2, parent `c6ba707b`). Companion to
+[`docs/scribe-spec.md`](scribe-spec.md); the scribe's hardcoded
+`convergence-scribe@v1` constant is this registry's first seed fixture.
+Suggested implementation owner per the divvy plan: Codex, after the scribe
+slice or in parallel (the seam between them is one constant lookup).
+
+R2 in one sentence: an open set of named, versioned cultivars over a closed
+set of reducer semantics, stored as events and projected — so the scribe
+selects convergence behavior from data instead of inventing it, and adding a
+new worker flavor is a write, not a deploy.
+
+## Data model
+
+Two new subject kinds, both event-sourced and projected. Field-minimal
+payloads per docs/cerberus-reducer-event-contracts.md: structural fields only
+where a reducer or projection must key on them.
+
+### `tropism.defined`
+
+```
+kind: tropism.defined
+subject_kind: tropism
+subject_id: uuid5(ns, "tropism|" + name)     -- one subject per name; versions are events on it
+payload:
+  name:        "checklist-all"               -- structural
+  version:     2                              -- structural, monotonic per name
+  reducer_id:  "checklist.v1"                 -- structural: must name a registered reducer implementation
+  params:      { ... }                        -- structural: reducer-specific config (e.g. budget defaults)
+  description: "<free text>"                  -- narrative
+```
+
+A tropism *instance* parameterizes a reducer *implementation*. The reducer
+implementations are code — the closed set, versioned by id, each a pure
+function with unit tests (`internal/convergence`). v1 registered reducer ids:
+
+- `checklist.v1` — existing all-pass checklist (already shipped)
+- `checks_proposal.v1` — the scribe validation reducer (scribe spec §4)
+- `human_ack.v1` — trivially: verdict follows an owner decision event
+
+Reserved, not implemented in this slice: `run_to_green.v1`, `judge_vote.v1`
+(blocked on the heterogeneous-panel open question), `external_signal.v1`.
+Defining a tropism whose `reducer_id` is not registered is refused at append
+time with `unknown_reducer` — the registry cannot point at semantics that do
+not exist.
+
+### `cultivar.defined`
+
+```
+kind: cultivar.defined
+subject_kind: cultivar
+subject_id: uuid5(ns, "cultivar|" + name)
+payload:
+  name:       "convergence-scribe"           -- structural
+  version:    1                               -- structural, monotonic per name
+  rootstock:  true                            -- structural: immutability class (see below)
+  tropism:    {name: "checklist-all", version: 2}   -- structural ref, validated at append
+  profile:                                    -- structural: worker launch shape
+    briefing:   "briefings/convergence-scribe.md"   -- R9 artifact path
+    scopes_template: ["work_items.tree:{root}", "work_items.read", "work_items.write", "feed.read_assigned"]
+  xylem:                                      -- structural: budget envelope
+    max_attempts: 3
+    max_wall_seconds: 1800
+    max_depth: 1
+  phloem:     "projection:work-item-brief"    -- string ref until R6 lands; resolved ref after
+  description: "<free text>"                  -- narrative
+```
+
+### Projections
+
+Migration adds `tropisms` and `cultivars` tables projecting the latest
+version per name (full history stays in `events`; the projection is the
+"current registry"). Projectors follow the existing registry pattern in
+`internal/projections`. Replay rebuilds both tables identically — this is
+R2's first convergence check and it falls out of doing projection the normal
+way.
+
+## Write path and authority
+
+New REST/MCP surface, mutating, idempotency-key required:
+
+- `registry.define_tropism` / `POST /v1/registry/tropisms`
+- `registry.define_cultivar` / `POST /v1/registry/cultivars`
+- `registry.list` / `registry.get` (read; visible to any work-items-capable token)
+
+Authority for this slice: writes require a new scope `registry.write`, held
+by the owner's tokens and (per R8) the seed token. **R5's self-extension flow
+is explicitly out of scope here** — when it lands, worker-proposed cultivars
+arrive through the grant reducer + review gate and end in the same
+`cultivar.defined` append, so the event contract needs no change.
+
+Versioning rule: a `*.defined` append for an existing name must carry
+`version = current + 1`, else refused with `version_conflict`. Nothing is
+ever mutated or deleted; deactivation is a future `cultivar.retired` event
+kind, reserved now, not implemented.
+
+**Rootstock immutability:** entries with `rootstock: true` refuse
+redefinition unless the actor is the root token. This is the R1/refresh-doc
+rule ("changing rootstock is an owner-approved migration") enforced at the
+only write seam.
+
+## Consumption seams
+
+Anywhere a cultivar name is accepted, it is validated against the projection
+and refusal is structured:
+
+1. **Scribe pass** (scribe spec §1): resolves `convergence-scribe` from the
+   registry instead of the hardcoded constant. The constant is deleted in the
+   same PR that seeds the fixture — one lookup swap.
+2. **Dispatch entries** (R3 remainder, `b6526f08`): the reconciler names the
+   handling cultivar in dispatch payloads; unknown name is impossible by
+   construction because the rule data references the registry.
+3. **Work item metadata / launch wrappers**: `"cultivar": "name@version"`
+   strings in event payloads stay launch metadata (never schema identity, per
+   the Cerberus contract rule); tools that *act* on them validate first.
+
+Refusal shape everywhere: `unknown_cultivar: no cultivar named X; consult
+registry.list` — satisfying R2's third convergence check verbatim.
+
+## Seed fixtures (R8 tie-in)
+
+`meristem seed` plants, idempotently:
+
+- tropisms: `checklist-all@1` (reducer `checklist.v1`, current default
+  budget), `checks-proposal@1` (reducer `checks_proposal.v1`),
+  `human-ack@1` (reducer `human_ack.v1`)
+- cultivars (all `rootstock: true`):
+  - `convergence-scribe@1` — exactly the values in scribe spec §5
+  - `human-attention@1` — the escalation-item shape the metronome already
+    creates (checks `["human_response_recorded"]`, tropism `human-ack@1`)
+  - `checklist-worker@1` — the generic leaf worker running declared checks
+
+Seeding an already-seeded registry appends zero fresh events (deterministic
+ids + discriminator-free payloads that legitimately never repeat).
+
+## Convergence checks (from work item 52bbc0ef, restated implementably)
+
+1. Replay test: define tropisms and cultivars across multiple versions,
+   rebuild projections from events, byte-identical rows.
+2. Reducer unit test per seeded tropism: feed recorded signals, assert the
+   verdict and the reducer-identity field in `convergence.verdict_recorded`.
+3. Integration test: scribe pass and dispatch writer refuse an unknown
+   cultivar name with `unknown_cultivar` naming `registry.list`; registry
+   write with unregistered `reducer_id` refused with `unknown_reducer`;
+   non-root redefinition of a rootstock cultivar refused.
+4. Seed idempotency: second `meristem seed` run appends zero fresh registry
+   events.
+
+## Deferred, explicitly
+
+- R5 self-extension (grant-gated worker-proposed cultivars) — contract
+  compatible, flow out of scope.
+- R6 phloem resolution — `phloem` stays an opaque string ref until named
+  projections exist.
+- `judge_vote.v1` reducer semantics — blocked on the heterogeneous-panel
+  open question in the refresh doc.
+- `cultivar.retired` — kind reserved, not implemented.
