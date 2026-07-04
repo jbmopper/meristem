@@ -32,6 +32,7 @@ type workItemResponse struct {
 	HumanReviewStatus          domain.HumanReviewStatus `json:"human_review_status"`
 	CreatedBy                  *uuid.UUID               `json:"created_by,omitempty"`
 	CreatedAt                  time.Time                `json:"created_at"`
+	StateEnteredAt             time.Time                `json:"state_entered_at"`
 	UpdatedAt                  time.Time                `json:"updated_at"`
 }
 
@@ -685,6 +686,7 @@ func toWorkItemResponse(item domain.WorkItem) workItemResponse {
 		HumanReviewStatus:          item.HumanReviewStatus,
 		CreatedBy:                  item.CreatedBy,
 		CreatedAt:                  item.CreatedAt,
+		StateEnteredAt:             item.StateEnteredAt,
 		UpdatedAt:                  item.UpdatedAt,
 	}
 }

@@ -64,9 +64,9 @@ func (createdProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event
 	_, err = tx.Exec(ctx, `
 		INSERT INTO work_items (
 			id, title, body, state, suggested_convergence_checks,
-			human_review_status, created_by, created_at, updated_at
+			human_review_status, created_by, created_at, state_entered_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $8)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $8, $8)
 		ON CONFLICT (id) DO NOTHING
 	`, event.SubjectID, payload.Title, payload.Body, state, checksJSON, humanReview, event.ActorTokenID, event.OccurredAt)
 	return err
@@ -78,6 +78,7 @@ func (transitionedProjector) Kind() string { return domain.EventWorkItemTransiti
 
 func (transitionedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	var payload struct {
+		From   string `json:"from"`
 		To     string `json:"to"`
 		Reason string `json:"reason"`
 	}
@@ -89,9 +90,15 @@ func (transitionedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 	}
 	_, err := tx.Exec(ctx, `
 		UPDATE work_items
-		SET state = $2, state_reason = NULLIF($3, ''), updated_at = $4
+		SET state = $2,
+		    state_reason = NULLIF($3, ''),
+		    state_entered_at = CASE
+		        WHEN NULLIF($5, '') IS NULL OR $5 <> $2 THEN $4
+		        ELSE state_entered_at
+		    END,
+		    updated_at = $4
 		WHERE id = $1
-	`, event.SubjectID, payload.To, payload.Reason, event.OccurredAt)
+	`, event.SubjectID, payload.To, payload.Reason, event.OccurredAt, payload.From)
 	return err
 }
 

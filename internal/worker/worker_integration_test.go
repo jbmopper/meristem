@@ -236,6 +236,74 @@ func TestScanOnceReBreachesAfterStateRotation(t *testing.T) {
 	}
 }
 
+func TestScanOnceProgressEventDoesNotResetPatienceEpoch(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-progress-does-not-reset-clock")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title: "chatty but stale",
+		State: domain.WorkItemCaptured,
+		Actor: systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	stateEnteredAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, stateEnteredAt)
+	if err := service.AppendEvent(ctx, item.ID, "agent.progress", map[string]any{"summary": "still working"}, systemTok.Token); err != nil {
+		t.Fatalf("append progress event: %v", err)
+	}
+	gotEntered, gotUpdated := workItemTimestamps(t, ctx, pool, item.ID)
+	if !gotEntered.UTC().Equal(stateEnteredAt) {
+		t.Fatalf("state_entered_at changed after progress event: got %s want %s", gotEntered, stateEnteredAt)
+	}
+	if !gotUpdated.After(gotEntered) {
+		t.Fatalf("updated_at did not move after progress event: updated_at=%s state_entered_at=%s", gotUpdated, gotEntered)
+	}
+
+	// Make activity recent relative to the fixed scan time. If the worker still
+	// used updated_at as the patience clock, this item would not breach.
+	scanNow := stateEnteredAt.Add(2 * time.Hour)
+	recentActivity := scanNow.Add(-5 * time.Minute)
+	if _, err := pool.Exec(ctx, `UPDATE work_items SET updated_at = $2 WHERE id = $1`, item.ID, recentActivity); err != nil {
+		t.Fatalf("set recent activity timestamp: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return scanNow })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	if result.PatienceEscalationsRequested != 1 {
+		t.Fatalf("patience escalations requested = %d, want 1", result.PatienceEscalationsRequested)
+	}
+	got, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if got.State != domain.WorkItemBlocked {
+		t.Fatalf("state = %s, want blocked", got.State)
+	}
+}
+
 func TestScanOnceBlockedHumanReviewBreachesButDoesNotEscalate(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -660,7 +728,7 @@ func TestScanOnceConvergenceBlocksAfterFreshFailedAttempts(t *testing.T) {
 }
 
 // seedWorkItemAt appends one work_item.created event with a deterministic
-// id and then back-dates the projected updated_at column so the dwell time
+// id and then back-dates the projected lifecycle timestamps so the dwell time
 // the worker sees is exactly what the test wants. Direct UPDATE of the
 // projection is fine in tests; production code must never do this.
 func seedWorkItemAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, id uuid.UUID, state domain.WorkItemState, enteredAt time.Time) {
@@ -686,7 +754,7 @@ func seedWorkItemAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, write
 	if err != nil {
 		t.Fatalf("seed append: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE work_items SET updated_at = $2, created_at = $2 WHERE id = $1`, id, enteredAt); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE work_items SET updated_at = $2, created_at = $2, state_entered_at = $2 WHERE id = $1`, id, enteredAt); err != nil {
 		t.Fatalf("seed back-date: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -695,8 +763,8 @@ func seedWorkItemAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, write
 }
 
 // transitionWorkItem appends a work_item.transitioned event and back-dates
-// the projected updated_at to enteredAt. Mirrors seedWorkItemAt but uses
-// the transition projector.
+// the projected state_entered_at/updated_at to enteredAt. Mirrors
+// seedWorkItemAt but uses the transition projector.
 func transitionWorkItem(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, id uuid.UUID, to domain.WorkItemState, enteredAt time.Time) {
 	t.Helper()
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
@@ -719,7 +787,7 @@ func transitionWorkItem(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 	if err != nil {
 		t.Fatalf("transition append: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE work_items SET updated_at = $2 WHERE id = $1`, id, enteredAt); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE work_items SET updated_at = $2, state_entered_at = $2 WHERE id = $1`, id, enteredAt); err != nil {
 		t.Fatalf("transition back-date: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -729,9 +797,17 @@ func transitionWorkItem(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 
 func setWorkItemTimestamps(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, ts time.Time) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `UPDATE work_items SET created_at = $2, updated_at = $2 WHERE id = $1`, id, ts); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE work_items SET created_at = $2, updated_at = $2, state_entered_at = $2 WHERE id = $1`, id, ts); err != nil {
 		t.Fatalf("set work_item timestamps: %v", err)
 	}
+}
+
+func workItemTimestamps(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (stateEnteredAt, updatedAt time.Time) {
+	t.Helper()
+	if err := pool.QueryRow(ctx, `SELECT state_entered_at, updated_at FROM work_items WHERE id = $1`, id).Scan(&stateEnteredAt, &updatedAt); err != nil {
+		t.Fatalf("read work_item timestamps: %v", err)
+	}
+	return stateEnteredAt, updatedAt
 }
 
 func countEventsByKind(t *testing.T, ctx context.Context, pool *pgxpool.Pool, kind string) int {

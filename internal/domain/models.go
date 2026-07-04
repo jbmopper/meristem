@@ -223,6 +223,7 @@ type WorkItem struct {
 	HumanReviewStatus          HumanReviewStatus
 	CreatedBy                  *uuid.UUID
 	CreatedAt                  time.Time
+	StateEnteredAt             time.Time
 	UpdatedAt                  time.Time
 }
 

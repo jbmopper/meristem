@@ -84,8 +84,8 @@ func TestBudgetsStatesSkipsZeroAndNegative(t *testing.T) {
 func TestEvaluateBreachesSkipsItemsUnderBudget(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	cs := []Candidate{
-		{ID: uuid.New(), State: domain.WorkItemCaptured, UpdatedAt: now.Add(-30 * time.Minute)},
-		{ID: uuid.New(), State: domain.WorkItemCaptured, UpdatedAt: now.Add(-90 * time.Minute)},
+		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-30 * time.Minute)},
+		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-90 * time.Minute)},
 	}
 	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemCaptured: time.Hour,
@@ -112,7 +112,7 @@ func TestEvaluateBreachesSkipsItemsExactlyAtBudget(t *testing.T) {
 	// excludes.
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	cs := []Candidate{
-		{ID: uuid.New(), State: domain.WorkItemCaptured, UpdatedAt: now.Add(-time.Hour)},
+		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-time.Hour)},
 	}
 	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemCaptured: time.Hour,
@@ -128,7 +128,7 @@ func TestEvaluateBreachesSkipsStatesWithoutBudget(t *testing.T) {
 	// breach states the operator has not yet reasoned about.
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	cs := []Candidate{
-		{ID: uuid.New(), State: domain.WorkItemTriaged, UpdatedAt: now.Add(-365 * 24 * time.Hour)},
+		{ID: uuid.New(), State: domain.WorkItemTriaged, StateEnteredAt: now.Add(-365 * 24 * time.Hour)},
 	}
 	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemCaptured: time.Hour,
@@ -144,9 +144,9 @@ func TestEvaluateBreachesPreservesInputOrder(t *testing.T) {
 	b := uuid.New()
 	c := uuid.New()
 	cs := []Candidate{
-		{ID: a, State: domain.WorkItemCaptured, UpdatedAt: now.Add(-2 * time.Hour)},
-		{ID: b, State: domain.WorkItemCaptured, UpdatedAt: now.Add(-30 * time.Minute)},
-		{ID: c, State: domain.WorkItemCaptured, UpdatedAt: now.Add(-3 * time.Hour)},
+		{ID: a, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-2 * time.Hour)},
+		{ID: b, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-30 * time.Minute)},
+		{ID: c, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-3 * time.Hour)},
 	}
 	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemCaptured: time.Hour,

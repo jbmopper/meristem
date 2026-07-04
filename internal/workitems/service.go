@@ -373,7 +373,7 @@ func (s *Service) List(ctx context.Context, state string, limit int) ([]domain.W
 		limit = 50
 	}
 	args := []any{limit}
-	query := `SELECT id, title, body, state, state_reason, suggested_convergence_checks, human_review_status, created_by, created_at, updated_at FROM work_items`
+	query := `SELECT id, title, body, state, state_reason, suggested_convergence_checks, human_review_status, created_by, created_at, state_entered_at, updated_at FROM work_items`
 	if state != "" {
 		query += ` WHERE state = $2`
 		args = append(args, state)
@@ -408,7 +408,7 @@ type rowScanner interface {
 }
 
 func scanWorkItem(ctx context.Context, q queryer, id uuid.UUID) (domain.WorkItem, error) {
-	row := q.QueryRow(ctx, `SELECT id, title, body, state, state_reason, suggested_convergence_checks, human_review_status, created_by, created_at, updated_at FROM work_items WHERE id = $1`, id)
+	row := q.QueryRow(ctx, `SELECT id, title, body, state, state_reason, suggested_convergence_checks, human_review_status, created_by, created_at, state_entered_at, updated_at FROM work_items WHERE id = $1`, id)
 	return scanWorkItemRow(row)
 }
 
@@ -417,7 +417,7 @@ func scanWorkItemRow(row rowScanner) (domain.WorkItem, error) {
 	var state string
 	var humanReview string
 	var checksJSON []byte
-	if err := row.Scan(&item.ID, &item.Title, &item.Body, &state, &item.StateReason, &checksJSON, &humanReview, &item.CreatedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.Title, &item.Body, &state, &item.StateReason, &checksJSON, &humanReview, &item.CreatedBy, &item.CreatedAt, &item.StateEnteredAt, &item.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.WorkItem{}, ErrNotFound
 		}

@@ -112,7 +112,7 @@ func (b Budgets) states() []string {
 type Candidate struct {
 	ID                uuid.UUID
 	State             domain.WorkItemState
-	UpdatedAt         time.Time
+	StateEnteredAt    time.Time
 	HumanReviewStatus domain.HumanReviewStatus
 }
 
@@ -141,7 +141,7 @@ func EvaluateBreaches(now time.Time, candidates []Candidate, budgets Budgets) []
 		if !ok || budget <= 0 {
 			continue
 		}
-		age := now.Sub(c.UpdatedAt)
+		age := now.Sub(c.StateEnteredAt)
 		if age <= budget {
 			continue
 		}
@@ -269,10 +269,10 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	states := w.budgets.states()
 	if len(states) > 0 {
 		rows, err := w.pool.Query(ctx, `
-			SELECT id, state, updated_at, human_review_status
+			SELECT id, state, state_entered_at, human_review_status
 			FROM work_items
 			WHERE state = ANY($1::text[])
-			ORDER BY updated_at ASC
+			ORDER BY state_entered_at ASC
 		`, states)
 		if err != nil {
 			return Result{}, fmt.Errorf("worker: query work_items: %w", err)
@@ -282,7 +282,7 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 			var c Candidate
 			var st string
 			var review string
-			if err := rows.Scan(&c.ID, &st, &c.UpdatedAt, &review); err != nil {
+			if err := rows.Scan(&c.ID, &st, &c.StateEnteredAt, &review); err != nil {
 				rows.Close()
 				return Result{}, fmt.Errorf("worker: scan work_items row: %w", err)
 			}
@@ -340,9 +340,9 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 //     the budget mid-flight causes a re-evaluation of the same observation
 //     to emit a fresh event, which is desirable: a tighter budget is a new
 //     judgment about the same dwell.
-//   - state_entered_at_unix: the work_item's updated_at as a unix second.
+//   - state_entered_at_unix: the work_item's state_entered_at as a unix second.
 //     Including this is what makes "left state X, came back in" emit a new
-//     event: the new state-entry has a different updated_at and therefore
+//     event: the new state-entry has a different state_entered_at and therefore
 //     a different event_id, so the new breach is recorded distinctly. Unix
 //     seconds (not RFC3339) keeps the canonical representation stable
 //     across timezone-rendered serializations.
@@ -367,7 +367,7 @@ func (w *Worker) emitBreach(ctx context.Context, b Breach) (bool, error) {
 		Payload: map[string]any{
 			"state":                 string(b.Candidate.State),
 			"budget_seconds":        int64(b.Budget.Seconds()),
-			"state_entered_at_unix": b.Candidate.UpdatedAt.Unix(),
+			"state_entered_at_unix": b.Candidate.StateEnteredAt.Unix(),
 		},
 	})
 	if err != nil {
@@ -405,14 +405,14 @@ func patienceEscalationReason(b Breach) string {
 	return fmt.Sprintf("patience budget breached: state=%s budget_seconds=%d state_entered_at_unix=%d",
 		b.Candidate.State,
 		int64(b.Budget.Seconds()),
-		b.Candidate.UpdatedAt.Unix(),
+		b.Candidate.StateEnteredAt.Unix(),
 	)
 }
 
 func patienceEscalationSummary(b Breach) string {
-	return fmt.Sprintf("Worker metronome observed state %s past its %s patience budget. State epoch: updated_at_unix=%d. Declared timeout rule: hand to human by blocking the item and creating this escalation.",
+	return fmt.Sprintf("Worker metronome observed state %s past its %s patience budget. State epoch: state_entered_at_unix=%d. Declared timeout rule: hand to human by blocking the item and creating this escalation.",
 		b.Candidate.State,
 		b.Budget,
-		b.Candidate.UpdatedAt.Unix(),
+		b.Candidate.StateEnteredAt.Unix(),
 	)
 }

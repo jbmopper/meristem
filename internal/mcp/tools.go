@@ -669,6 +669,7 @@ type workItemDTO struct {
 	HumanReviewStatus          domain.HumanReviewStatus `json:"human_review_status"`
 	CreatedBy                  *uuid.UUID               `json:"created_by,omitempty"`
 	CreatedAt                  string                   `json:"created_at"`
+	StateEnteredAt             string                   `json:"state_entered_at"`
 	UpdatedAt                  string                   `json:"updated_at"`
 }
 
@@ -726,6 +727,7 @@ func toWorkItemDTO(item domain.WorkItem) workItemDTO {
 		HumanReviewStatus:          item.HumanReviewStatus,
 		CreatedBy:                  item.CreatedBy,
 		CreatedAt:                  item.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		StateEnteredAt:             item.StateEnteredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		UpdatedAt:                  item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
 }
