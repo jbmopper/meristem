@@ -21,6 +21,8 @@ cd "$REPO_ROOT"
 MERISTEM_BIN="${MERISTEM_BIN:-go run ./cmd/meristem}"
 GO_BIN="${GO_BIN:-$(command -v go || true)}"
 MERISTEM_DATABASE_URL="${MERISTEM_DATABASE_URL:-postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable}"
+DEFAULT_WORKTREE_BASE="$(cd "$REPO_ROOT/.." && pwd)"
+AGENT_WORKTREE_BASE="${MERISTEM_AGENT_WORKTREE_BASE:-$DEFAULT_WORKTREE_BASE}"
 TOKEN_DIR="${MERISTEM_TOKEN_DIR:-.meristem}"
 ROOT_TOKEN_FILE="${ROOT_TOKEN_FILE:-$TOKEN_DIR/root.token}"
 GENERATED_DIR="$TOKEN_DIR/generated"
@@ -61,6 +63,11 @@ security:
   Secrets are written only to .meristem/*.token with mode 0600.
   Generated JSON/config snippets read token files at runtime and do not
   contain bearer tokens.
+
+worktrees:
+  Generated local MCP wrappers cd into per-agent worktrees. Prepare them with
+  scripts/prepare-agent-worktree.sh --target codex
+  scripts/prepare-agent-worktree.sh --target claude-code-gui
 USAGE
 }
 
@@ -118,6 +125,10 @@ token_file_for() {
   printf '%s/%s.token' "$TOKEN_DIR" "$1"
 }
 
+worktree_for() {
+  printf '%s/meristem-%s' "$AGENT_WORKTREE_BASE" "$1"
+}
+
 active_token_exists() {
   local name="$1"
   $MERISTEM_BIN tokens list 2>/dev/null |
@@ -172,12 +183,23 @@ write_generated_configs() {
   chmod 700 "$TOKEN_DIR"
   chmod 700 "$GENERATED_DIR"
 
+  local claude_code_workspace codex_workspace
+  claude_code_workspace="$(worktree_for claude-code-gui)"
+  codex_workspace="$(worktree_for codex)"
+
   cat > "$GENERATED_DIR/claude-code-meristem-command.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$REPO_ROOT"
+primary_repo="$REPO_ROOT"
+workspace_root="$claude_code_workspace"
+if [[ ! -e "\$workspace_root/.git" ]]; then
+  echo "missing Claude Code meristem worktree: \$workspace_root" >&2
+  echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target claude-code-gui" >&2
+  exit 64
+fi
+cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
-export MERISTEM_TOKEN="\$(cat "$REPO_ROOT/.meristem/claude-code-gui.token")"
+export MERISTEM_TOKEN="\$(cat "\$primary_repo/.meristem/claude-code-gui.token")"
 exec "$GO_BIN" run ./cmd/meristem mcp
 EOF
   chmod 700 "$GENERATED_DIR/claude-code-meristem-command.sh"
@@ -185,9 +207,16 @@ EOF
   cat > "$GENERATED_DIR/codex-meristem-command.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$REPO_ROOT"
+primary_repo="$REPO_ROOT"
+workspace_root="$codex_workspace"
+if [[ ! -e "\$workspace_root/.git" ]]; then
+  echo "missing Codex meristem worktree: \$workspace_root" >&2
+  echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target codex" >&2
+  exit 64
+fi
+cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
-export MERISTEM_TOKEN="\$(cat "$REPO_ROOT/.meristem/codex.token")"
+export MERISTEM_TOKEN="\$(cat "\$primary_repo/.meristem/codex.token")"
 exec "$GO_BIN" run ./cmd/meristem mcp
 EOF
   chmod 700 "$GENERATED_DIR/codex-meristem-command.sh"
@@ -255,6 +284,10 @@ Useful files:
   $GENERATED_DIR/codex-meristem-command.sh
   $GENERATED_DIR/claude-code-meristem-command.sh
   $GENERATED_DIR/claude-code-mcp-add.sh
+
+Prepare required worktrees:
+  scripts/prepare-agent-worktree.sh --target codex
+  scripts/prepare-agent-worktree.sh --target claude-code-gui
 
 Verify Claude Code after applying:
   /mcp

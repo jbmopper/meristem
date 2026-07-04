@@ -13,7 +13,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TOKEN_FILE="${MERISTEM_TOKEN_FILE:-$REPO_ROOT/.meristem/cursor-mcp.token}"
+PRIMARY_REPO="$REPO_ROOT"
+DEFAULT_WORKTREE_BASE="$(cd "$PRIMARY_REPO/.." && pwd)"
+WORKSPACE_ROOT="${MERISTEM_AGENT_WORKTREE:-${MERISTEM_CURSOR_WORKTREE:-$DEFAULT_WORKTREE_BASE/meristem-cursor-mcp}}"
+TOKEN_FILE="${MERISTEM_TOKEN_FILE:-$PRIMARY_REPO/.meristem/cursor-mcp.token}"
 GO_BIN="${GO_BIN:-$(command -v go || true)}"
 
 export MERISTEM_DATABASE_URL="${MERISTEM_DATABASE_URL:-postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable}"
@@ -28,9 +31,14 @@ export MERISTEM_MCP_TOOL_NAMES="${MERISTEM_MCP_TOOL_NAMES:-cursor}"
   echo "Mint one with: MERISTEM_TOKEN=\$(cat .meristem/root.token) go run ./cmd/meristem tokens create --name cursor-mcp --source agent" >&2
   exit 1
 }
+[[ -e "$WORKSPACE_ROOT/.git" ]] || {
+  echo "cursor-mcp-command: missing meristem worktree $WORKSPACE_ROOT" >&2
+  echo "Create it with: $PRIMARY_REPO/scripts/prepare-agent-worktree.sh --target cursor-mcp" >&2
+  exit 64
+}
 
 export MERISTEM_TOKEN
 MERISTEM_TOKEN="$(cat "$TOKEN_FILE")"
 
-cd "$REPO_ROOT"
+cd "$WORKSPACE_ROOT"
 exec "$GO_BIN" run ./cmd/meristem mcp

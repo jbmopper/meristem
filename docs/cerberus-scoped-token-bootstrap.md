@@ -187,20 +187,25 @@ runtime agent taxonomy.
 ## Launcher Shape
 
 Generated launchers are secret-free scripts except for reading their own token
-file at runtime:
+file at runtime. They run from a dedicated worktree and read token files from
+the primary checkout:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-cd "/Users/juliusmopper/Dev/meristem"
+primary_repo="/Users/juliusmopper/Dev/meristem"
+workspace_root="/Users/juliusmopper/Dev/meristem-cerberus-coordinator-98853a93"
+cd "$workspace_root"
 export MERISTEM_DATABASE_URL="postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable"
-export MERISTEM_TOKEN="$(tr -d '\n' < ".meristem/aegis-cerberus-coordinator-98853a93.token")"
+export MERISTEM_TOKEN="$(tr -d '\n' < "$primary_repo/.meristem/aegis-cerberus-coordinator-98853a93.token")"
 exec go run ./cmd/meristem mcp
 ```
 
 Rules:
 
 - No bearer secret appears in the script body.
+- The script `cd`s into the head's dedicated worktree before running
+  `meristem mcp`.
 - Missing token file is a hard failure.
 - Empty token file is a hard failure.
 - The script does not fall back to `.meristem/codex.token`,

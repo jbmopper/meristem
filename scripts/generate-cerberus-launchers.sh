@@ -10,6 +10,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 MERISTEM_DATABASE_URL="${MERISTEM_DATABASE_URL:-postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable}"
+DEFAULT_WORKTREE_BASE="$(cd "$REPO_ROOT/.." && pwd)"
+AGENT_WORKTREE_BASE="${MERISTEM_AGENT_WORKTREE_BASE:-$DEFAULT_WORKTREE_BASE}"
 MERISTEM_BIN="${MERISTEM_BIN:-$REPO_ROOT/.meristem/generated/meristem-bin}"
 if [[ ! -x "$MERISTEM_BIN" ]]; then
   MERISTEM_BIN="${GO_BIN:-go} run ./cmd/meristem"
@@ -29,16 +31,24 @@ write_launcher() {
   local token_name="$2"
   local script="$GENERATED_DIR/$head-meristem-command.sh"
   local token_file="$TOKEN_DIR/$token_name.token"
+  local workspace_root="$AGENT_WORKTREE_BASE/meristem-cerberus-$head-$ROOT_SHORT"
 
   cat > "$script" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$REPO_ROOT"
-token_file="$REPO_ROOT/$token_file"
+primary_repo="$REPO_ROOT"
+workspace_root="$workspace_root"
+token_file="\$primary_repo/$token_file"
+if [[ ! -e "\$workspace_root/.git" ]]; then
+  echo "missing Cerberus $head worktree: \$workspace_root" >&2
+  echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target cerberus-$head-$ROOT_SHORT" >&2
+  exit 64
+fi
 if [[ ! -s "\$token_file" ]]; then
   echo "missing or empty Cerberus token file for $head: \$token_file" >&2
   exit 64
 fi
+cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
 export CERBERUS_ROOT_ID="$ROOT_ID"
 export CERBERUS_HEAD="$head"

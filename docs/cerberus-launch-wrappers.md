@@ -52,6 +52,14 @@ scoped identity, not to a third subactor worker.
 
 ## Wrapper Paths
 
+Prepare one worktree per head before using the generated wrappers:
+
+```bash
+scripts/prepare-agent-worktree.sh --target cerberus-coordinator-98853a93
+scripts/prepare-agent-worktree.sh --target cerberus-grower-98853a93
+scripts/prepare-agent-worktree.sh --target cerberus-healer-98853a93
+```
+
 Generate wrappers with:
 
 ```bash
@@ -73,6 +81,13 @@ at runtime. They set:
 - `CERBERUS_ROOT_ID`
 - `CERBERUS_HEAD`
 - `MERISTEM_TOKEN`
+
+Each generated script `cd`s into the matching dedicated worktree before running
+`meristem mcp`:
+
+- coordinator: `../meristem-cerberus-coordinator-98853a93`
+- grower: `../meristem-cerberus-grower-98853a93`
+- healer: `../meristem-cerberus-healer-98853a93`
 
 They do not read or fall back to:
 

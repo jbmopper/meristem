@@ -148,7 +148,11 @@ MERISTEM_IDEMPOTENCY_KEY=$(uuidgen) \
 
 ## Assistant access
 
-Use [`scripts/provision-assistant-access.sh`](scripts/provision-assistant-access.sh) to mint per-assistant agent tokens, store them under `.meristem/*.token` with mode 0600, and generate secret-free MCP config snippets.
+Use [`scripts/provision-assistant-access.sh`](scripts/provision-assistant-access.sh)
+to mint per-assistant agent tokens, store them under `.meristem/*.token` with
+mode 0600, and generate secret-free MCP config snippets. Local assistants should
+run from per-agent worktrees, not the primary checkout; see
+[`docs/agent-worktrees.md`](docs/agent-worktrees.md).
 
 ```bash
 MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
@@ -158,6 +162,14 @@ MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslm
 When spinning up a worker manually, paste the streamlined MCP instructions from
 [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md) after filling in
 the assigned work item, scope, and allowed areas.
+
+Before pointing a local MCP client at a generated wrapper, prepare the matching
+worktree:
+
+```bash
+scripts/prepare-agent-worktree.sh --target codex
+scripts/prepare-agent-worktree.sh --target claude-code-gui
+```
 
 For MCP-native workers, generate a filled handoff packet from live meristem
 state and start from the bootstrap protocol in

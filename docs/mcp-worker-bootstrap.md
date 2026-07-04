@@ -16,6 +16,7 @@ Assigned work_item: [WORK_ITEM_ID]
 Scope: [WHAT THIS WORKER MAY DO]
 Allowed areas: [FILES, MODULES, SYSTEMS, OR REPOS THIS WORKER MAY TOUCH]
 Out of scope: [ANYTHING EXPLICITLY FORBIDDEN]
+Workspace: [DEDICATED WORKTREE PATH, NOT THE PRIMARY MERISTEM CHECKOUT]
 
 Before changing anything:
 1. Read AGENTS.md.
@@ -70,6 +71,7 @@ Assigned work_item: <uuid>
 Scope: Implement and verify <one sentence>.
 Allowed areas: <paths or modules>.
 Out of scope: Secrets, unrelated refactors, external writes without approval.
+Workspace: <dedicated worktree path, such as ../meristem-codex>
 ```
 
 Live-worker environments should treat this as the source of truth. This branch does
