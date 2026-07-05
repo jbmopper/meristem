@@ -8,15 +8,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/worker"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
+
+const testScribeCultivar = "convergence-scribe@1"
 
 func TestScribeProposalFlowIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -43,6 +48,7 @@ func TestScribeProposalFlowIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create system token: %v", err)
 	}
+	seedAPIScribeCultivar(t, ctx, pool, writer, systemResult.Token)
 	server := New(pool, nil)
 
 	created := doREST(t, server.Handler(), http.MethodPost, "/v1/work-items", rootResult.Secret, "scribe-parent", []byte(`{"title":"checkless parent"}`))
@@ -82,7 +88,7 @@ func TestScribeProposalFlowIntegration(t *testing.T) {
 			{"check": "human-ack:operator approval", "class": "human"},
 		},
 		"rationale": "tests plus owner acknowledgement cover this parent",
-		"cultivar":  convergence.ScribeCultivar,
+		"cultivar":  testScribeCultivar,
 	})
 	proposed := doREST(t, server.Handler(), http.MethodPost, "/v1/work-items/"+parentID.String()+"/convergence-proposal", rootResult.Secret, "scribe-valid-proposal", body)
 	assertRESTStatus(t, proposed, http.StatusCreated)
@@ -169,7 +175,7 @@ func TestScribeProposalInvalidInputsRecordRejectVerdicts(t *testing.T) {
 				"checks":      tc.checks,
 				"classified":  tc.classified,
 				"rationale":   "invalid case",
-				"cultivar":    convergence.ScribeCultivar,
+				"cultivar":    testScribeCultivar,
 			})
 			rec := doREST(t, server.Handler(), http.MethodPost, "/v1/work-items/"+parentID.String()+"/convergence-proposal", rootResult.Secret, "scribe-invalid-"+tc.name, body)
 			assertRESTStatus(t, rec, http.StatusCreated)
@@ -217,12 +223,51 @@ func createParentAndScribeChild(t *testing.T, ctx context.Context, service *work
 		State:                      domain.WorkItemTriaged,
 		SuggestedConvergenceChecks: []string{convergence.ScribeChildCheck},
 		HumanReviewStatus:          domain.HumanReviewWavedThrough,
-		Cultivar:                   convergence.ScribeCultivar,
+		Cultivar:                   testScribeCultivar,
 		Actor:                      actor,
 	}); err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
 	return parent.ID, childID
+}
+
+func seedAPIScribeCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "checklist-all",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      json.RawMessage(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "all checklist items pass",
+	})
+	if err != nil {
+		t.Fatalf("define scribe tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "convergence-scribe",
+		Version:   1,
+		Rootstock: true,
+		Tropism:   registry.TropismRef{Name: "checklist-all", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/convergence-scribe.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 3, MaxWallSeconds: 1800, MaxDepth: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "scribe rootstock",
+	})
+	if err != nil {
+		t.Fatalf("define scribe cultivar: %v", err)
+	}
 }
 
 func mustJSON(t *testing.T, v any) []byte {

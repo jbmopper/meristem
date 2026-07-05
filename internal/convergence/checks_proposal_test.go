@@ -6,6 +6,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const testScribeCultivar = "convergence-scribe@1"
+
 func TestValidateChecksProposalAcceptsClassifiedMachineAndHumanChecks(t *testing.T) {
 	got := ValidateChecksProposal(ProposeChecksInput{
 		ProposalOf: uuid.New(),
@@ -120,7 +122,7 @@ func TestChecksProposalSignalsDigestIncludesPayload(t *testing.T) {
 		ProposalOf: uuid.New(),
 		Checks:     []string{"cmd:a"},
 		Classified: []CheckClassification{{Check: "cmd:a", Class: "machine"}},
-		Cultivar:   ScribeCultivar,
+		Cultivar:   testScribeCultivar,
 	}, validation)
 	if err != nil {
 		t.Fatalf("signals a: %v", err)
@@ -129,7 +131,7 @@ func TestChecksProposalSignalsDigestIncludesPayload(t *testing.T) {
 		ProposalOf: uuid.New(),
 		Checks:     []string{"cmd:b"},
 		Classified: []CheckClassification{{Check: "cmd:b", Class: "machine"}},
-		Cultivar:   ScribeCultivar,
+		Cultivar:   testScribeCultivar,
 	}, validation)
 	if err != nil {
 		t.Fatalf("signals b: %v", err)

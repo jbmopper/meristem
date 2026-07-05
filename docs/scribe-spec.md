@@ -60,8 +60,9 @@ transaction, on fresh spawn only:
   - `human_review_status`: `waved_through`
 - `work_item.relation_added` (parent → scribe child)
 - the scribe child's cultivar recorded in the created payload as
-  `"cultivar": "convergence-scribe@1"` — launch metadata, not schema
-  identity, per the Cerberus reducer-contract rule
+  `"cultivar": "<name>@<version>"` after resolving the current
+  `convergence-scribe` rootstock from the registry projection — launch
+  metadata, not schema identity, per the Cerberus reducer-contract rule
 
 Exclusions from the candidate set:
 
@@ -101,7 +102,7 @@ payload:
   checks:       ["...", ...]                  -- structural: the proposal
   classified:   [{check, class: machine|human}, ...]  -- structural: reducer validates
   rationale:    "<free text>"                 -- narrative
-  cultivar:     "convergence-scribe@1"        -- launch metadata
+  cultivar:     "<name>@<version>"            -- launch metadata
 ```
 
 Appended by the scribe agent through the normal MCP
@@ -193,11 +194,13 @@ for queries the worker actually knows. With this, the existing checklist
 pass can verify and close the child even if the accept-transaction's
 transition raced.
 
-The `convergence-scribe@1` cultivar is **hardcoded as the rootstock
-constant for this slice** (title template, child checks, proposal contract,
-reducer id, budget) and matches the R2 seeded registry fixture. Dynamic
-resolution from registry data belongs to the later worker-profile/cultivar
-slices.
+The scribe rootstock name is `convergence-scribe`. At scan start, the worker
+resolves that name from the registry projection and stamps the resulting
+`<name>@<version>` string into the child create payload and proposal contract.
+If the registry does not contain that rootstock, the pass fails closed with
+`unknown_cultivar` naming `registry.list` and spawns no child. The deterministic
+child id keeps the original scribe-mechanism discriminator so there is still
+one scribe child per parent, ever.
 
 ## Xylem accounting
 
@@ -224,8 +227,9 @@ slices.
 
 ## Deferred, explicitly
 
-- Dynamic worker-profile/cultivar resolution: this spec hardcodes the seeded
-  `convergence-scribe@1` rootstock string.
+- Full launch-wrapper consumption of registry profile, xylem, and phloem
+  fields: this slice resolves and stamps the rootstock version, but dispatch
+  still owns actual worker launch wiring.
 - Dispatch feed entries for scribe children (R3 remainder): until then,
   launchers find them as `triaged` items in the tree.
 - Machine-grammar execution (`cmd:`/`query:` runners): validation only in

@@ -19,7 +19,6 @@ import (
 )
 
 const (
-	ScribeCultivar   = "convergence-scribe@1"
 	ScribeChildCheck = "query:parent_checks_defined"
 
 	checksProposalMaxAttempts = 3
@@ -113,9 +112,6 @@ func (s *ChecksProposalService) ProposeChecks(ctx context.Context, parentID uuid
 		return ChecksProposalResult{}, fmt.Errorf("%w: parent id is required", ErrChecksProposalNotFound)
 	}
 	cultivar := strings.TrimSpace(in.Cultivar)
-	if cultivar == "" {
-		cultivar = ScribeCultivar
-	}
 	payload := proposalPayload{
 		ProposalOf: in.ProposalOf,
 		Checks:     append([]string(nil), in.Checks...),

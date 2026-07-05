@@ -265,12 +265,12 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	out := Result{}
 
 	scribeResult, err := w.scanScribes(ctx)
-	if err != nil {
-		return out, fmt.Errorf("worker: scribe pass: %w", err)
-	}
 	out.ScribeCandidatesScanned = scribeResult.ScribeCandidatesScanned
 	out.ScribeChildrenSpawned = scribeResult.ScribeChildrenSpawned
 	out.ScribeChildrenAlreadyPresent = scribeResult.ScribeChildrenAlreadyPresent
+	if err != nil {
+		return out, fmt.Errorf("worker: scribe pass: %w", err)
+	}
 
 	convergenceResult, err := w.scanConvergence(ctx)
 	if err != nil {

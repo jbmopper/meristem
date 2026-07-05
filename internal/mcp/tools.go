@@ -774,7 +774,7 @@ func (s *Server) toolConvergenceProposeChecks() Tool {
 			),
 			"classified": schemaAny("Array of {check, class}; class is machine or human."),
 			"rationale":  schemaString("Short rationale for the proposed checks."),
-			"cultivar":   schemaString("Launch metadata. Defaults to convergence-scribe@1."),
+			"cultivar":   schemaString("Launch metadata from the scribe child, e.g. convergence-scribe@1."),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.CheckProposals == nil {

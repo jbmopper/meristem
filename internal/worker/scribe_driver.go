@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,8 +11,11 @@ import (
 
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
+
+const scribeCultivarName = "convergence-scribe"
 
 type scribePassResult struct {
 	ScribeCandidatesScanned      int
@@ -32,12 +36,10 @@ func (w *Worker) scanScribes(ctx context.Context) (scribePassResult, error) {
 		return scribePassResult{}, err
 	}
 	result := scribePassResult{ScribeCandidatesScanned: len(candidates)}
-	service := workitems.NewService(w.pool, w.writer)
-	actor := domain.Token{Source: domain.SourceSystem}
-	if w.actor != nil {
-		actor.ID = *w.actor
+	if len(candidates) == 0 {
+		return result, nil
 	}
-
+	pending := make([]scribeCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		childID := convergence.ScribeChildID(candidate.ID)
 		exists, err := w.scribeChildExists(ctx, candidate.ID, childID)
@@ -48,13 +50,30 @@ func (w *Worker) scanScribes(ctx context.Context) (scribePassResult, error) {
 			result.ScribeChildrenAlreadyPresent++
 			continue
 		}
+		pending = append(pending, candidate)
+	}
+	if len(pending) == 0 {
+		return result, nil
+	}
+	cultivar, err := w.resolveScribeCultivar(ctx)
+	if err != nil {
+		return result, err
+	}
+	service := workitems.NewService(w.pool, w.writer)
+	actor := domain.Token{Source: domain.SourceSystem}
+	if w.actor != nil {
+		actor.ID = *w.actor
+	}
+
+	for _, candidate := range pending {
+		childID := convergence.ScribeChildID(candidate.ID)
 		_, fresh, err := service.SpawnChildWithID(ctx, candidate.ID, childID, workitems.CreateInput{
 			Title:                      scribeChildTitle(candidate.Title),
-			Body:                       scribeChildBody(candidate),
+			Body:                       scribeChildBody(candidate, cultivar),
 			State:                      domain.WorkItemTriaged,
 			SuggestedConvergenceChecks: []string{convergence.ScribeChildCheck},
 			HumanReviewStatus:          domain.HumanReviewWavedThrough,
-			Cultivar:                   convergence.ScribeCultivar,
+			Cultivar:                   cultivar,
 			Actor:                      actor,
 		})
 		if err != nil {
@@ -67,6 +86,17 @@ func (w *Worker) scanScribes(ctx context.Context) (scribePassResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func (w *Worker) resolveScribeCultivar(ctx context.Context) (string, error) {
+	item, err := registry.NewService(w.pool, nil).GetCultivar(ctx, scribeCultivarName)
+	if err != nil {
+		if errors.Is(err, registry.ErrUnknownCultivar) {
+			return "", err
+		}
+		return "", fmt.Errorf("resolve scribe cultivar: %w", err)
+	}
+	return fmt.Sprintf("%s@%d", item.Name, item.Version), nil
 }
 
 func (w *Worker) scribeCandidates(ctx context.Context) ([]scribeCandidate, error) {
@@ -120,7 +150,7 @@ func scribeChildTitle(parentTitle string) string {
 	return strings.TrimSpace(title[:maxTitle-3]) + "..."
 }
 
-func scribeChildBody(candidate scribeCandidate) string {
+func scribeChildBody(candidate scribeCandidate, cultivar string) string {
 	body := strings.TrimSpace(candidate.Body)
 	if len(body) > 1200 {
 		body = strings.TrimSpace(body[:1200]) + "..."
@@ -131,7 +161,7 @@ func scribeChildBody(candidate scribeCandidate) string {
 		"proposal_of": convergence.ScribeChildID(candidate.ID),
 		"checks":      []string{"cmd:<deterministic command>", "event:<event kind>", convergence.ScribeChildCheck, "human-ack:<owner decision>"},
 		"classes":     []string{"machine", "human"},
-		"cultivar":    convergence.ScribeCultivar,
+		"cultivar":    cultivar,
 	}
 	encoded, _ := json.Marshal(contract)
 	return fmt.Sprintf("Parent work_item: %s\nParent state: %s\nParent title: %s\nParent body excerpt:\n%s\n\nProposal contract: %s",

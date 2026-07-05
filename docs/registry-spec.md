@@ -2,8 +2,8 @@
 
 Status: implemented spec, drafted 2026-07-04 by the Claude spec session for
 work item `52bbc0ef` (R2, parent `c6ba707b`). Companion to
-[`docs/scribe-spec.md`](scribe-spec.md); the scribe's hardcoded
-`convergence-scribe@1` constant is this registry's first seed fixture.
+[`docs/scribe-spec.md`](scribe-spec.md); the scribe's `convergence-scribe`
+rootstock is this registry's first seed fixture.
 
 R2 in one sentence: an open set of named, versioned cultivars over a closed
 set of reducer semantics, stored as events and projected — so the scribe
@@ -108,9 +108,10 @@ violating the token model.
 Anywhere a cultivar name is accepted, it is validated against the projection
 and refusal is structured:
 
-1. **Scribe pass** (scribe spec §1): records `convergence-scribe@1`, matching
-   the seeded registry fixture. Later worker-profile/cultivar resolution swaps
-   this from a launch-metadata string to a registry lookup.
+1. **Scribe pass** (scribe spec §1): resolves `convergence-scribe` from the
+   registry projection at scan start and records the current `<name>@<version>`
+   string as launch metadata. Missing rootstock refuses with
+   `unknown_cultivar` naming `registry.list` before any child is spawned.
 2. **Dispatch entries** (R3 remainder, `b6526f08`): the reconciler names the
    handling cultivar in dispatch payloads; unknown name is impossible by
    construction because the rule data references the registry.
@@ -129,7 +130,7 @@ registry.list` — satisfying R2's third convergence check verbatim.
   budget), `checks-proposal@1` (reducer `checks_proposal@1`),
   `human-ack@1` (reducer `human_ack@1`)
 - cultivars (all `rootstock: true`):
-  - `convergence-scribe@1` — exactly the values in scribe spec §5
+  - `convergence-scribe@1` — initial seeded version for the scribe rootstock
   - `human-attention@1` — the escalation-item shape the metronome already
     creates (checks `["human_response_recorded"]`, tropism `human-ack@1`)
   - `checklist-worker@1` — the generic leaf worker running declared checks

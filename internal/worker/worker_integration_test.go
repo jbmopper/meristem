@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -380,6 +382,7 @@ func TestScanOnceSpawnsDeterministicScribeChildForChecklessItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create system token: %v", err)
 	}
+	seedScribeCultivar(t, ctx, pool, writer, systemTok.Token)
 	service := workitems.NewService(pool, writer)
 	parent, err := service.Create(ctx, workitems.CreateInput{
 		Title:             "needs convergence definition",
@@ -430,6 +433,48 @@ func TestScanOnceSpawnsDeterministicScribeChildForChecklessItem(t *testing.T) {
 	}
 	if got := countRelationsForParent(t, ctx, pool, childID); got != 0 {
 		t.Fatalf("scribe child should not recurse; child count = %d", got)
+	}
+}
+
+func TestScanOnceRefusesMissingScribeCultivar(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-scribe-missing-cultivar")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	parent, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "needs convergence definition",
+		State:             domain.WorkItemCaptured,
+		HumanReviewStatus: domain.HumanReviewWavedThrough,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := w.ScanOnce(ctx)
+	if !errors.Is(err, registry.ErrUnknownCultivar) {
+		t.Fatalf("ScanOnce error = %v, want unknown cultivar", err)
+	}
+	if result.ScribeCandidatesScanned != 1 || result.ScribeChildrenSpawned != 0 {
+		t.Fatalf("scribe result = candidates %d spawned %d, want 1/0", result.ScribeCandidatesScanned, result.ScribeChildrenSpawned)
+	}
+	if got := countRelationsForParent(t, ctx, pool, parent.ID); got != 0 {
+		t.Fatalf("missing cultivar should not spawn child; got %d relations", got)
+	}
+	if !strings.Contains(err.Error(), "registry.list") {
+		t.Fatalf("unknown cultivar error should name registry.list, got %v", err)
 	}
 }
 
@@ -1023,6 +1068,45 @@ func createSystemToken(t *testing.T, ctx context.Context, pool *pgxpool.Pool, wr
 		Source: domain.SourceSystem,
 		Actor:  &root.Token,
 	})
+}
+
+func seedScribeCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "checklist-all",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "all checklist items pass",
+	})
+	if err != nil {
+		t.Fatalf("define scribe tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "convergence-scribe",
+		Version:   1,
+		Rootstock: true,
+		Tropism:   registry.TropismRef{Name: "checklist-all", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/convergence-scribe.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 3, MaxWallSeconds: 1800, MaxDepth: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "scribe rootstock",
+	})
+	if err != nil {
+		t.Fatalf("define scribe cultivar: %v", err)
+	}
 }
 
 // newIntegrationPool mirrors the helper in internal/api/signals_integration_test.go;
