@@ -3,6 +3,7 @@ package export
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/url"
 	"os"
 	"strings"
@@ -65,7 +66,7 @@ func TestExportScrubsAndFiltersSeededDatabase(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, forbidden := range []string{tokenName, inboxText, `"kind":"token.created"`, `"kind":"message.captured"`, `"kind":"idempotency.recorded"`} {
+	for _, forbidden := range []string{tokenName, inboxText, `"kind":"token.created"`, `"kind":"message.captured"`, `"kind":"idempotency.recorded"`, `"actor_token_id"`} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("corpus contains forbidden content: %s", forbidden)
 		}
@@ -74,19 +75,21 @@ func TestExportScrubsAndFiltersSeededDatabase(t *testing.T) {
 		t.Error("corpus missing the allowlisted work_item.created event")
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if strings.Contains(line, `"kind"`) && !containsAllowlistedKind(line) {
-			t.Errorf("corpus line carries non-allowlisted kind: %.120s", line)
+		var rec Record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode corpus line: %v\n%s", err, line)
+		}
+		if !KindAllowlist[rec.Kind] {
+			t.Errorf("corpus line carries non-allowlisted kind %q: %.120s", rec.Kind, line)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatalf("decode raw corpus line: %v\n%s", err, line)
+		}
+		if _, ok := raw["actor_token_id"]; ok {
+			t.Errorf("corpus line exports private actor_token_id: %.120s", line)
 		}
 	}
-}
-
-func containsAllowlistedKind(line string) bool {
-	for kind := range KindAllowlist {
-		if strings.Contains(line, `"kind":"`+kind+`"`) {
-			return true
-		}
-	}
-	return false
 }
 
 func eventCount(t *testing.T, pool *pgxpool.Pool) int {
@@ -126,15 +129,38 @@ func newIntegrationPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("open admin database: %v", err)
 	}
-	if _, err := admin.Exec(ctx, `CREATE DATABASE "`+dbName+`"`); err != nil {
+	if _, err := admin.Exec(ctx, `CREATE DATABASE `+quoteIdentifier(dbName)); err != nil {
 		admin.Close()
 		t.Fatalf("create temp database: %v", err)
 	}
 	admin.Close()
 	pool, err := storage.Open(ctx, storage.Config{DatabaseURL: testURL.String(), MaxConns: 4, MinConns: 1, ConnectTimeout: 10 * time.Second})
 	if err != nil {
+		dropTempDatabase(t, adminURL.String(), dbName)
 		t.Fatalf("open temp database: %v", err)
 	}
-	t.Cleanup(pool.Close)
+	t.Cleanup(func() {
+		pool.Close()
+		dropTempDatabase(t, adminURL.String(), dbName)
+	})
 	return pool
+}
+
+func dropTempDatabase(t *testing.T, adminURL string, dbName string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, adminURL)
+	if err != nil {
+		t.Logf("open admin database for cleanup: %v", err)
+		return
+	}
+	defer admin.Close()
+	if _, err := admin.Exec(ctx, `DROP DATABASE IF EXISTS `+quoteIdentifier(dbName)+` WITH (FORCE)`); err != nil {
+		t.Logf("drop temp database %s: %v", dbName, err)
+	}
+}
+
+func quoteIdentifier(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }

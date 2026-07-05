@@ -1,8 +1,12 @@
 package dogma
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -60,17 +64,126 @@ func TestRootstockBriefingsAreFreshProjections(t *testing.T) {
 // registry's Profile.Briefing pointers can never dangle.
 func TestBriefingPathsMatchSeedFixtures(t *testing.T) {
 	root := repoRoot(t)
-	seedSource, err := os.ReadFile(filepath.Join(root, "cmd/meristem/seed_registry.go"))
-	if err != nil {
-		t.Fatalf("read seed_registry.go: %v", err)
-	}
+	rootstockBriefings := rootstockSeedBriefings(t, filepath.Join(root, "cmd/meristem/seed_registry.go"))
 	for name, rel := range briefingArtifacts {
 		declared := "briefings/" + name + ".md"
-		if !strings.Contains(string(seedSource), `Briefing: "`+declared+`"`) {
+		if rootstockBriefings[name] != declared {
 			t.Errorf("seed fixture for %s does not declare Briefing %q; briefing artifacts and registry fixtures must stay aligned", name, declared)
 		}
 		if !strings.HasSuffix(rel, declared) {
 			t.Errorf("artifact path %s does not correspond to declared briefing %s", rel, declared)
 		}
 	}
+	for name, briefing := range rootstockBriefings {
+		if _, ok := briefingArtifacts[name]; !ok {
+			t.Errorf("rootstock cultivar %s declares Briefing %q but has no generated artifact in internal/dogma briefingArtifacts", name, briefing)
+		}
+	}
+}
+
+func rootstockSeedBriefings(t *testing.T, path string) map[string]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	out := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok || len(valueSpec.Names) != 1 || valueSpec.Names[0].Name != "registrySeedCultivars" || len(valueSpec.Values) != 1 {
+				continue
+			}
+			lit, ok := valueSpec.Values[0].(*ast.CompositeLit)
+			if !ok {
+				t.Fatalf("registrySeedCultivars is not a composite literal")
+			}
+			for _, elt := range lit.Elts {
+				cultivar, ok := elt.(*ast.CompositeLit)
+				if !ok {
+					t.Fatalf("registrySeedCultivars contains non-composite element %T", elt)
+				}
+				name, briefing, rootstock := seedCultivarFields(t, cultivar)
+				if rootstock {
+					if name == "" || briefing == "" {
+						t.Fatalf("rootstock seed cultivar missing name or briefing: name=%q briefing=%q", name, briefing)
+					}
+					out[name] = briefing
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no rootstock seed cultivars found")
+	}
+	return out
+}
+
+func seedCultivarFields(t *testing.T, cultivar *ast.CompositeLit) (name string, briefing string, rootstock bool) {
+	t.Helper()
+	for _, elt := range cultivar.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		switch key.Name {
+		case "Name":
+			name = stringLiteral(t, kv.Value)
+		case "Rootstock":
+			rootstock = boolLiteral(t, kv.Value)
+		case "Profile":
+			profile, ok := kv.Value.(*ast.CompositeLit)
+			if !ok {
+				t.Fatalf("Profile is not a composite literal")
+			}
+			briefing = profileBriefing(t, profile)
+		}
+	}
+	return name, briefing, rootstock
+}
+
+func profileBriefing(t *testing.T, profile *ast.CompositeLit) string {
+	t.Helper()
+	for _, elt := range profile.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if ok && key.Name == "Briefing" {
+			return stringLiteral(t, kv.Value)
+		}
+	}
+	return ""
+}
+
+func stringLiteral(t *testing.T, expr ast.Expr) string {
+	t.Helper()
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		t.Fatalf("expected string literal, got %T", expr)
+	}
+	value, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		t.Fatalf("unquote %s: %v", lit.Value, err)
+	}
+	return value
+}
+
+func boolLiteral(t *testing.T, expr ast.Expr) bool {
+	t.Helper()
+	ident, ok := expr.(*ast.Ident)
+	if !ok || (ident.Name != "true" && ident.Name != "false") {
+		t.Fatalf("expected bool literal, got %T", expr)
+	}
+	return ident.Name == "true"
 }
