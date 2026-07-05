@@ -23,21 +23,23 @@ func runSafety(_ context.Context, logger *slog.Logger, args []string) error {
 	}
 
 	out := struct {
-		Status              string           `json:"status"`
-		SafetyPolicy        string           `json:"safety_policy"`
-		MaxRequestBodyBytes int64            `json:"max_request_body_bytes"`
-		MaxFeedWaitSeconds  int64            `json:"max_feed_wait_seconds"`
-		MaxDelegationDepth  int              `json:"max_delegation_depth"`
-		MaxChildrenPerItem  int              `json:"max_children_per_item"`
-		PatienceSeconds     map[string]int64 `json:"patience_seconds"`
+		Status                       string           `json:"status"`
+		SafetyPolicy                 string           `json:"safety_policy"`
+		MaxRequestBodyBytes          int64            `json:"max_request_body_bytes"`
+		MaxFeedWaitSeconds           int64            `json:"max_feed_wait_seconds"`
+		MaxDelegationDepth           int              `json:"max_delegation_depth"`
+		MaxChildrenPerItem           int              `json:"max_children_per_item"`
+		MaxConcurrentRunningPerToken int              `json:"max_concurrent_running_items_per_token"`
+		PatienceSeconds              map[string]int64 `json:"patience_seconds"`
 	}{
-		Status:              "ok",
-		SafetyPolicy:        policyID,
-		MaxRequestBodyBytes: policy.MaxRequestBodyBytes,
-		MaxFeedWaitSeconds:  int64(policy.MaxFeedWait.Seconds()),
-		MaxDelegationDepth:  policy.MaxDelegationDepth,
-		MaxChildrenPerItem:  policy.MaxChildrenPerItem,
-		PatienceSeconds:     make(map[string]int64, len(policy.PatienceBudgets)),
+		Status:                       "ok",
+		SafetyPolicy:                 policyID,
+		MaxRequestBodyBytes:          policy.MaxRequestBodyBytes,
+		MaxFeedWaitSeconds:           int64(policy.MaxFeedWait.Seconds()),
+		MaxDelegationDepth:           policy.MaxDelegationDepth,
+		MaxChildrenPerItem:           policy.MaxChildrenPerItem,
+		MaxConcurrentRunningPerToken: policy.MaxConcurrentRunningPerToken,
+		PatienceSeconds:              make(map[string]int64, len(policy.PatienceBudgets)),
 	}
 	for state, budget := range policy.PatienceBudgets {
 		out.PatienceSeconds[string(state)] = int64(budget.Seconds())

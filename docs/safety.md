@@ -12,9 +12,10 @@ This slice is **not** operator-tunable via environment variables. Policy lives i
 | `MaxFeedWait` | Maximum `wait` query duration on **`GET /v1/feed`** watcher mode. Larger values receive **400** with `wait_too_large`. |
 | `PatienceBudgets` | Positive duration per **non-terminal** `work_item` state. Used by `internal/worker` default budgets and validated at startup so the bounded-patience invariant has explicit numbers. |
 | `MaxChildrenPerItem` | Fallback maximum counted child work items under one parent when a parent has no cultivar-specific `xylem.max_children_per_item`. Over-budget spawn attempts append `xylem.exhausted`, block/escalate the parent, and do not create the requested child. |
+| `MaxConcurrentRunningPerToken` | Fallback maximum work items one token may hold in `running` at once when the target item has no cultivar-specific `xylem.max_concurrent_running_items_per_token`. Over-budget running transitions append `xylem.exhausted`, block/escalate the target item, and do not enter `running`. |
 | `MaxDelegationDepth` | Fallback maximum subactor delegation depth when a target work item has no cultivar-specific `xylem.max_depth`. Over-budget grant requests escalate and mint no token. |
 
-Default values are defined in `internal/safety/policy.go` (currently 1 MiB bodies, 60s max feed wait, max children per item 32, max delegation depth 5, and the same per-state patience defaults the worker used historically). `MaxPatienceBudget` is the shared finite ceiling: policy profiles, explicit work-item `patience_budget_seconds`, and cultivar-derived xylem wall-clock budgets must not create an effectively infinite wait.
+Default values are defined in `internal/safety/policy.go` (currently 1 MiB bodies, 60s max feed wait, max children per item 32, max concurrent running items per token 8, max delegation depth 5, and the same per-state patience defaults the worker used historically). `MaxPatienceBudget` is the shared finite ceiling: policy profiles, explicit work-item `patience_budget_seconds`, and cultivar-derived xylem wall-clock budgets must not create an effectively infinite wait.
 
 ## Fingerprint
 

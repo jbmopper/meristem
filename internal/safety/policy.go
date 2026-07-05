@@ -19,21 +19,23 @@ import (
 // the event log, but API/worker startup should still fail closed if the
 // projected policy is absent or invalid.
 type Policy struct {
-	MaxRequestBodyBytes int64                                  `json:"max_request_body_bytes"`
-	MaxFeedWait         time.Duration                          `json:"max_feed_wait"`
-	PatienceBudgets     map[domain.WorkItemState]time.Duration `json:"patience_budgets"`
-	MaxDelegationDepth  int                                    `json:"max_delegation_depth"`
-	MaxChildrenPerItem  int                                    `json:"max_children_per_item"`
+	MaxRequestBodyBytes          int64                                  `json:"max_request_body_bytes"`
+	MaxFeedWait                  time.Duration                          `json:"max_feed_wait"`
+	PatienceBudgets              map[domain.WorkItemState]time.Duration `json:"patience_budgets"`
+	MaxDelegationDepth           int                                    `json:"max_delegation_depth"`
+	MaxChildrenPerItem           int                                    `json:"max_children_per_item"`
+	MaxConcurrentRunningPerToken int                                    `json:"max_concurrent_running_items_per_token"`
 }
 
 const (
 	// Max request body is deliberately small while v0/v1 only accept text,
 	// JSON work specs, and coordination notes. Large artifacts belong behind
 	// the future object-storage interface, not in Postgres request bodies.
-	defaultMaxRequestBodyBytes int64 = 1 << 20 // 1 MiB
-	defaultMaxFeedWait               = 60 * time.Second
-	defaultMaxDelegationDepth        = 5
-	defaultMaxChildrenPerItem        = 32
+	defaultMaxRequestBodyBytes          int64 = 1 << 20 // 1 MiB
+	defaultMaxFeedWait                        = 60 * time.Second
+	defaultMaxDelegationDepth                 = 5
+	defaultMaxChildrenPerItem                 = 32
+	defaultMaxConcurrentRunningPerToken       = 8
 
 	// MaxPatienceBudget is the ceiling on any patience budget in
 	// any profile. Bounded patience is the invariant (spec principle 3);
@@ -61,10 +63,11 @@ const (
 // DefaultPolicy returns the resource-safety policy required for startup.
 func DefaultPolicy() Policy {
 	return Policy{
-		MaxRequestBodyBytes: defaultMaxRequestBodyBytes,
-		MaxFeedWait:         defaultMaxFeedWait,
-		MaxDelegationDepth:  defaultMaxDelegationDepth,
-		MaxChildrenPerItem:  defaultMaxChildrenPerItem,
+		MaxRequestBodyBytes:          defaultMaxRequestBodyBytes,
+		MaxFeedWait:                  defaultMaxFeedWait,
+		MaxDelegationDepth:           defaultMaxDelegationDepth,
+		MaxChildrenPerItem:           defaultMaxChildrenPerItem,
+		MaxConcurrentRunningPerToken: defaultMaxConcurrentRunningPerToken,
 		PatienceBudgets: map[domain.WorkItemState]time.Duration{
 			domain.WorkItemCaptured:         24 * time.Hour,
 			domain.WorkItemTriaged:          72 * time.Hour,
@@ -83,10 +86,11 @@ func Profiles() map[string]Policy {
 	return map[string]Policy{
 		ProfileSteady: DefaultPolicy(),
 		ProfileBringUp: {
-			MaxRequestBodyBytes: defaultMaxRequestBodyBytes,
-			MaxFeedWait:         defaultMaxFeedWait,
-			MaxDelegationDepth:  defaultMaxDelegationDepth,
-			MaxChildrenPerItem:  defaultMaxChildrenPerItem,
+			MaxRequestBodyBytes:          defaultMaxRequestBodyBytes,
+			MaxFeedWait:                  defaultMaxFeedWait,
+			MaxDelegationDepth:           defaultMaxDelegationDepth,
+			MaxChildrenPerItem:           defaultMaxChildrenPerItem,
+			MaxConcurrentRunningPerToken: defaultMaxConcurrentRunningPerToken,
 			PatienceBudgets: map[domain.WorkItemState]time.Duration{
 				domain.WorkItemCaptured:         7 * 24 * time.Hour,
 				domain.WorkItemTriaged:          14 * 24 * time.Hour,
@@ -130,6 +134,9 @@ func (p Policy) Validate() error {
 	}
 	if p.MaxChildrenPerItem <= 0 {
 		return fmt.Errorf("safety: max_children_per_item must be positive")
+	}
+	if p.MaxConcurrentRunningPerToken <= 0 {
+		return fmt.Errorf("safety: max_concurrent_running_items_per_token must be positive")
 	}
 	for _, state := range nonTerminalStates() {
 		dur, ok := p.PatienceBudgets[state]
@@ -176,17 +183,19 @@ func MustValidateStartup() (Policy, error) {
 // were active?" cheap to answer without dumping the whole policy each time.
 func (p Policy) Fingerprint() (string, error) {
 	canonical := struct {
-		MaxRequestBodyBytes int64            `json:"max_request_body_bytes"`
-		MaxFeedWaitSeconds  int64            `json:"max_feed_wait_seconds"`
-		MaxDelegationDepth  int              `json:"max_delegation_depth"`
-		MaxChildrenPerItem  int              `json:"max_children_per_item"`
-		PatienceSeconds     map[string]int64 `json:"patience_seconds"`
+		MaxRequestBodyBytes          int64            `json:"max_request_body_bytes"`
+		MaxFeedWaitSeconds           int64            `json:"max_feed_wait_seconds"`
+		MaxDelegationDepth           int              `json:"max_delegation_depth"`
+		MaxChildrenPerItem           int              `json:"max_children_per_item"`
+		MaxConcurrentRunningPerToken int              `json:"max_concurrent_running_items_per_token"`
+		PatienceSeconds              map[string]int64 `json:"patience_seconds"`
 	}{
-		MaxRequestBodyBytes: p.MaxRequestBodyBytes,
-		MaxFeedWaitSeconds:  int64(p.MaxFeedWait.Seconds()),
-		MaxDelegationDepth:  p.MaxDelegationDepth,
-		MaxChildrenPerItem:  p.MaxChildrenPerItem,
-		PatienceSeconds:     make(map[string]int64, len(p.PatienceBudgets)),
+		MaxRequestBodyBytes:          p.MaxRequestBodyBytes,
+		MaxFeedWaitSeconds:           int64(p.MaxFeedWait.Seconds()),
+		MaxDelegationDepth:           p.MaxDelegationDepth,
+		MaxChildrenPerItem:           p.MaxChildrenPerItem,
+		MaxConcurrentRunningPerToken: p.MaxConcurrentRunningPerToken,
+		PatienceSeconds:              make(map[string]int64, len(p.PatienceBudgets)),
 	}
 	for state, dur := range p.PatienceBudgets {
 		canonical.PatienceSeconds[string(state)] = int64(dur.Seconds())

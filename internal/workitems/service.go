@@ -277,6 +277,18 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 	if convergenceChecksRequired(current, to) {
 		return domain.WorkItem{}, fmt.Errorf("%w: item %s in %s needs a convergence-scribe child to define suggested_convergence_checks before moving to %s", ErrConvergenceChecksRequired, id, current.State, to)
 	}
+	if to == domain.WorkItemRunning && current.State != domain.WorkItemRunning {
+		exhausted, budgetErr, err := s.enforceConcurrentRunningBudget(ctx, tx, current, actor)
+		if err != nil {
+			return domain.WorkItem{}, err
+		}
+		if exhausted {
+			if err := tx.Commit(ctx); err != nil {
+				return domain.WorkItem{}, err
+			}
+			return domain.WorkItem{}, budgetErr
+		}
+	}
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:   domain.SubjectWorkItem,
 		SubjectID:     id,
@@ -392,6 +404,13 @@ type childCountBudget struct {
 	EscalationRule domain.EscalationRule
 }
 
+type concurrentRunningBudget struct {
+	Max            int
+	Source         string
+	Cultivar       string
+	EscalationRule domain.EscalationRule
+}
+
 type createdLaunchMetadata struct {
 	Cultivar       string                `json:"cultivar"`
 	EscalationRule domain.EscalationRule `json:"escalation_rule"`
@@ -445,7 +464,7 @@ func (s *Service) enforceChildCountBudget(ctx context.Context, tx pgx.Tx, parent
 }
 
 func (s *Service) resolveChildCountBudget(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) (childCountBudget, error) {
-	meta, err := parentLaunchMetadata(ctx, tx, parentID)
+	meta, err := workItemLaunchMetadata(ctx, tx, parentID)
 	if err != nil {
 		return childCountBudget{}, err
 	}
@@ -477,7 +496,90 @@ func (s *Service) resolveChildCountBudget(ctx context.Context, tx pgx.Tx, parent
 	return budget, nil
 }
 
-func parentLaunchMetadata(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) (createdLaunchMetadata, error) {
+func (s *Service) enforceConcurrentRunningBudget(ctx context.Context, tx pgx.Tx, item domain.WorkItem, actor domain.Token) (bool, error, error) {
+	if err := lockActorToken(ctx, tx, actor.ID); err != nil {
+		return false, nil, err
+	}
+	budget, err := s.resolveConcurrentRunningBudget(ctx, tx, item.ID)
+	if err != nil {
+		return false, nil, err
+	}
+	current, err := runningCountForActor(ctx, tx, item.ID, actor.ID)
+	if err != nil {
+		return false, nil, err
+	}
+	if current < budget.Max {
+		return false, nil, nil
+	}
+	payload := map[string]any{
+		"budget":                                 "max_concurrent_running_items_per_token",
+		"current_running":                        current,
+		"max_concurrent_running_items_per_token": budget.Max,
+		"budget_source":                          budget.Source,
+		"cultivar":                               budget.Cultivar,
+		"escalation_rule":                        string(budget.EscalationRule),
+		"actor_token_id":                         actor.ID,
+		"attempted_state":                        domain.WorkItemRunning,
+		"work_item_state":                        item.State,
+		"count_scope":                            "same_actor_token_current_running_epoch",
+	}
+	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    item.ID,
+		Kind:         domain.EventXylemExhausted,
+		Source:       sourceForActor(actor),
+		ActorTokenID: &actor.ID,
+		Payload:      payload,
+	}); err != nil {
+		return false, nil, err
+	}
+	switch budget.EscalationRule {
+	case domain.EscalationRuleHandToHuman:
+	default:
+		return false, nil, fmt.Errorf("workitems: unknown escalation rule %q", budget.EscalationRule)
+	}
+	reason := concurrentRunningBudgetEscalationReason()
+	summary := concurrentRunningBudgetEscalationSummary(item, current, budget, actor.ID)
+	if err := s.requestXylemEscalationInTx(ctx, tx, item, reason, summary, actor); err != nil {
+		return false, nil, err
+	}
+	return true, fmt.Errorf("%w: max_concurrent_running_items_per_token exhausted for actor token %s: current_running=%d max=%d source=%s", ErrXylemBudgetExhausted, actor.ID, current, budget.Max, budget.Source), nil
+}
+
+func (s *Service) resolveConcurrentRunningBudget(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID) (concurrentRunningBudget, error) {
+	meta, err := workItemLaunchMetadata(ctx, tx, workItemID)
+	if err != nil {
+		return concurrentRunningBudget{}, err
+	}
+	rule := meta.EscalationRule
+	if rule == "" {
+		rule = domain.EscalationRuleHandToHuman
+	}
+	if !rule.Valid() {
+		return concurrentRunningBudget{}, fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+	}
+	budget := concurrentRunningBudget{
+		Max:            safety.DefaultPolicy().MaxConcurrentRunningPerToken,
+		Source:         "safety_policy",
+		EscalationRule: rule,
+	}
+	cultivarRef := strings.TrimSpace(meta.Cultivar)
+	if cultivarRef == "" {
+		return budget, nil
+	}
+	item, err := registry.NewService(s.pool, nil).GetCultivarRef(ctx, cultivarRef)
+	if err != nil {
+		return concurrentRunningBudget{}, err
+	}
+	budget.Cultivar = fmt.Sprintf("%s@%d", item.Name, item.Version)
+	if item.Xylem.MaxConcurrentRunningPerToken > 0 {
+		budget.Max = item.Xylem.MaxConcurrentRunningPerToken
+		budget.Source = "cultivar:" + budget.Cultivar
+	}
+	return budget, nil
+}
+
+func workItemLaunchMetadata(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID) (createdLaunchMetadata, error) {
 	var raw []byte
 	err := tx.QueryRow(ctx, `
 		SELECT payload
@@ -487,16 +589,16 @@ func parentLaunchMetadata(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) (c
 		  AND kind = $3
 		ORDER BY occurred_at ASC
 		LIMIT 1
-	`, domain.SubjectWorkItem, parentID, domain.EventWorkItemCreated).Scan(&raw)
+	`, domain.SubjectWorkItem, workItemID, domain.EventWorkItemCreated).Scan(&raw)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return createdLaunchMetadata{}, nil
 		}
-		return createdLaunchMetadata{}, fmt.Errorf("workitems: load parent launch metadata: %w", err)
+		return createdLaunchMetadata{}, fmt.Errorf("workitems: load work item launch metadata: %w", err)
 	}
 	var meta createdLaunchMetadata
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		return createdLaunchMetadata{}, fmt.Errorf("workitems: decode parent launch metadata: %w", err)
+		return createdLaunchMetadata{}, fmt.Errorf("workitems: decode work item launch metadata: %w", err)
 	}
 	meta.Cultivar = strings.TrimSpace(meta.Cultivar)
 	return meta, nil
@@ -531,6 +633,63 @@ func childCountBudgetEscalationSummary(parent domain.WorkItem, current int, budg
 		"Work item %s (%s) exhausted max_children_per_item: current_children=%d max=%d source=%s",
 		parent.ID,
 		parent.Title,
+		current,
+		budget.Max,
+		budget.Source,
+	)
+}
+
+func lockActorToken(ctx context.Context, tx pgx.Tx, actorID uuid.UUID) error {
+	if actorID == uuid.Nil {
+		return fmt.Errorf("workitems: actor token id is required for max_concurrent_running_items_per_token")
+	}
+	var locked uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM tokens WHERE id = $1 FOR UPDATE`, actorID).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("workitems: actor token %s not found for max_concurrent_running_items_per_token", actorID)
+		}
+		return fmt.Errorf("workitems: lock actor token for running budget: %w", err)
+	}
+	return nil
+}
+
+func runningCountForActor(ctx context.Context, tx pgx.Tx, excludingWorkItemID uuid.UUID, actorID uuid.UUID) (int, error) {
+	var count int
+	err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM work_items wi
+		JOIN LATERAL (
+			SELECT e.actor_token_id
+			FROM events e
+			WHERE e.subject_kind = $1
+			  AND e.subject_id = wi.id
+			  AND e.occurred_at = wi.state_entered_at
+			  AND (
+				(e.kind = $2 AND COALESCE(e.payload->>'state', $5::text) = $4::text)
+				OR (e.kind = $3 AND e.payload->>'to' = $4::text)
+			  )
+			LIMIT 1
+		) entered_running ON true
+		WHERE wi.state = $4::text
+		  AND wi.id <> $6
+		  AND entered_running.actor_token_id = $7
+	`, domain.SubjectWorkItem, domain.EventWorkItemCreated, domain.EventWorkItemTransitioned, domain.WorkItemRunning, domain.WorkItemCaptured, excludingWorkItemID, actorID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("workitems: count running items for xylem budget: %w", err)
+	}
+	return count, nil
+}
+
+func concurrentRunningBudgetEscalationReason() string {
+	return "xylem budget exhausted: max_concurrent_running_items_per_token"
+}
+
+func concurrentRunningBudgetEscalationSummary(item domain.WorkItem, current int, budget concurrentRunningBudget, actorID uuid.UUID) string {
+	return fmt.Sprintf(
+		"Work item %s (%s) exhausted max_concurrent_running_items_per_token for actor token %s: current_running=%d max=%d source=%s",
+		item.ID,
+		item.Title,
+		actorID,
 		current,
 		budget.Max,
 		budget.Source,

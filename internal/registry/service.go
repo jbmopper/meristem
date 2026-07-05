@@ -345,6 +345,9 @@ func normalizeCultivarInput(in DefineCultivarInput) (DefineCultivarInput, map[st
 	if in.Xylem.MaxChildrenPerItem < 0 {
 		return DefineCultivarInput{}, nil, fmt.Errorf("%w: xylem.max_children_per_item must be >= 0", ErrInvalidPayload)
 	}
+	if in.Xylem.MaxConcurrentRunningPerToken < 0 {
+		return DefineCultivarInput{}, nil, fmt.Errorf("%w: xylem.max_concurrent_running_items_per_token must be >= 0", ErrInvalidPayload)
+	}
 	in.Phloem = strings.TrimSpace(in.Phloem)
 	if in.Phloem == "" {
 		return DefineCultivarInput{}, nil, fmt.Errorf("%w: phloem is required", ErrInvalidPayload)
