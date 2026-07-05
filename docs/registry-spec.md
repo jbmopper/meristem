@@ -127,6 +127,31 @@ and refusal is structured:
 Refusal shape everywhere: `unknown_cultivar: no cultivar named X; consult
 registry.list` — satisfying R2's third convergence check verbatim.
 
+## R5 self-extension activation
+
+Worker-proposed cultivars do not call `POST /v1/registry/cultivars` directly.
+They call `POST /v1/work-items/{id}/cultivar-activations` or the MCP tool
+`registry.activate_cultivar`, where `{id}` is the proposal work item.
+
+The activation service:
+
+- resolves the proposed `profile.scopes_template`, replacing `{root}` with the
+  proposal work item id;
+- evaluates the existing subactor-grant reducer as `same_tree_worker` against
+  the proposing token, requested scopes, tree relation, delegation budget, and
+  the proposal work item's `human_review_status`;
+- requires an explicit `human_review_status=approved` event whose
+  `actor_token_id` is not the proposing token;
+- appends `cultivar_activation.requested` and exactly one of
+  `cultivar_activation.granted`, `cultivar_activation.denied`, or
+  `cultivar_activation.escalated`;
+- appends `cultivar.defined` only on the granted path, in the same transaction;
+- never mints a token as part of activation.
+
+Rootstock remains the recursion base case: worker-proposed rootstock activation
+is denied before `cultivar.defined`. Changing rootstock remains an
+owner-approved migration path, not self-extension.
+
 ## Seed fixtures (R8 tie-in)
 
 `meristem seed` plants, idempotently:
@@ -159,8 +184,6 @@ ids + discriminator-free payloads that legitimately never repeat).
 
 ## Deferred, explicitly
 
-- R5 self-extension (grant-gated worker-proposed cultivars) — contract
-  compatible, flow out of scope.
 - R6 phloem resolution — `phloem` stays an opaque string ref until named
   projections exist.
 - `judge_vote.v1` reducer semantics — blocked on the heterogeneous-panel

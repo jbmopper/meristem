@@ -204,16 +204,33 @@ func (s *Service) DefineCultivar(ctx context.Context, actor domain.Token, in Def
 	if s.pool == nil || s.writer == nil {
 		return Cultivar{}, false, errors.New("registry: service is not configured")
 	}
-	normalized, payload, err := normalizeCultivarInput(in)
-	if err != nil {
-		return Cultivar{}, false, err
-	}
-
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return Cultivar{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	out, fresh, err := s.DefineCultivarInTx(ctx, tx, actor, in)
+	if err != nil {
+		return Cultivar{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Cultivar{}, false, err
+	}
+	return out, fresh, nil
+}
+
+// DefineCultivarInTx appends a cultivar.defined event and applies its
+// projection inside a caller-owned transaction. It exists for gated flows that
+// must commit their guard event and the resulting registry definition together.
+func (s *Service) DefineCultivarInTx(ctx context.Context, tx pgx.Tx, actor domain.Token, in DefineCultivarInput) (Cultivar, bool, error) {
+	if s.writer == nil {
+		return Cultivar{}, false, errors.New("registry: service is not configured")
+	}
+	normalized, payload, err := normalizeCultivarInput(in)
+	if err != nil {
+		return Cultivar{}, false, err
+	}
 
 	exists, err := tropismVersionExists(ctx, tx, normalized.Tropism)
 	if err != nil {
@@ -261,10 +278,7 @@ func (s *Service) DefineCultivar(ctx context.Context, actor domain.Token, in Def
 	if err != nil {
 		return Cultivar{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Cultivar{}, false, err
-	}
-	out, err := s.GetCultivar(ctx, normalized.Name)
+	out, err := scanCultivar(tx.QueryRow(ctx, cultivarSelectSQL+` WHERE name = $1`, normalized.Name))
 	return out, fresh, err
 }
 

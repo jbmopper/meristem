@@ -142,6 +142,15 @@ idempotency contract is resolved.
 `max_delegation_depth`, and `depth_budget_source`. A cultivar-scoped source is
 recorded as `cultivar:<name>@<version>`; otherwise it is `safety_policy`.
 
+## R5 cultivar activation gate
+
+R5 reuses `internal/grants.Reduce` as an authority gate without using the token
+issuance contract above. Worker-proposed cultivar activation records
+`cultivar_activation.*` events, evaluates the proposal as `same_tree_worker`,
+and appends `cultivar.defined` only after the reducer grants and the proposal
+work item has an explicit separated `human_review_status=approved` event. This
+path does not append `subactor_grant.granted` and does not mint a token.
+
 ## Expiry
 
 Cursor's recommended default for future subactor tokens is a short fixed expiry

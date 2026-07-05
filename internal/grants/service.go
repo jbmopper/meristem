@@ -54,6 +54,28 @@ type IssueInput struct {
 	Name            string
 }
 
+type EvaluationInput struct {
+	Parent          domain.Token
+	WorkItemID      uuid.UUID
+	Template        Template
+	RequestedScopes []string
+}
+
+type EvaluationResult struct {
+	WorkItemID           uuid.UUID
+	WorkItemTitle        string
+	Template             Template
+	RequestedScopes      []string
+	TreeRelation         TreeRelation
+	HumanReviewStatus    domain.HumanReviewStatus
+	DelegationDepthKnown bool
+	DelegationDepth      int
+	MaxDelegationDepth   int
+	DepthBudgetSource    string
+	Cultivar             string
+	Decision             Decision
+}
+
 type IssueResult struct {
 	GrantID         uuid.UUID
 	WorkItemID      uuid.UUID
@@ -75,10 +97,6 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 	}
 	if in.WorkItemID == uuid.Nil {
 		return IssueResult{}, fmt.Errorf("grants: work_item_id is required")
-	}
-	requestedScopes, err := normalizeRequestedScopes(in.RequestedScopes)
-	if err != nil {
-		return IssueResult{}, err
 	}
 	tokenName := strings.TrimSpace(in.Name)
 	if tokenName == "" {
@@ -102,15 +120,12 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 		return existing, nil
 	}
 
-	item, err := scanGrantWorkItem(ctx, tx, in.WorkItemID)
-	if err != nil {
-		return IssueResult{}, err
-	}
-	relation, err := s.treeRelation(ctx, tx, in.Parent, in.WorkItemID)
-	if err != nil {
-		return IssueResult{}, err
-	}
-	depthBudget, err := s.delegationDepthBudget(ctx, tx, in.Parent, in.WorkItemID, item.Cultivar)
+	evaluation, err := s.EvaluateInTx(ctx, tx, EvaluationInput{
+		Parent:          in.Parent,
+		WorkItemID:      in.WorkItemID,
+		Template:        in.Template,
+		RequestedScopes: in.RequestedScopes,
+	})
 	if err != nil {
 		return IssueResult{}, err
 	}
@@ -119,19 +134,19 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 		"work_item_id":           in.WorkItemID,
 		"template":               in.Template,
 		"requested_source":       domain.SourceAgent,
-		"requested_scopes":       requestedScopes,
+		"requested_scopes":       evaluation.RequestedScopes,
 		"token_name":             tokenName,
-		"tree_relation":          relation,
-		"human_review_status":    item.HumanReviewStatus,
-		"delegation_depth_known": depthBudget.Known,
-		"max_delegation_depth":   depthBudget.MaxDepth,
-		"depth_budget_source":    depthBudget.Source,
+		"tree_relation":          evaluation.TreeRelation,
+		"human_review_status":    evaluation.HumanReviewStatus,
+		"delegation_depth_known": evaluation.DelegationDepthKnown,
+		"max_delegation_depth":   evaluation.MaxDelegationDepth,
+		"depth_budget_source":    evaluation.DepthBudgetSource,
 	}
-	if depthBudget.Known {
-		requestPayload["delegation_depth"] = depthBudget.Depth
+	if evaluation.DelegationDepthKnown {
+		requestPayload["delegation_depth"] = evaluation.DelegationDepth
 	}
-	if depthBudget.Cultivar != "" {
-		requestPayload["cultivar"] = depthBudget.Cultivar
+	if evaluation.Cultivar != "" {
+		requestPayload["cultivar"] = evaluation.Cultivar
 	}
 	requestEventID, _, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectSubactorGrant,
@@ -145,36 +160,22 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 		return IssueResult{}, err
 	}
 
-	decision := Reduce(Request{
-		Parent:               in.Parent,
-		Template:             in.Template,
-		RequestedSource:      domain.SourceAgent,
-		RequestedTreeRoot:    in.WorkItemID,
-		RequestedScopes:      requestedScopes,
-		TreeRelation:         relation,
-		DelegationDepthKnown: depthBudget.Known,
-		DelegationDepth:      depthBudget.Depth,
-		MaxDelegationDepth:   depthBudget.MaxDepth,
-		DepthBudgetSource:    depthBudget.Source,
-		HumanReviewStatus:    item.HumanReviewStatus,
-	})
-
 	result := IssueResult{
 		GrantID:        grantID,
 		WorkItemID:     in.WorkItemID,
 		Template:       in.Template,
-		Disposition:    decision.Disposition,
-		Reason:         decision.Reason,
-		Scopes:         append([]string(nil), decision.Scopes...),
+		Disposition:    evaluation.Decision.Disposition,
+		Reason:         evaluation.Decision.Reason,
+		Scopes:         append([]string(nil), evaluation.Decision.Scopes...),
 		RequestEventID: requestEventID,
 	}
 
-	switch decision.Disposition {
+	switch evaluation.Decision.Disposition {
 	case DispositionGrant:
 		tokenResult, err := s.auth.CreateDelegatedToken(ctx, tx, auth.CreateDelegatedTokenInput{
 			ID:     deterministicSubactorTokenID(grantID),
 			Name:   tokenName,
-			Scopes: decision.Scopes,
+			Scopes: evaluation.Decision.Scopes,
 			Source: domain.SourceAgent,
 			Actor:  in.Parent,
 		})
@@ -191,10 +192,10 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 				"request_event_id": requestEventID,
 				"work_item_id":     in.WorkItemID,
 				"template":         in.Template,
-				"reason":           decision.Reason,
+				"reason":           evaluation.Decision.Reason,
 				"token_id":         tokenResult.Token.ID,
 				"token_name":       tokenResult.Token.Name,
-				"scopes":           decision.Scopes,
+				"scopes":           evaluation.Decision.Scopes,
 			},
 		})
 		if err != nil {
@@ -214,7 +215,7 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 				"request_event_id": requestEventID,
 				"work_item_id":     in.WorkItemID,
 				"template":         in.Template,
-				"reason":           decision.Reason,
+				"reason":           evaluation.Decision.Reason,
 			},
 		})
 		if err != nil {
@@ -224,8 +225,8 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 	case DispositionEscalate:
 		escalation, err := s.escalations.RequestInTx(ctx, tx, escalations.RequestInput{
 			WorkItemID: in.WorkItemID,
-			Reason:     "subactor grant requires review: " + decision.Reason,
-			Summary:    escalationSummary(item, in.Template, decision.Reason),
+			Reason:     "subactor grant requires review: " + evaluation.Decision.Reason,
+			Summary:    escalationSummary(grantWorkItem{ID: evaluation.WorkItemID, Title: evaluation.WorkItemTitle}, in.Template, evaluation.Decision.Reason),
 			Actor:      in.Parent,
 		})
 		if err != nil {
@@ -241,7 +242,7 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 				"request_event_id":   requestEventID,
 				"work_item_id":       in.WorkItemID,
 				"template":           in.Template,
-				"reason":             decision.Reason,
+				"reason":             evaluation.Decision.Reason,
 				"escalation_id":      escalation.EscalationID,
 				"human_work_item_id": escalation.HumanWorkItemID,
 			},
@@ -253,13 +254,87 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 		result.EscalationID = escalation.EscalationID
 		result.HumanWorkItemID = escalation.HumanWorkItemID
 	default:
-		return IssueResult{}, fmt.Errorf("grants: unsupported reducer disposition %q", decision.Disposition)
+		return IssueResult{}, fmt.Errorf("grants: unsupported reducer disposition %q", evaluation.Decision.Disposition)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return IssueResult{}, err
 	}
 	return result, nil
+}
+
+func (s *IssuanceService) Evaluate(ctx context.Context, in EvaluationInput) (EvaluationResult, error) {
+	if in.Parent.ID == uuid.Nil {
+		return EvaluationResult{}, fmt.Errorf("grants: parent token is required")
+	}
+	if in.WorkItemID == uuid.Nil {
+		return EvaluationResult{}, fmt.Errorf("grants: work_item_id is required")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return EvaluationResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.EvaluateInTx(ctx, tx, in)
+	if err != nil {
+		return EvaluationResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EvaluationResult{}, err
+	}
+	return result, nil
+}
+
+func (s *IssuanceService) EvaluateInTx(ctx context.Context, tx pgx.Tx, in EvaluationInput) (EvaluationResult, error) {
+	if in.Parent.ID == uuid.Nil {
+		return EvaluationResult{}, fmt.Errorf("grants: parent token is required")
+	}
+	if in.WorkItemID == uuid.Nil {
+		return EvaluationResult{}, fmt.Errorf("grants: work_item_id is required")
+	}
+	requestedScopes, err := normalizeRequestedScopes(in.RequestedScopes)
+	if err != nil {
+		return EvaluationResult{}, err
+	}
+	item, err := scanGrantWorkItem(ctx, tx, in.WorkItemID)
+	if err != nil {
+		return EvaluationResult{}, err
+	}
+	relation, err := s.treeRelation(ctx, tx, in.Parent, in.WorkItemID)
+	if err != nil {
+		return EvaluationResult{}, err
+	}
+	depthBudget, err := s.delegationDepthBudget(ctx, tx, in.Parent, in.WorkItemID, item.Cultivar)
+	if err != nil {
+		return EvaluationResult{}, err
+	}
+	decision := Reduce(Request{
+		Parent:               in.Parent,
+		Template:             in.Template,
+		RequestedSource:      domain.SourceAgent,
+		RequestedTreeRoot:    in.WorkItemID,
+		RequestedScopes:      requestedScopes,
+		TreeRelation:         relation,
+		DelegationDepthKnown: depthBudget.Known,
+		DelegationDepth:      depthBudget.Depth,
+		MaxDelegationDepth:   depthBudget.MaxDepth,
+		DepthBudgetSource:    depthBudget.Source,
+		HumanReviewStatus:    item.HumanReviewStatus,
+	})
+	return EvaluationResult{
+		WorkItemID:           item.ID,
+		WorkItemTitle:        item.Title,
+		Template:             in.Template,
+		RequestedScopes:      requestedScopes,
+		TreeRelation:         relation,
+		HumanReviewStatus:    item.HumanReviewStatus,
+		DelegationDepthKnown: depthBudget.Known,
+		DelegationDepth:      depthBudget.Depth,
+		MaxDelegationDepth:   depthBudget.MaxDepth,
+		DepthBudgetSource:    depthBudget.Source,
+		Cultivar:             depthBudget.Cultivar,
+		Decision:             decision,
+	}, nil
 }
 
 type grantWorkItem struct {

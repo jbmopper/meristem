@@ -13,9 +13,11 @@ import (
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/convergence"
+	"github.com/jbmopper/meristem/internal/cultivaractivation"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
@@ -53,6 +55,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolRegistryGet(),
 		s.toolRegistryDefineTropism(),
 		s.toolRegistryDefineCultivar(),
+		s.toolRegistryActivateCultivar(),
 		s.toolDeterministicErrorsList(),
 		s.toolDeterministicErrorsGet(),
 		s.toolWorkItemsList(),
@@ -300,6 +303,80 @@ func (s *Server) toolRegistryDefineCultivar() Tool {
 				return nil, registryToolErr(err)
 			}
 			return map[string]any{"cultivar": item, "defined": fresh}, nil
+		},
+	}
+}
+
+func (s *Server) toolRegistryActivateCultivar() Tool {
+	return Tool{
+		Name:        "registry.activate_cultivar",
+		Description: "Activate a worker-proposed non-rootstock cultivar through the work-item grant/review gate.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"work_item_id", "name", "version", "tropism", "profile", "xylem", "phloem"}, map[string]any{
+			"work_item_id": schemaString("Proposal work item uuid whose tree scopes and human_review_status gate activation."),
+			"name":         schemaString("Cultivar name ([a-z0-9][a-z0-9-]*)."),
+			"version":      schemaInt("Version. Starts at 1; existing non-rootstock names require current+1."),
+			"rootstock":    schemaBool("Must be false for worker self-extension; rootstock uses owner migration path."),
+			"tropism":      schemaAny("Tropism reference object: {name, version}."),
+			"profile":      schemaAny("Worker profile object: {briefing, scopes_template}. {root} is resolved to work_item_id for the grant reducer."),
+			"xylem":        schemaAny("Budget envelope object: {max_attempts, max_wall_seconds, max_depth, max_children_per_item, max_concurrent_running_items_per_token, max_events_per_item_per_hour_by_class}."),
+			"phloem":       schemaString("Projection/reference used for context flow."),
+			"description":  schemaString("Human-readable description."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.CultivarActivations == nil {
+				return nil, errors.New("cultivar activation service not configured")
+			}
+			var args struct {
+				WorkItemID  uuid.UUID `json:"work_item_id"`
+				Name        string    `json:"name"`
+				Version     int       `json:"version"`
+				Rootstock   bool      `json:"rootstock"`
+				Tropism     any       `json:"tropism"`
+				Profile     any       `json:"profile"`
+				Xylem       any       `json:"xylem"`
+				Phloem      string    `json:"phloem"`
+				Description string    `json:"description"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			var cultivar registry.DefineCultivarInput
+			if err := decodeArgs(raw, &cultivar); err != nil {
+				return nil, err
+			}
+			if err := s.canWriteWorkItem(ctx, actor, args.WorkItemID); err != nil {
+				return nil, err
+			}
+			result, err := s.deps.CultivarActivations.Activate(ctx, cultivaractivation.ActivateInput{
+				Actor:      actor,
+				WorkItemID: args.WorkItemID,
+				Cultivar:   cultivar,
+			})
+			if err != nil {
+				return nil, cultivarActivationToolErr(err)
+			}
+			out := map[string]any{
+				"activation_id": result.ActivationID,
+				"work_item_id":  result.WorkItemID,
+				"disposition":   result.Disposition,
+				"reason":        result.Reason,
+				"scopes":        result.Scopes,
+				"events": map[string]any{
+					"requested": result.RequestEventID,
+					"outcome":   result.OutcomeEventID,
+				},
+			}
+			if result.Cultivar != nil {
+				out["cultivar"] = result.Cultivar
+			}
+			if result.EscalationID != uuid.Nil || result.HumanWorkItemID != uuid.Nil {
+				out["escalation"] = map[string]any{
+					"id":                 result.EscalationID,
+					"human_work_item_id": result.HumanWorkItemID,
+				}
+			}
+			return out, nil
 		},
 	}
 }
@@ -1063,6 +1140,24 @@ func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uu
 
 func registryToolErr(err error) error {
 	switch {
+	case errors.Is(err, registry.ErrInvalidName),
+		errors.Is(err, registry.ErrInvalidVersion),
+		errors.Is(err, registry.ErrInvalidPayload),
+		errors.Is(err, registry.ErrUnknownReducer),
+		errors.Is(err, registry.ErrUnknownTropism),
+		errors.Is(err, registry.ErrUnknownCultivar),
+		errors.Is(err, registry.ErrVersionConflict),
+		errors.Is(err, registry.ErrRootstockImmutable):
+		return replayableToolErr(err)
+	default:
+		return err
+	}
+}
+
+func cultivarActivationToolErr(err error) error {
+	switch {
+	case errors.Is(err, grants.ErrWorkItemNotFound):
+		return replayableToolErr(fmt.Errorf("work_item_not_found: work item not found"))
 	case errors.Is(err, registry.ErrInvalidName),
 		errors.Is(err, registry.ErrInvalidVersion),
 		errors.Is(err, registry.ErrInvalidPayload),

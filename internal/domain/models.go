@@ -7,25 +7,29 @@ import (
 )
 
 const (
-	EventTokenCreated               = "token.created"
-	EventTokenRevoked               = "token.revoked"
-	EventIdempotencyRecorded        = "idempotency.recorded"
-	EventMessageCaptured            = "message.captured"
-	EventWorkItemCreated            = "work_item.created"
-	EventWorkItemTransitioned       = "work_item.transitioned"
-	EventWorkItemEventAppended      = "work_item.event_appended"
-	EventWorkItemRelationAdded      = "work_item.relation_added"
-	EventWorkItemMetadataUpdated    = "work_item.metadata_updated"
-	EventXylemExhausted             = "xylem.exhausted"
-	EventSignalReceived             = "signal.received"
-	EventDeterministicErrorReported = "deterministic_error.reported"
-	EventDeterministicErrorMasked   = "deterministic_error.masked"
-	EventDeterministicErrorUnmasked = "deterministic_error.unmasked"
-	EventEscalationRequested        = "escalation.requested"
-	EventSubactorGrantRequested     = "subactor_grant.requested"
-	EventSubactorGrantGranted       = "subactor_grant.granted"
-	EventSubactorGrantDenied        = "subactor_grant.denied"
-	EventSubactorGrantEscalated     = "subactor_grant.escalated"
+	EventTokenCreated                = "token.created"
+	EventTokenRevoked                = "token.revoked"
+	EventIdempotencyRecorded         = "idempotency.recorded"
+	EventMessageCaptured             = "message.captured"
+	EventWorkItemCreated             = "work_item.created"
+	EventWorkItemTransitioned        = "work_item.transitioned"
+	EventWorkItemEventAppended       = "work_item.event_appended"
+	EventWorkItemRelationAdded       = "work_item.relation_added"
+	EventWorkItemMetadataUpdated     = "work_item.metadata_updated"
+	EventXylemExhausted              = "xylem.exhausted"
+	EventSignalReceived              = "signal.received"
+	EventDeterministicErrorReported  = "deterministic_error.reported"
+	EventDeterministicErrorMasked    = "deterministic_error.masked"
+	EventDeterministicErrorUnmasked  = "deterministic_error.unmasked"
+	EventEscalationRequested         = "escalation.requested"
+	EventSubactorGrantRequested      = "subactor_grant.requested"
+	EventSubactorGrantGranted        = "subactor_grant.granted"
+	EventSubactorGrantDenied         = "subactor_grant.denied"
+	EventSubactorGrantEscalated      = "subactor_grant.escalated"
+	EventCultivarActivationRequested = "cultivar_activation.requested"
+	EventCultivarActivationGranted   = "cultivar_activation.granted"
+	EventCultivarActivationDenied    = "cultivar_activation.denied"
+	EventCultivarActivationEscalated = "cultivar_activation.escalated"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
 	// that state. Recorded by `meristem worker --once` (see internal/worker).
@@ -101,6 +105,10 @@ var AllEventKinds = []string{
 	EventSubactorGrantGranted,
 	EventSubactorGrantDenied,
 	EventSubactorGrantEscalated,
+	EventCultivarActivationRequested,
+	EventCultivarActivationGranted,
+	EventCultivarActivationDenied,
+	EventCultivarActivationEscalated,
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
 	EventConvergenceChecksProposed,
@@ -120,6 +128,7 @@ const (
 	SubjectDeterministicError = "deterministic_error"
 	SubjectEscalation         = "escalation"
 	SubjectSubactorGrant      = "subactor_grant"
+	SubjectCultivarActivation = "cultivar_activation"
 	SubjectTropism            = "tropism"
 	SubjectCultivar           = "cultivar"
 	SubjectProjection         = "projection"
