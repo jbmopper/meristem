@@ -64,7 +64,7 @@ curl -sS localhost:8080/readyz                 # -> "policy_profile":"bring-up" 
 
 ```bash
 MERISTEM_TOKEN="$(tr -d '\n' < .meristem/seed.token)" "$BIN" worker --once
-# -> worker --once: scanned=N emitted=M already_recorded=K
+# -> worker --once: scanned=N emitted=M already_recorded=K ... dispatch_requested=D ...
 ```
 Expect, per pass (all idempotent on re-run — a second tick emits ~0 fresh):
 - scribe: one `convergence-scribe` child per checkless captured/triaged item;

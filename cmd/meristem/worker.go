@@ -120,6 +120,10 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		slog.Int("scribe_candidates", result.ScribeCandidatesScanned),
 		slog.Int("scribe_children_spawned", result.ScribeChildrenSpawned),
 		slog.Int("scribe_children_already_present", result.ScribeChildrenAlreadyPresent),
+		slog.Int("dispatch_candidates", result.DispatchCandidatesScanned),
+		slog.Int("dispatch_requested", result.DispatchesRequested),
+		slog.Int("dispatch_already_requested", result.DispatchesAlreadyRequested),
+		slog.Int("dispatch_skipped_missing_cultivar", result.DispatchesSkippedMissingCultivar),
 		slog.Int("convergence_candidates", result.ConvergenceCandidatesScanned),
 		slog.Int("convergence_verdicts_recorded", result.ConvergenceVerdictsRecorded),
 		slog.Int("convergence_verdicts_already_recorded", result.ConvergenceVerdictsAlreadyRecorded),
@@ -128,7 +132,12 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		slog.Int("convergence_retries", result.ConvergenceRetries),
 		slog.Int("convergence_escalations", result.ConvergenceEscalations),
 	)
-	fmt.Fprintf(os.Stdout, "worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d\n",
+	fmt.Fprintln(os.Stdout, formatWorkerOnceResult(result))
+	return nil
+}
+
+func formatWorkerOnceResult(result worker.Result) string {
+	return fmt.Sprintf("worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
 		result.Scanned,
 		result.BreachesEmitted,
 		result.BreachesAlreadyRecorded,
@@ -138,6 +147,10 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		result.ScribeCandidatesScanned,
 		result.ScribeChildrenSpawned,
 		result.ScribeChildrenAlreadyPresent,
+		result.DispatchCandidatesScanned,
+		result.DispatchesRequested,
+		result.DispatchesAlreadyRequested,
+		result.DispatchesSkippedMissingCultivar,
 		result.ConvergenceCandidatesScanned,
 		result.ConvergenceVerdictsRecorded+result.ConvergenceVerdictsAlreadyRecorded,
 		result.ConvergenceStaleInputsSkipped,
@@ -145,7 +158,6 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		result.ConvergenceRetries,
 		result.ConvergenceEscalations,
 	)
-	return nil
 }
 
 // uniformBudgets returns a Budgets map applying d to every non-terminal

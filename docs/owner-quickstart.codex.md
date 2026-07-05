@@ -54,7 +54,7 @@ curl -fsS "$API/readyz"
 ## 5. Run the first worker tick
 ```bash
 MERISTEM_TOKEN="$(tr -d '\n' < .meristem/seed.token)" "$BIN" worker --once
-# -> worker --once: scanned=N emitted=M already_recorded=K ...
+# -> worker --once: scanned=N emitted=M already_recorded=K ... dispatch_requested=D ...
 ```
 
 Use a separate source=`system` worker token later for split audit identity.
