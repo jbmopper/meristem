@@ -42,6 +42,7 @@ func TestExpectedKindsAreClassified(t *testing.T) {
 		domain.EventPatienceBreached,
 		domain.EventConvergenceVerdictRecorded,
 		domain.EventConvergenceChecksProposed,
+		domain.EventDispatchRequested,
 		domain.EventPolicyProfileSwitched,
 		domain.EventTropismDefined,
 		domain.EventCultivarDefined,

@@ -95,7 +95,8 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventWorkItemMetadataUpdated,
 		domain.EventSignalReceived,
 		domain.EventEscalationRequested,
-		domain.EventPatienceBreached:
+		domain.EventPatienceBreached,
+		domain.EventDispatchRequested:
 		return KindClassLifecycle, false, true
 	case domain.EventWorkItemEventAppended:
 		return "", true, true

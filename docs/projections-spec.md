@@ -114,10 +114,9 @@ Long-poll/SSE paths reuse the same resolved filter; no new transport.
   token class, since access reduction is unchanged
 - `owner-attention@1` — `kinds: [escalation.requested, patience.breached]`
   (rootstock) — the owner's nudge feed
-- `dispatch@1` — **not seeded in this slice.** It references
-  `dispatch.requested`, which does not exist yet, and seeding it would
-  contradict this spec's own `unknown_kind` validation. The R3 remainder
-  (`b6526f08`) ships the kind and this fixture together
+- `dispatch@1` — seeded by the R3 dispatch slice once
+  `dispatch.requested` exists; selects the mechanical dispatch feed entries
+  that launchers consume
 - `work-item-brief@1` — **reserved name only** (`type: "brief"` refused at
   append in this slice); R2's phloem ref stays a string that now has a
   registry to eventually resolve against

@@ -40,6 +40,18 @@ var projectionSeedDefinitions = []projectiondefs.DefineInput{
 		},
 		Description: "Rootstock feed projection for items that need owner attention.",
 	},
+	{
+		Name:      "dispatch",
+		Version:   1,
+		Type:      projectiondefs.ProjectionTypeFeed,
+		Rootstock: true,
+		Filter: feed.ProjectionFilter{
+			Kinds: []string{
+				domain.EventDispatchRequested,
+			},
+		},
+		Description: "Rootstock feed projection for items ready for agent dispatch.",
+	},
 }
 
 func seedProjectionFixtures(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) (created, replayed int, err error) {

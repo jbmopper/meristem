@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"os"
 	"strings"
@@ -474,6 +475,116 @@ func TestScanOnceRefusesMissingScribeCultivar(t *testing.T) {
 	}
 	if got := countRelationsForParent(t, ctx, pool, parent.ID); got != 0 {
 		t.Fatalf("missing cultivar should not spawn child; got %d relations", got)
+	}
+}
+
+func TestScanDispatchRequestsEligibleItems(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-dispatch")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	seedChecklistWorkerCultivar(t, ctx, pool, writer, systemTok.Token)
+	service := workitems.NewService(pool, writer)
+	eligibleDefault, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "eligible default dispatch",
+		State:                      domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create eligible default: %v", err)
+	}
+	explicitParent, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "explicit dispatch parent",
+		State:             domain.WorkItemDone,
+		HumanReviewStatus: domain.HumanReviewWavedThrough,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create explicit parent: %v", err)
+	}
+	eligibleExplicit, _, err := service.SpawnChildWithID(ctx, explicitParent.ID, uuid.New(), workitems.CreateInput{
+		Title:                      "eligible explicit dispatch",
+		State:                      domain.WorkItemPlanned,
+		SuggestedConvergenceChecks: []string{"human-ack:owner accepts"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Cultivar:                   "convergence-scribe@1",
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create eligible explicit: %v", err)
+	}
+	checkless, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "checkless skip",
+		State:             domain.WorkItemTriaged,
+		HumanReviewStatus: domain.HumanReviewWavedThrough,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create checkless: %v", err)
+	}
+	blocked, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "blocked skip",
+		State:                      domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewBlocked,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create blocked: %v", err)
+	}
+	running, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "running skip",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create running: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	first, err := w.scanDispatch(ctx)
+	if err != nil {
+		t.Fatalf("scanDispatch first: %v", err)
+	}
+	if first.DispatchCandidatesScanned != 2 || first.DispatchesRequested != 2 || first.DispatchesAlreadyRequested != 0 {
+		t.Fatalf("first dispatch result = %+v, want scanned=2 requested=2 already=0", first)
+	}
+	second, err := w.scanDispatch(ctx)
+	if err != nil {
+		t.Fatalf("scanDispatch second: %v", err)
+	}
+	if second.DispatchCandidatesScanned != 2 || second.DispatchesRequested != 0 || second.DispatchesAlreadyRequested != 2 {
+		t.Fatalf("second dispatch result = %+v, want scanned=2 requested=0 already=2", second)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventDispatchRequested); got != 2 {
+		t.Fatalf("dispatch events = %d, want 2", got)
+	}
+	defaultPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleDefault.ID)
+	if defaultPayload.WorkItemID != eligibleDefault.ID || defaultPayload.Cultivar != "checklist-worker@1" || defaultPayload.State != string(domain.WorkItemTriaged) {
+		t.Fatalf("default dispatch payload = %+v", defaultPayload)
+	}
+	explicitPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleExplicit.ID)
+	if explicitPayload.WorkItemID != eligibleExplicit.ID || explicitPayload.Cultivar != "convergence-scribe@1" || explicitPayload.State != string(domain.WorkItemPlanned) {
+		t.Fatalf("explicit dispatch payload = %+v", explicitPayload)
+	}
+	for _, skipped := range []uuid.UUID{checkless.ID, blocked.ID, running.ID} {
+		if got := countEventsForSubject(t, ctx, pool, skipped, domain.EventDispatchRequested); got != 0 {
+			t.Fatalf("dispatch events for skipped %s = %d, want 0", skipped, got)
+		}
 	}
 }
 
@@ -1106,6 +1217,71 @@ func seedScribeCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 	if err != nil {
 		t.Fatalf("define scribe cultivar: %v", err)
 	}
+}
+
+func seedChecklistWorkerCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "checklist-all",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "all checklist items pass",
+	})
+	if err != nil {
+		t.Fatalf("define checklist tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "checklist-worker",
+		Version:   1,
+		Rootstock: true,
+		Tropism:   registry.TropismRef{Name: "checklist-all", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/checklist-worker.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 3, MaxWallSeconds: 3600, MaxDepth: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "checklist worker rootstock",
+	})
+	if err != nil {
+		t.Fatalf("define checklist worker cultivar: %v", err)
+	}
+}
+
+type dispatchPayload struct {
+	WorkItemID           uuid.UUID `json:"work_item_id"`
+	State                string    `json:"state"`
+	StateEnteredAtUnix   int64     `json:"state_entered_at_unix"`
+	Cultivar             string    `json:"cultivar"`
+	Reason               string    `json:"reason"`
+	SourceReconcilerPass string    `json:"source_reconciler_pass"`
+}
+
+func dispatchPayloadForSubject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) dispatchPayload {
+	t.Helper()
+	var raw []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT payload
+		FROM events
+		WHERE subject_kind = $1 AND subject_id = $2 AND kind = $3
+	`, domain.SubjectWorkItem, id, domain.EventDispatchRequested).Scan(&raw); err != nil {
+		t.Fatalf("dispatch payload for %s: %v", id, err)
+	}
+	var payload dispatchPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode dispatch payload: %v", err)
+	}
+	return payload
 }
 
 // newIntegrationPool mirrors the helper in internal/api/signals_integration_test.go;

@@ -251,6 +251,7 @@ func TestFeedItemAnchorsCoverIncludedKinds(t *testing.T) {
 		domain.EventPatienceBreached:           {domain.SubjectWorkItem, subjectAnchored},
 		domain.EventConvergenceVerdictRecorded: {domain.SubjectConvergence, subjectAnchored},
 		domain.EventConvergenceChecksProposed:  {domain.SubjectWorkItem, subjectAnchored},
+		domain.EventDispatchRequested:          {domain.SubjectWorkItem, subjectAnchored},
 		// System-wide owner posture, not tree content: no anchor, dropped
 		// from tree-scoped feeds; visible to feed.read.
 		domain.EventPolicyProfileSwitched: {domain.SubjectPolicyProfile, nil},

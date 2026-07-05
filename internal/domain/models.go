@@ -54,6 +54,12 @@ const (
 	// work_item's suggested convergence checks. The deterministic reducer
 	// records its disposition separately as convergence.verdict_recorded.
 	EventConvergenceChecksProposed = "convergence.checks_proposed"
+	// EventDispatchRequested records that the deterministic worker observed a
+	// work_item ready for agent attention and placed it on the dispatch feed.
+	// The subject is the target work_item; the payload names the handling
+	// cultivar and the state epoch so re-scans converge on one dispatch entry
+	// per item/state/cultivar combination.
+	EventDispatchRequested = "dispatch.requested"
 
 	// EventPolicyProfileSwitched records an operator switching the active
 	// safety policy profile (bring-up vs steady). The subject is the
@@ -96,6 +102,7 @@ var AllEventKinds = []string{
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
 	EventConvergenceChecksProposed,
+	EventDispatchRequested,
 	EventPolicyProfileSwitched,
 	EventTropismDefined,
 	EventCultivarDefined,

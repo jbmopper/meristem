@@ -194,6 +194,19 @@ type Result struct {
 	// convergence enforcement must not die of a missing registry row.
 	ScribePassSkippedMissingCultivar int
 
+	// DispatchCandidatesScanned is the count of checkful captured/triaged/
+	// planned work_items eligible for launcher attention.
+	DispatchCandidatesScanned int
+	// DispatchesRequested is the number of fresh dispatch.requested events
+	// appended for eligible state epochs.
+	DispatchesRequested int
+	// DispatchesAlreadyRequested is the number of eligible state epochs whose
+	// deterministic dispatch event already existed.
+	DispatchesAlreadyRequested int
+	// DispatchesSkippedMissingCultivar is 1 when the dispatch pass stood down
+	// because the default dispatch cultivar is absent from the registry.
+	DispatchesSkippedMissingCultivar int
+
 	// ConvergenceCandidatesScanned is the count of running work_items
 	// with suggested convergence checks and therefore a chance to advance
 	// through the convergence loop in this pass.
@@ -283,6 +296,17 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 			out.ScribePassSkippedMissingCultivar = 1
 		} else {
 			return out, fmt.Errorf("worker: scribe pass: %w", err)
+		}
+	}
+
+	dispatchResult, err := w.scanDispatch(ctx)
+	out.DispatchCandidatesScanned = dispatchResult.DispatchCandidatesScanned
+	out.DispatchesRequested = dispatchResult.DispatchesRequested
+	out.DispatchesAlreadyRequested = dispatchResult.DispatchesAlreadyRequested
+	out.DispatchesSkippedMissingCultivar = dispatchResult.DispatchesSkippedMissingCultivar
+	if err != nil {
+		if !errors.Is(err, registry.ErrUnknownCultivar) {
+			return out, fmt.Errorf("worker: dispatch pass: %w", err)
 		}
 	}
 

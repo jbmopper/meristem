@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 func TestSlugify(t *testing.T) {
@@ -97,4 +99,20 @@ func TestV1SubstrateItems_CountMatchesSpec(t *testing.T) {
 	if got := len(v1SubstrateItems); got != want {
 		t.Errorf("expected %d v1 substrate items (matching docs/spec.md §v1 Substrate), got %d", want, got)
 	}
+}
+
+func TestProjectionSeedDefinitionsIncludeDispatch(t *testing.T) {
+	for _, item := range projectionSeedDefinitions {
+		if item.Name != "dispatch" {
+			continue
+		}
+		if !item.Rootstock {
+			t.Fatal("dispatch projection must be rootstock")
+		}
+		if len(item.Filter.Kinds) != 1 || item.Filter.Kinds[0] != domain.EventDispatchRequested {
+			t.Fatalf("dispatch filter = %+v, want [%s]", item.Filter, domain.EventDispatchRequested)
+		}
+		return
+	}
+	t.Fatal("projection seed definitions missing dispatch")
 }
