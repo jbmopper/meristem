@@ -150,6 +150,14 @@ func ClassifyItem(item Item) (string, bool) {
 	return KindClassProgress, true
 }
 
+func ClassifyEvent(kind string, payload any) (string, bool) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", false
+	}
+	return ClassifyItem(Item{Kind: kind, Payload: raw})
+}
+
 func (f ProjectionFilter) Matches(item Item) bool {
 	if slices.Contains(f.Kinds, item.Kind) {
 		return true

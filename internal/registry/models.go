@@ -28,11 +28,12 @@ type Profile struct {
 }
 
 type Xylem struct {
-	MaxAttempts                  int `json:"max_attempts"`
-	MaxWallSeconds               int `json:"max_wall_seconds"`
-	MaxDepth                     int `json:"max_depth"`
-	MaxChildrenPerItem           int `json:"max_children_per_item,omitempty"`
-	MaxConcurrentRunningPerToken int `json:"max_concurrent_running_items_per_token,omitempty"`
+	MaxAttempts                    int            `json:"max_attempts"`
+	MaxWallSeconds                 int            `json:"max_wall_seconds"`
+	MaxDepth                       int            `json:"max_depth"`
+	MaxChildrenPerItem             int            `json:"max_children_per_item,omitempty"`
+	MaxConcurrentRunningPerToken   int            `json:"max_concurrent_running_items_per_token,omitempty"`
+	MaxEventsPerItemPerHourByClass map[string]int `json:"max_events_per_item_per_hour_by_class,omitempty"`
 }
 
 type Tropism struct {

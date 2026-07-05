@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/feed"
 )
 
 // Policy is intentionally code-owned in this slice: startup safety must not
@@ -19,23 +20,27 @@ import (
 // the event log, but API/worker startup should still fail closed if the
 // projected policy is absent or invalid.
 type Policy struct {
-	MaxRequestBodyBytes          int64                                  `json:"max_request_body_bytes"`
-	MaxFeedWait                  time.Duration                          `json:"max_feed_wait"`
-	PatienceBudgets              map[domain.WorkItemState]time.Duration `json:"patience_budgets"`
-	MaxDelegationDepth           int                                    `json:"max_delegation_depth"`
-	MaxChildrenPerItem           int                                    `json:"max_children_per_item"`
-	MaxConcurrentRunningPerToken int                                    `json:"max_concurrent_running_items_per_token"`
+	MaxRequestBodyBytes            int64                                  `json:"max_request_body_bytes"`
+	MaxFeedWait                    time.Duration                          `json:"max_feed_wait"`
+	PatienceBudgets                map[domain.WorkItemState]time.Duration `json:"patience_budgets"`
+	MaxDelegationDepth             int                                    `json:"max_delegation_depth"`
+	MaxChildrenPerItem             int                                    `json:"max_children_per_item"`
+	MaxConcurrentRunningPerToken   int                                    `json:"max_concurrent_running_items_per_token"`
+	MaxEventsPerItemPerHourByClass map[string]int                         `json:"max_events_per_item_per_hour_by_class"`
 }
 
 const (
 	// Max request body is deliberately small while v0/v1 only accept text,
 	// JSON work specs, and coordination notes. Large artifacts belong behind
 	// the future object-storage interface, not in Postgres request bodies.
-	defaultMaxRequestBodyBytes          int64 = 1 << 20 // 1 MiB
-	defaultMaxFeedWait                        = 60 * time.Second
-	defaultMaxDelegationDepth                 = 5
-	defaultMaxChildrenPerItem                 = 32
-	defaultMaxConcurrentRunningPerToken       = 8
+	defaultMaxRequestBodyBytes              int64 = 1 << 20 // 1 MiB
+	defaultMaxFeedWait                            = 60 * time.Second
+	defaultMaxDelegationDepth                     = 5
+	defaultMaxChildrenPerItem                     = 32
+	defaultMaxConcurrentRunningPerToken           = 8
+	defaultMaxLifecycleEventsPerItemPerHour       = 120
+	defaultMaxDecisionEventsPerItemPerHour        = 120
+	defaultMaxProgressEventsPerItemPerHour        = 240
 
 	// MaxPatienceBudget is the ceiling on any patience budget in
 	// any profile. Bounded patience is the invariant (spec principle 3);
@@ -63,11 +68,12 @@ const (
 // DefaultPolicy returns the resource-safety policy required for startup.
 func DefaultPolicy() Policy {
 	return Policy{
-		MaxRequestBodyBytes:          defaultMaxRequestBodyBytes,
-		MaxFeedWait:                  defaultMaxFeedWait,
-		MaxDelegationDepth:           defaultMaxDelegationDepth,
-		MaxChildrenPerItem:           defaultMaxChildrenPerItem,
-		MaxConcurrentRunningPerToken: defaultMaxConcurrentRunningPerToken,
+		MaxRequestBodyBytes:            defaultMaxRequestBodyBytes,
+		MaxFeedWait:                    defaultMaxFeedWait,
+		MaxDelegationDepth:             defaultMaxDelegationDepth,
+		MaxChildrenPerItem:             defaultMaxChildrenPerItem,
+		MaxConcurrentRunningPerToken:   defaultMaxConcurrentRunningPerToken,
+		MaxEventsPerItemPerHourByClass: defaultMaxEventsPerItemPerHourByClass(),
 		PatienceBudgets: map[domain.WorkItemState]time.Duration{
 			domain.WorkItemCaptured:         24 * time.Hour,
 			domain.WorkItemTriaged:          72 * time.Hour,
@@ -86,11 +92,12 @@ func Profiles() map[string]Policy {
 	return map[string]Policy{
 		ProfileSteady: DefaultPolicy(),
 		ProfileBringUp: {
-			MaxRequestBodyBytes:          defaultMaxRequestBodyBytes,
-			MaxFeedWait:                  defaultMaxFeedWait,
-			MaxDelegationDepth:           defaultMaxDelegationDepth,
-			MaxChildrenPerItem:           defaultMaxChildrenPerItem,
-			MaxConcurrentRunningPerToken: defaultMaxConcurrentRunningPerToken,
+			MaxRequestBodyBytes:            defaultMaxRequestBodyBytes,
+			MaxFeedWait:                    defaultMaxFeedWait,
+			MaxDelegationDepth:             defaultMaxDelegationDepth,
+			MaxChildrenPerItem:             defaultMaxChildrenPerItem,
+			MaxConcurrentRunningPerToken:   defaultMaxConcurrentRunningPerToken,
+			MaxEventsPerItemPerHourByClass: defaultMaxEventsPerItemPerHourByClass(),
 			PatienceBudgets: map[domain.WorkItemState]time.Duration{
 				domain.WorkItemCaptured:         7 * 24 * time.Hour,
 				domain.WorkItemTriaged:          14 * 24 * time.Hour,
@@ -138,6 +145,9 @@ func (p Policy) Validate() error {
 	if p.MaxConcurrentRunningPerToken <= 0 {
 		return fmt.Errorf("safety: max_concurrent_running_items_per_token must be positive")
 	}
+	if err := validateEventRateBudgetMap(p.MaxEventsPerItemPerHourByClass); err != nil {
+		return err
+	}
 	for _, state := range nonTerminalStates() {
 		dur, ok := p.PatienceBudgets[state]
 		if !ok {
@@ -183,19 +193,21 @@ func MustValidateStartup() (Policy, error) {
 // were active?" cheap to answer without dumping the whole policy each time.
 func (p Policy) Fingerprint() (string, error) {
 	canonical := struct {
-		MaxRequestBodyBytes          int64            `json:"max_request_body_bytes"`
-		MaxFeedWaitSeconds           int64            `json:"max_feed_wait_seconds"`
-		MaxDelegationDepth           int              `json:"max_delegation_depth"`
-		MaxChildrenPerItem           int              `json:"max_children_per_item"`
-		MaxConcurrentRunningPerToken int              `json:"max_concurrent_running_items_per_token"`
-		PatienceSeconds              map[string]int64 `json:"patience_seconds"`
+		MaxRequestBodyBytes            int64            `json:"max_request_body_bytes"`
+		MaxFeedWaitSeconds             int64            `json:"max_feed_wait_seconds"`
+		MaxDelegationDepth             int              `json:"max_delegation_depth"`
+		MaxChildrenPerItem             int              `json:"max_children_per_item"`
+		MaxConcurrentRunningPerToken   int              `json:"max_concurrent_running_items_per_token"`
+		MaxEventsPerItemPerHourByClass map[string]int   `json:"max_events_per_item_per_hour_by_class"`
+		PatienceSeconds                map[string]int64 `json:"patience_seconds"`
 	}{
-		MaxRequestBodyBytes:          p.MaxRequestBodyBytes,
-		MaxFeedWaitSeconds:           int64(p.MaxFeedWait.Seconds()),
-		MaxDelegationDepth:           p.MaxDelegationDepth,
-		MaxChildrenPerItem:           p.MaxChildrenPerItem,
-		MaxConcurrentRunningPerToken: p.MaxConcurrentRunningPerToken,
-		PatienceSeconds:              make(map[string]int64, len(p.PatienceBudgets)),
+		MaxRequestBodyBytes:            p.MaxRequestBodyBytes,
+		MaxFeedWaitSeconds:             int64(p.MaxFeedWait.Seconds()),
+		MaxDelegationDepth:             p.MaxDelegationDepth,
+		MaxChildrenPerItem:             p.MaxChildrenPerItem,
+		MaxConcurrentRunningPerToken:   p.MaxConcurrentRunningPerToken,
+		MaxEventsPerItemPerHourByClass: copyStringIntMap(p.MaxEventsPerItemPerHourByClass),
+		PatienceSeconds:                make(map[string]int64, len(p.PatienceBudgets)),
 	}
 	for state, dur := range p.PatienceBudgets {
 		canonical.PatienceSeconds[string(state)] = int64(dur.Seconds())
@@ -206,6 +218,42 @@ func (p Policy) Fingerprint() (string, error) {
 	}
 	sum := sha256.Sum256(b)
 	return fmt.Sprintf("%x", sum[:8]), nil
+}
+
+func defaultMaxEventsPerItemPerHourByClass() map[string]int {
+	return map[string]int{
+		feed.KindClassLifecycle: defaultMaxLifecycleEventsPerItemPerHour,
+		feed.KindClassDecision:  defaultMaxDecisionEventsPerItemPerHour,
+		feed.KindClassProgress:  defaultMaxProgressEventsPerItemPerHour,
+	}
+}
+
+func validateEventRateBudgetMap(budgets map[string]int) error {
+	if budgets == nil {
+		return fmt.Errorf("safety: max_events_per_item_per_hour_by_class is required")
+	}
+	for _, class := range []string{feed.KindClassLifecycle, feed.KindClassDecision, feed.KindClassProgress} {
+		if budgets[class] <= 0 {
+			return fmt.Errorf("safety: max_events_per_item_per_hour_by_class[%s] must be positive", class)
+		}
+	}
+	for class, max := range budgets {
+		if !feed.ProjectableKindClass(class) {
+			return fmt.Errorf("safety: max_events_per_item_per_hour_by_class[%s] is not a projectable kind class", class)
+		}
+		if max <= 0 {
+			return fmt.Errorf("safety: max_events_per_item_per_hour_by_class[%s] must be positive", class)
+		}
+	}
+	return nil
+}
+
+func copyStringIntMap(in map[string]int) map[string]int {
+	out := make(map[string]int, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func nonTerminalStates() []domain.WorkItemState {

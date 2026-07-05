@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,6 +16,8 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -346,6 +349,198 @@ func TestTransitionEndpointUsesSafetyFallbackForZeroConcurrentRunningBudget(t *t
 	}
 }
 
+func TestAppendEventEndpointBlocksOverEventRateBudget(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "event-rate-root",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	root := rootResult.Token
+	defineEventRateCultivar(t, ctx, pool, writer, root)
+	agent, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "event-rate-agent",
+		Source: domain.SourceAgent,
+		Actor:  &root,
+		Scopes: []string{access.ScopeWorkItemsReadAll, access.ScopeWorkItemsWriteAll},
+	})
+	if err != nil {
+		t.Fatalf("create agent token: %v", err)
+	}
+
+	workSvc := workitems.NewService(pool, writer)
+	item := createEventRateItem(t, ctx, workSvc, root, "event-rate item", "single-event-rate-worker@1")
+	server := New(pool, nil)
+	path := "/v1/work-items/" + item.ID.String() + "/events"
+
+	decisionBody := []byte(`{"kind":"coordination.claimed","payload":{"note":"decision does not count as progress"}}`)
+	decision := doREST(t, server.Handler(), http.MethodPost, path, agent.Secret, "event-rate-decision-1", decisionBody)
+	assertRESTStatus(t, decision, http.StatusCreated)
+
+	progressBody := []byte(`{"kind":"agent.progress","payload":{"note":"first progress"}}`)
+	firstProgress := doREST(t, server.Handler(), http.MethodPost, path, agent.Secret, "event-rate-progress-1", progressBody)
+	assertRESTStatus(t, firstProgress, http.StatusCreated)
+
+	secondProgressBody := []byte(`{"kind":"agent.progress","payload":{"note":"second progress"}}`)
+	blocked := doREST(t, server.Handler(), http.MethodPost, path, agent.Secret, "event-rate-progress-2", secondProgressBody)
+	assertRESTStatus(t, blocked, http.StatusConflict)
+	assertErrorCode(t, blocked, "xylem_budget_exhausted")
+
+	assertEventCount(t, pool, domain.EventXylemExhausted, 1)
+	assertEventCount(t, pool, domain.EventEscalationRequested, 1)
+	var appendedProgress int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM events
+		WHERE subject_kind = $1
+		  AND subject_id = $2
+		  AND kind = $3
+		  AND payload->>'inner_kind' = 'agent.progress'
+	`, domain.SubjectWorkItem, item.ID, domain.EventWorkItemEventAppended).Scan(&appendedProgress); err != nil {
+		t.Fatalf("count progress events: %v", err)
+	}
+	if appendedProgress != 1 {
+		t.Fatalf("expected one appended progress event; got %d", appendedProgress)
+	}
+
+	var raw []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT payload
+		FROM events
+		WHERE kind = $1 AND subject_kind = $2 AND subject_id = $3
+	`, domain.EventXylemExhausted, domain.SubjectWorkItem, item.ID).Scan(&raw); err != nil {
+		t.Fatalf("read event-rate xylem.exhausted payload: %v", err)
+	}
+	var payload struct {
+		Budget                  string    `json:"budget"`
+		TaxonomyClass           string    `json:"taxonomy_class"`
+		CurrentEvents           int       `json:"current_events"`
+		MaxEventsPerItemPerHour int       `json:"max_events_per_item_per_hour"`
+		WindowSeconds           int       `json:"window_seconds"`
+		BudgetSource            string    `json:"budget_source"`
+		Cultivar                string    `json:"cultivar"`
+		AttemptedEventID        uuid.UUID `json:"attempted_event_id"`
+		AttemptedEventKind      string    `json:"attempted_event_kind"`
+		AttemptedInnerKind      string    `json:"attempted_inner_kind"`
+		EscalationRule          string    `json:"escalation_rule"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode event-rate xylem payload: %v", err)
+	}
+	if payload.Budget != "max_events_per_item_per_hour_by_class" ||
+		payload.TaxonomyClass != feed.KindClassProgress ||
+		payload.CurrentEvents != 1 ||
+		payload.MaxEventsPerItemPerHour != 1 ||
+		payload.WindowSeconds != 3600 ||
+		payload.BudgetSource != "cultivar:single-event-rate-worker@1" ||
+		payload.Cultivar != "single-event-rate-worker@1" ||
+		payload.AttemptedEventID == uuid.Nil ||
+		payload.AttemptedEventKind != domain.EventWorkItemEventAppended ||
+		payload.AttemptedInnerKind != "agent.progress" ||
+		payload.EscalationRule != string(domain.EscalationRuleHandToHuman) {
+		t.Fatalf("unexpected event-rate xylem payload: %+v", payload)
+	}
+	updated, err := workSvc.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewBlocked {
+		t.Fatalf("item not blocked by event-rate exhaustion: state=%s review=%s", updated.State, updated.HumanReviewStatus)
+	}
+	if updated.StateReason == nil || !strings.Contains(*updated.StateReason, "max_events_per_item_per_hour_by_class") {
+		t.Fatalf("item state reason should name exhausted budget, got %v", updated.StateReason)
+	}
+
+	replayCtx := idempotency.WithRequest(ctx, idempotency.Request{
+		TokenID: agent.Token.ID,
+		Scope:   "POST " + path,
+		Key:     "event-rate-progress-1",
+	})
+	if err := workSvc.AppendEvent(replayCtx, item.ID, "agent.progress", map[string]any{"note": "first progress"}, agent.Token); err != nil {
+		t.Fatalf("same event replay should not trigger exhaustion: %v", err)
+	}
+	assertEventCount(t, pool, domain.EventXylemExhausted, 1)
+}
+
+func TestAppendEventUsesSafetyFallbackForZeroEventRateClass(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "event-rate-fallback-root",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	root := rootResult.Token
+	defineFallbackEventRateCultivar(t, ctx, pool, writer, root)
+	agent, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "event-rate-fallback-agent",
+		Source: domain.SourceAgent,
+		Actor:  &root,
+		Scopes: []string{access.ScopeWorkItemsReadAll, access.ScopeWorkItemsWriteAll},
+	})
+	if err != nil {
+		t.Fatalf("create agent token: %v", err)
+	}
+
+	workSvc := workitems.NewService(pool, writer)
+	item := createEventRateItem(t, ctx, workSvc, root, "fallback event-rate item", "fallback-event-rate-worker@1")
+	max := safety.DefaultPolicy().MaxEventsPerItemPerHourByClass[feed.KindClassDecision]
+	for i := 0; i < max; i++ {
+		if err := workSvc.AppendEvent(ctx, item.ID, "coordination.note", map[string]any{"i": i}, agent.Token); err != nil {
+			t.Fatalf("append fallback decision event %d: %v", i, err)
+		}
+	}
+
+	err = workSvc.AppendEvent(ctx, item.ID, "coordination.note", map[string]any{"i": max}, agent.Token)
+	if !errors.Is(err, workitems.ErrXylemBudgetExhausted) {
+		t.Fatalf("expected xylem exhaustion after fallback decision budget, got %v", err)
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT payload
+		FROM events
+		WHERE kind = $1 AND subject_kind = $2 AND subject_id = $3
+	`, domain.EventXylemExhausted, domain.SubjectWorkItem, item.ID).Scan(&raw); err != nil {
+		t.Fatalf("read fallback event-rate xylem.exhausted payload: %v", err)
+	}
+	var payload struct {
+		TaxonomyClass           string `json:"taxonomy_class"`
+		CurrentEvents           int    `json:"current_events"`
+		MaxEventsPerItemPerHour int    `json:"max_events_per_item_per_hour"`
+		BudgetSource            string `json:"budget_source"`
+		Cultivar                string `json:"cultivar"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode fallback event-rate xylem payload: %v", err)
+	}
+	if payload.TaxonomyClass != feed.KindClassDecision ||
+		payload.CurrentEvents != max ||
+		payload.MaxEventsPerItemPerHour != max ||
+		payload.BudgetSource != "safety_policy" ||
+		payload.Cultivar != "fallback-event-rate-worker@1" {
+		t.Fatalf("unexpected fallback event-rate xylem payload: %+v", payload)
+	}
+}
+
 func defineSingleChildCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
 	t.Helper()
 	svc := registry.NewService(pool, writer)
@@ -476,6 +671,113 @@ func defineFallbackRunningCultivar(t *testing.T, ctx context.Context, pool *pgxp
 	if err != nil {
 		t.Fatalf("define fallback-running cultivar: %v", err)
 	}
+}
+
+func defineEventRateCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "single-event-rate-checklist",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "single event-rate budget test tropism",
+	})
+	if err != nil {
+		t.Fatalf("define single-event-rate tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "single-event-rate-worker",
+		Version:   1,
+		Rootstock: false,
+		Tropism:   registry.TropismRef{Name: "single-event-rate-checklist", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/single-event-rate-worker.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem: registry.Xylem{
+			MaxAttempts:    3,
+			MaxWallSeconds: 1800,
+			MaxDepth:       1,
+			MaxEventsPerItemPerHourByClass: map[string]int{
+				feed.KindClassDecision: 2,
+				feed.KindClassProgress: 1,
+			},
+		},
+		Phloem:      "projection:work-item-brief",
+		Description: "single event-rate budget test cultivar",
+	})
+	if err != nil {
+		t.Fatalf("define single-event-rate cultivar: %v", err)
+	}
+}
+
+func defineFallbackEventRateCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "fallback-event-rate-checklist",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "fallback event-rate budget test tropism",
+	})
+	if err != nil {
+		t.Fatalf("define fallback-event-rate tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "fallback-event-rate-worker",
+		Version:   1,
+		Rootstock: false,
+		Tropism:   registry.TropismRef{Name: "fallback-event-rate-checklist", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/fallback-event-rate-worker.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem: registry.Xylem{
+			MaxAttempts:    3,
+			MaxWallSeconds: 1800,
+			MaxDepth:       1,
+			MaxEventsPerItemPerHourByClass: map[string]int{
+				feed.KindClassDecision: 0,
+			},
+		},
+		Phloem:      "projection:work-item-brief",
+		Description: "fallback event-rate budget test cultivar",
+	})
+	if err != nil {
+		t.Fatalf("define fallback-event-rate cultivar: %v", err)
+	}
+}
+
+func createEventRateItem(t *testing.T, ctx context.Context, svc *workitems.Service, actor domain.Token, title string, cultivar string) domain.WorkItem {
+	t.Helper()
+	item, err := svc.Create(ctx, workitems.CreateInput{
+		Title:                      title,
+		Actor:                      actor,
+		Cultivar:                   cultivar,
+		SuggestedConvergenceChecks: []string{"event_rate_budget_test_done"},
+	})
+	if err != nil {
+		t.Fatalf("create %s: %v", title, err)
+	}
+	return item
 }
 
 func createBudgetedRunningItem(t *testing.T, ctx context.Context, svc *workitems.Service, actor domain.Token, title string) domain.WorkItem {

@@ -106,6 +106,21 @@ func TestProjectionFilterClassifiesWorkItemEventAppendedByInnerKind(t *testing.T
 	}
 }
 
+func TestClassifyEventMatchesWorkItemEventAppendedByInnerKind(t *testing.T) {
+	progress, ok := ClassifyEvent(domain.EventWorkItemEventAppended, map[string]any{
+		"inner_kind": "agent.progress",
+	})
+	if !ok || progress != KindClassProgress {
+		t.Fatalf("agent.progress classified as %q ok=%t, want progress", progress, ok)
+	}
+	decision, ok := ClassifyEvent(domain.EventWorkItemEventAppended, map[string]any{
+		"inner_kind": "coordination.claimed",
+	})
+	if !ok || decision != KindClassDecision {
+		t.Fatalf("coordination.claimed classified as %q ok=%t, want decision", decision, ok)
+	}
+}
+
 // TestNoKindIsBothIncludedAndExcluded keeps the partition honest. A kind
 // in both lists would mean the policy is contradictory and the SQL filter
 // would let it through (Included wins by being the one consulted) while

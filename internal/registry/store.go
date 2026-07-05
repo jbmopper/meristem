@@ -230,9 +230,18 @@ func sameCultivar(current Cultivar, in DefineCultivarInput) bool {
 		current.Tropism == in.Tropism &&
 		current.Profile.Briefing == in.Profile.Briefing &&
 		stringSlicesEqual(current.Profile.ScopesTemplate, in.Profile.ScopesTemplate) &&
-		current.Xylem == in.Xylem &&
+		xylemEqual(current.Xylem, in.Xylem) &&
 		current.Phloem == in.Phloem &&
 		current.Description == in.Description
+}
+
+func xylemEqual(a, b Xylem) bool {
+	return a.MaxAttempts == b.MaxAttempts &&
+		a.MaxWallSeconds == b.MaxWallSeconds &&
+		a.MaxDepth == b.MaxDepth &&
+		a.MaxChildrenPerItem == b.MaxChildrenPerItem &&
+		a.MaxConcurrentRunningPerToken == b.MaxConcurrentRunningPerToken &&
+		stringIntMapsEqual(a.MaxEventsPerItemPerHourByClass, b.MaxEventsPerItemPerHourByClass)
 }
 
 func jsonEqual(a, b json.RawMessage) bool {
@@ -247,6 +256,18 @@ func stringSlicesEqual(a, b []string) bool {
 	}
 	for i := range a {
 		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func stringIntMapsEqual(a, b map[string]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		if b[k] != va {
 			return false
 		}
 	}

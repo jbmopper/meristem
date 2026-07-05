@@ -283,7 +283,7 @@ func (s *Server) toolRegistryDefineCultivar() Tool {
 			"rootstock":   schemaBool("Whether this cultivar is immutable rootstock."),
 			"tropism":     schemaAny("Tropism reference object: {name, version}."),
 			"profile":     schemaAny("Worker profile object: {briefing, scopes_template}."),
-			"xylem":       schemaAny("Budget envelope object: {max_attempts, max_wall_seconds, max_depth, max_children_per_item, max_concurrent_running_items_per_token}."),
+			"xylem":       schemaAny("Budget envelope object: {max_attempts, max_wall_seconds, max_depth, max_children_per_item, max_concurrent_running_items_per_token, max_events_per_item_per_hour_by_class}."),
 			"phloem":      schemaString("Projection/reference used for context flow."),
 			"description": schemaString("Human-readable description."),
 		}),
@@ -793,6 +793,9 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 				if errors.Is(err, workitems.ErrNotFound) {
 					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
 				}
+				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
+					return nil, replayableToolErr(err)
+				}
 				return nil, err
 			}
 			return map[string]any{"work_item_id": id, "appended": true}, nil
@@ -904,6 +907,9 @@ func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 				if errors.Is(err, workitems.ErrNotFound) {
 					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
 				}
+				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
+					return nil, replayableToolErr(err)
+				}
 				return nil, err
 			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
@@ -950,6 +956,9 @@ func (s *Server) toolWorkItemsTransition() Tool {
 					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
 				}
 				if errors.Is(err, workitems.ErrConvergenceChecksRequired) {
+					return nil, replayableToolErr(err)
+				}
+				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
 					return nil, replayableToolErr(err)
 				}
 				if strings.Contains(err.Error(), "invalid transition") {

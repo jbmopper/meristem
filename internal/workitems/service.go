@@ -14,6 +14,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
@@ -32,8 +33,8 @@ var (
 	// is the deterministic path for filling those checks.
 	ErrConvergenceChecksRequired = errors.New("workitems: convergence checks required")
 	// ErrXylemBudgetExhausted is returned after the service has recorded a
-	// structured xylem.exhausted event and routed the parent item through its
-	// escalation rule. No requested child is created for the exhausted spawn.
+	// structured xylem.exhausted event and routed the affected item through
+	// its escalation rule. The requested over-budget action is not appended.
 	ErrXylemBudgetExhausted = errors.New("workitems: xylem budget exhausted")
 )
 
@@ -228,11 +229,11 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, in UpdateMet
 		return domain.WorkItem{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	current, err := scanWorkItem(ctx, tx, id)
+	current, err := scanWorkItemForUpdate(ctx, tx, id)
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
-	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+	spec := events.Spec{
 		SubjectKind:   domain.SubjectWorkItem,
 		SubjectID:     id,
 		Kind:          domain.EventWorkItemMetadataUpdated,
@@ -249,8 +250,16 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, in UpdateMet
 				"human_review_status":          humanReview,
 			},
 		},
-	}); err != nil {
+	}
+	exhausted, budgetErr, err := s.appendWorkItemEventWithRateBudget(ctx, tx, current, spec, "", in.Actor)
+	if err != nil {
 		return domain.WorkItem{}, err
+	}
+	if exhausted {
+		if err := tx.Commit(ctx); err != nil {
+			return domain.WorkItem{}, err
+		}
+		return domain.WorkItem{}, budgetErr
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.WorkItem{}, err
@@ -267,7 +276,7 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 		return domain.WorkItem{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	current, err := scanWorkItem(ctx, tx, id)
+	current, err := scanWorkItemForUpdate(ctx, tx, id)
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
@@ -289,7 +298,7 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 			return domain.WorkItem{}, budgetErr
 		}
 	}
-	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+	spec := events.Spec{
 		SubjectKind:   domain.SubjectWorkItem,
 		SubjectID:     id,
 		Kind:          domain.EventWorkItemTransitioned,
@@ -301,8 +310,16 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 			"to":     to,
 			"reason": reason,
 		},
-	}); err != nil {
+	}
+	exhausted, budgetErr, err := s.appendWorkItemEventWithRateBudget(ctx, tx, current, spec, "", actor)
+	if err != nil {
 		return domain.WorkItem{}, err
+	}
+	if exhausted {
+		if err := tx.Commit(ctx); err != nil {
+			return domain.WorkItem{}, err
+		}
+		return domain.WorkItem{}, budgetErr
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.WorkItem{}, err
@@ -336,23 +353,32 @@ func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind strin
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := scanWorkItem(ctx, tx, id); err != nil {
+	current, err := scanWorkItemForUpdate(ctx, tx, id)
+	if err != nil {
 		return err
 	}
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{
+	eventPayload := map[string]any{
+		"inner_kind": innerKind,
+		"inner":      payload,
+	}
+	spec := events.Spec{
 		SubjectKind:   domain.SubjectWorkItem,
 		SubjectID:     id,
 		Kind:          domain.EventWorkItemEventAppended,
 		Source:        sourceForActor(actor),
 		ActorTokenID:  &actor.ID,
 		Discriminator: eventDiscriminator(ctx),
-		Payload: map[string]any{
-			"inner_kind": innerKind,
-			"inner":      payload,
-		},
-	})
+		Payload:       eventPayload,
+	}
+	exhausted, budgetErr, err := s.appendWorkItemEventWithRateBudget(ctx, tx, current, spec, innerKind, actor)
 	if err != nil {
 		return err
+	}
+	if exhausted {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return budgetErr
 	}
 	return tx.Commit(ctx)
 }
@@ -408,6 +434,14 @@ type concurrentRunningBudget struct {
 	Max            int
 	Source         string
 	Cultivar       string
+	EscalationRule domain.EscalationRule
+}
+
+type eventRateBudget struct {
+	Max            int
+	Source         string
+	Cultivar       string
+	Class          string
 	EscalationRule domain.EscalationRule
 }
 
@@ -579,6 +613,125 @@ func (s *Service) resolveConcurrentRunningBudget(ctx context.Context, tx pgx.Tx,
 	return budget, nil
 }
 
+func (s *Service) appendWorkItemEventWithRateBudget(ctx context.Context, tx pgx.Tx, item domain.WorkItem, spec events.Spec, attemptedInnerKind string, actor domain.Token) (bool, error, error) {
+	eventID, err := events.DeterministicID(spec)
+	if err != nil {
+		return false, nil, err
+	}
+	exists, err := eventExistsByID(ctx, tx, eventID)
+	if err != nil {
+		return false, nil, err
+	}
+	if exists {
+		return false, nil, nil
+	}
+	class, ok := feed.ClassifyEvent(spec.Kind, spec.Payload)
+	if !ok {
+		return false, nil, fmt.Errorf("workitems: classify event kind %q for xylem budget", spec.Kind)
+	}
+	exhausted, budgetErr, err := s.enforceEventRateBudget(ctx, tx, item, eventID, spec.Kind, attemptedInnerKind, class, actor)
+	if err != nil {
+		return false, nil, err
+	}
+	if exhausted {
+		return true, budgetErr, nil
+	}
+	if _, _, err := s.writer.Append(ctx, tx, spec); err != nil {
+		return false, nil, err
+	}
+	return false, nil, nil
+}
+
+func (s *Service) enforceEventRateBudget(ctx context.Context, tx pgx.Tx, item domain.WorkItem, attemptedEventID uuid.UUID, attemptedKind string, attemptedInnerKind string, class string, actor domain.Token) (bool, error, error) {
+	budget, err := s.resolveEventRateBudget(ctx, tx, item.ID, class)
+	if err != nil {
+		return false, nil, err
+	}
+	current, err := countedEventsInLastHourByClass(ctx, tx, item.ID, class)
+	if err != nil {
+		return false, nil, err
+	}
+	if current < budget.Max {
+		return false, nil, nil
+	}
+	payload := map[string]any{
+		"budget":                       "max_events_per_item_per_hour_by_class",
+		"taxonomy_class":               class,
+		"current_events":               current,
+		"max_events_per_item_per_hour": budget.Max,
+		"window_seconds":               3600,
+		"budget_source":                budget.Source,
+		"cultivar":                     budget.Cultivar,
+		"escalation_rule":              string(budget.EscalationRule),
+		"attempted_event_id":           attemptedEventID,
+		"attempted_event_kind":         attemptedKind,
+		"attempted_inner_kind":         attemptedInnerKind,
+		"actor_token_id":               actor.ID,
+		"work_item_state":              item.State,
+		"count_scope":                  "same_work_item_same_taxonomy_class_last_hour",
+	}
+	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    item.ID,
+		Kind:         domain.EventXylemExhausted,
+		Source:       sourceForActor(actor),
+		ActorTokenID: &actor.ID,
+		Payload:      payload,
+	}); err != nil {
+		return false, nil, err
+	}
+	switch budget.EscalationRule {
+	case domain.EscalationRuleHandToHuman:
+	default:
+		return false, nil, fmt.Errorf("workitems: unknown escalation rule %q", budget.EscalationRule)
+	}
+	reason := eventRateBudgetEscalationReason(class)
+	summary := eventRateBudgetEscalationSummary(item, current, budget)
+	if err := s.requestXylemEscalationInTx(ctx, tx, item, reason, summary, actor); err != nil {
+		return false, nil, err
+	}
+	return true, fmt.Errorf("%w: max_events_per_item_per_hour_by_class exhausted for work item %s class %s: current_events=%d max=%d source=%s", ErrXylemBudgetExhausted, item.ID, class, current, budget.Max, budget.Source), nil
+}
+
+func (s *Service) resolveEventRateBudget(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID, class string) (eventRateBudget, error) {
+	meta, err := workItemLaunchMetadata(ctx, tx, workItemID)
+	if err != nil {
+		return eventRateBudget{}, err
+	}
+	rule := meta.EscalationRule
+	if rule == "" {
+		rule = domain.EscalationRuleHandToHuman
+	}
+	if !rule.Valid() {
+		return eventRateBudget{}, fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+	}
+	defaults := safety.DefaultPolicy().MaxEventsPerItemPerHourByClass
+	max := defaults[class]
+	if max <= 0 {
+		return eventRateBudget{}, fmt.Errorf("workitems: missing safety fallback for taxonomy class %q", class)
+	}
+	budget := eventRateBudget{
+		Max:            max,
+		Source:         "safety_policy",
+		Class:          class,
+		EscalationRule: rule,
+	}
+	cultivarRef := strings.TrimSpace(meta.Cultivar)
+	if cultivarRef == "" {
+		return budget, nil
+	}
+	item, err := registry.NewService(s.pool, nil).GetCultivarRef(ctx, cultivarRef)
+	if err != nil {
+		return eventRateBudget{}, err
+	}
+	budget.Cultivar = fmt.Sprintf("%s@%d", item.Name, item.Version)
+	if item.Xylem.MaxEventsPerItemPerHourByClass[class] > 0 {
+		budget.Max = item.Xylem.MaxEventsPerItemPerHourByClass[class]
+		budget.Source = "cultivar:" + budget.Cultivar
+	}
+	return budget, nil
+}
+
 func workItemLaunchMetadata(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID) (createdLaunchMetadata, error) {
 	var raw []byte
 	err := tx.QueryRow(ctx, `
@@ -620,6 +773,35 @@ func countedChildCount(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) (int,
 	`, parentID, domain.EventEscalationRequested).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("workitems: count children for xylem budget: %w", err)
+	}
+	return count, nil
+}
+
+func countedEventsInLastHourByClass(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID, class string) (int, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT kind, payload
+		FROM events
+		WHERE subject_kind = $1
+		  AND subject_id = $2
+		  AND occurred_at >= now() - interval '1 hour'
+	`, domain.SubjectWorkItem, workItemID)
+	if err != nil {
+		return 0, fmt.Errorf("workitems: count events for xylem budget: %w", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var item feed.Item
+		if err := rows.Scan(&item.Kind, &item.Payload); err != nil {
+			return 0, fmt.Errorf("workitems: scan event for xylem budget: %w", err)
+		}
+		got, ok := feed.ClassifyItem(item)
+		if ok && got == class {
+			count++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("workitems: count events for xylem budget: %w", err)
 	}
 	return count, nil
 }
@@ -694,6 +876,30 @@ func concurrentRunningBudgetEscalationSummary(item domain.WorkItem, current int,
 		budget.Max,
 		budget.Source,
 	)
+}
+
+func eventRateBudgetEscalationReason(class string) string {
+	return "xylem budget exhausted: max_events_per_item_per_hour_by_class:" + class
+}
+
+func eventRateBudgetEscalationSummary(item domain.WorkItem, current int, budget eventRateBudget) string {
+	return fmt.Sprintf(
+		"Work item %s (%s) exhausted max_events_per_item_per_hour_by_class for class %s: current_events=%d max=%d window_seconds=3600 source=%s",
+		item.ID,
+		item.Title,
+		budget.Class,
+		current,
+		budget.Max,
+		budget.Source,
+	)
+}
+
+func eventExistsByID(ctx context.Context, tx pgx.Tx, eventID uuid.UUID) (bool, error) {
+	var ok bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE id = $1)`, eventID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("workitems: check existing event: %w", err)
+	}
+	return ok, nil
 }
 
 func (s *Service) requestXylemEscalationInTx(ctx context.Context, tx pgx.Tx, parent domain.WorkItem, reason string, summary string, actor domain.Token) error {

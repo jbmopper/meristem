@@ -65,6 +65,9 @@ payload:
     max_depth: 1
     max_children_per_item: 0                  -- optional; 0/absent uses safety policy fallback
     max_concurrent_running_items_per_token: 0 -- optional; 0/absent uses safety policy fallback
+    max_events_per_item_per_hour_by_class:    -- optional; omitted/0 class entries use fallback
+      progress: 0
+      decision: 0
   phloem:     "projection:work-item-brief"    -- string ref until R6 lands; resolved ref after
   description: "<free text>"                  -- narrative
 ```

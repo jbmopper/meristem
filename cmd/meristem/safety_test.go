@@ -38,6 +38,7 @@ func TestRunSafetyCheckPrintsPolicy(t *testing.T) {
 		`"max_request_body_bytes":`,
 		`"max_children_per_item":`,
 		`"max_concurrent_running_items_per_token":`,
+		`"max_events_per_item_per_hour_by_class":`,
 		`"max_delegation_depth":`,
 		`"patience_seconds":`,
 	} {

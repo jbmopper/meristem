@@ -69,6 +69,43 @@ func TestCultivarDefinedProjectorValidatesPayload(t *testing.T) {
 	}
 }
 
+func TestCultivarDefinedProjectorValidatesEventRateClasses(t *testing.T) {
+	ev := domain.Event{
+		ID:          uuid.New(),
+		SubjectKind: domain.SubjectCultivar,
+		SubjectID:   CultivarSubjectID("bad-event-rate-worker"),
+		Kind:        domain.EventCultivarDefined,
+		Source:      domain.SourceHuman,
+		OccurredAt:  time.Unix(0, 0),
+		Payload: map[string]any{
+			"name":      "bad-event-rate-worker",
+			"version":   1,
+			"rootstock": false,
+			"tropism": map[string]any{
+				"name":    "checklist-all",
+				"version": 1,
+			},
+			"profile": map[string]any{
+				"briefing":        "briefings/bad-event-rate.md",
+				"scopes_template": []string{"work_items.read"},
+			},
+			"xylem": map[string]any{
+				"max_attempts":     1,
+				"max_wall_seconds": 10,
+				"max_depth":        1,
+				"max_events_per_item_per_hour_by_class": map[string]any{
+					"admin": 1,
+				},
+			},
+			"phloem": "projection:bad",
+		},
+	}
+	err := (cultivarDefinedProjector{}).Apply(context.Background(), nil, ev)
+	if err == nil || !strings.Contains(err.Error(), "max_events_per_item_per_hour_by_class[admin]") {
+		t.Fatalf("expected event-rate class validation before tx use, got %v", err)
+	}
+}
+
 func TestSubjectIDsAreStable(t *testing.T) {
 	if TropismSubjectID("checklist-all") != uuid.NewSHA1(subjectNamespace, []byte("tropism|checklist-all")) {
 		t.Fatal("tropism subject id derivation drifted")

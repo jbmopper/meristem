@@ -28,6 +28,9 @@ func TestDefaultPolicyValidates(t *testing.T) {
 	if p.MaxConcurrentRunningPerToken <= 0 {
 		t.Fatal("default policy must bound concurrent running items per token")
 	}
+	if len(p.MaxEventsPerItemPerHourByClass) == 0 {
+		t.Fatal("default policy must bound per-item event rates by class")
+	}
 }
 
 func TestValidateRequiresEveryNonTerminalBudget(t *testing.T) {
@@ -102,6 +105,57 @@ func TestValidateRejectsNonPositiveConcurrentRunningPerToken(t *testing.T) {
 		if err := p.Validate(); err == nil {
 			t.Fatalf("expected max_concurrent_running_items_per_token=%d to fail validation", value)
 		}
+	}
+}
+
+func TestValidateRejectsInvalidEventRateBudgets(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(map[string]int)
+		want string
+	}{
+		{
+			name: "missing class",
+			edit: func(m map[string]int) {
+				delete(m, "progress")
+			},
+			want: "progress",
+		},
+		{
+			name: "non-positive class",
+			edit: func(m map[string]int) {
+				m["decision"] = 0
+			},
+			want: "decision",
+		},
+		{
+			name: "admin class",
+			edit: func(m map[string]int) {
+				m["admin"] = 1
+			},
+			want: "admin",
+		},
+		{
+			name: "unknown class",
+			edit: func(m map[string]int) {
+				m["mystery"] = 1
+			},
+			want: "mystery",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := DefaultPolicy()
+			tc.edit(p.MaxEventsPerItemPerHourByClass)
+
+			err := p.Validate()
+			if err == nil {
+				t.Fatal("expected invalid event rate budget to fail validation")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error to contain %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
 

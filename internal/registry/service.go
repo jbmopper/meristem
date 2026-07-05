@@ -16,6 +16,7 @@ import (
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/feed"
 )
 
 var (
@@ -348,6 +349,11 @@ func normalizeCultivarInput(in DefineCultivarInput) (DefineCultivarInput, map[st
 	if in.Xylem.MaxConcurrentRunningPerToken < 0 {
 		return DefineCultivarInput{}, nil, fmt.Errorf("%w: xylem.max_concurrent_running_items_per_token must be >= 0", ErrInvalidPayload)
 	}
+	eventRateBudgets, err := normalizeXylemEventRateBudgets(in.Xylem.MaxEventsPerItemPerHourByClass)
+	if err != nil {
+		return DefineCultivarInput{}, nil, err
+	}
+	in.Xylem.MaxEventsPerItemPerHourByClass = eventRateBudgets
 	in.Phloem = strings.TrimSpace(in.Phloem)
 	if in.Phloem == "" {
 		return DefineCultivarInput{}, nil, fmt.Errorf("%w: phloem is required", ErrInvalidPayload)
@@ -367,6 +373,33 @@ func normalizeCultivarInput(in DefineCultivarInput) (DefineCultivarInput, map[st
 		"description": in.Description,
 	}
 	return in, payload, nil
+}
+
+func normalizeXylemEventRateBudgets(in map[string]int) (map[string]int, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]int, len(in))
+	for rawClass, max := range in {
+		class := strings.TrimSpace(rawClass)
+		if class == "" {
+			return nil, fmt.Errorf("%w: xylem.max_events_per_item_per_hour_by_class contains blank class", ErrInvalidPayload)
+		}
+		if !feed.ProjectableKindClass(class) {
+			return nil, fmt.Errorf("%w: xylem.max_events_per_item_per_hour_by_class[%s] is not a projectable kind class", ErrInvalidPayload, class)
+		}
+		if max < 0 {
+			return nil, fmt.Errorf("%w: xylem.max_events_per_item_per_hour_by_class[%s] must be >= 0", ErrInvalidPayload, class)
+		}
+		if max == 0 {
+			continue
+		}
+		out[class] = max
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func normalizeName(name string) (string, error) {
