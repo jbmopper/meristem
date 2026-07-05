@@ -119,7 +119,8 @@ inbox. The metronome and tripwire are deterministic; the hands are agents.
 
 Convergence checks:
 - Integration test: an item exceeding its patience budget is transitioned /
-  escalated per its declared rule within one tick, with full attribution.
+  escalated per its declared rule within one tick, with full attribution;
+  `patience.breached` records the resolved budget source and escalation rule.
 - Integration test: the reconciler appends only event kinds from its
   mechanical allowlist (no free-form payloads).
 - Soak: reconciler runs against a seeded backlog for a bounded interval;

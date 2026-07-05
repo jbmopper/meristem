@@ -604,6 +604,15 @@ func (s *Server) toolWorkItemsCreate() Tool {
 			"human_review_status": schemaString(
 				"Optional human review status (blocked, waved_through, approved). Defaults to waved_through.",
 			),
+			"cultivar": schemaString(
+				"Optional launch cultivar reference, normalized to name@version.",
+			),
+			"patience_budget_seconds": schemaInt(
+				"Optional explicit patience budget in seconds. Zero means use cultivar or policy fallback.",
+			),
+			"escalation_rule": schemaString(
+				"Optional timeout escalation rule. Currently hand_to_human.",
+			),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
@@ -615,11 +624,17 @@ func (s *Server) toolWorkItemsCreate() Tool {
 				State                      string   `json:"state"`
 				SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
 				HumanReviewStatus          string   `json:"human_review_status"`
+				Cultivar                   string   `json:"cultivar"`
+				PatienceBudgetSeconds      int      `json:"patience_budget_seconds"`
+				EscalationRule             string   `json:"escalation_rule"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
 			if err := validateWorkItemCreateArgs(args.Title, args.State, args.SuggestedConvergenceChecks, args.HumanReviewStatus); err != nil {
+				return nil, err
+			}
+			if err := validateWorkItemLaunchArgs(args.PatienceBudgetSeconds, args.EscalationRule); err != nil {
 				return nil, err
 			}
 			if err := s.canCreateWorkItem(ctx, actor); err != nil {
@@ -631,6 +646,9 @@ func (s *Server) toolWorkItemsCreate() Tool {
 				State:                      domain.WorkItemState(args.State),
 				SuggestedConvergenceChecks: args.SuggestedConvergenceChecks,
 				HumanReviewStatus:          domain.HumanReviewStatus(args.HumanReviewStatus),
+				Cultivar:                   args.Cultivar,
+				PatienceBudgetSeconds:      args.PatienceBudgetSeconds,
+				EscalationRule:             domain.EscalationRule(args.EscalationRule),
 				Actor:                      actor,
 			})
 			if err != nil {
@@ -660,6 +678,15 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 			"human_review_status": schemaString(
 				"Optional human review status (blocked, waved_through, approved). Defaults to waved_through.",
 			),
+			"cultivar": schemaString(
+				"Optional launch cultivar reference, normalized to name@version.",
+			),
+			"patience_budget_seconds": schemaInt(
+				"Optional explicit patience budget in seconds. Zero means use cultivar or policy fallback.",
+			),
+			"escalation_rule": schemaString(
+				"Optional timeout escalation rule. Currently hand_to_human.",
+			),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
@@ -672,11 +699,17 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 				State                      string   `json:"state"`
 				SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
 				HumanReviewStatus          string   `json:"human_review_status"`
+				Cultivar                   string   `json:"cultivar"`
+				PatienceBudgetSeconds      int      `json:"patience_budget_seconds"`
+				EscalationRule             string   `json:"escalation_rule"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
 			}
 			if err := validateWorkItemCreateArgs(args.Title, args.State, args.SuggestedConvergenceChecks, args.HumanReviewStatus); err != nil {
+				return nil, err
+			}
+			if err := validateWorkItemLaunchArgs(args.PatienceBudgetSeconds, args.EscalationRule); err != nil {
 				return nil, err
 			}
 			parent, err := parseUUID(args.ParentID, "parent_id")
@@ -692,6 +725,9 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 				State:                      domain.WorkItemState(args.State),
 				SuggestedConvergenceChecks: args.SuggestedConvergenceChecks,
 				HumanReviewStatus:          domain.HumanReviewStatus(args.HumanReviewStatus),
+				Cultivar:                   args.Cultivar,
+				PatienceBudgetSeconds:      args.PatienceBudgetSeconds,
+				EscalationRule:             domain.EscalationRule(args.EscalationRule),
 				Actor:                      actor,
 			})
 			if err != nil {
@@ -1170,6 +1206,16 @@ func validateWorkItemCreateArgs(title, state string, checks []string, humanRevie
 		return err
 	}
 	return validateWorkItemMetadataArgs(checks, humanReview)
+}
+
+func validateWorkItemLaunchArgs(patienceBudgetSeconds int, escalationRule string) error {
+	if patienceBudgetSeconds < 0 {
+		return replayableToolErr(errors.New("workitems: patience_budget_seconds must be >= 0"))
+	}
+	if escalationRule != "" && !domain.EscalationRule(escalationRule).Valid() {
+		return replayableToolErr(fmt.Errorf("workitems: invalid escalation_rule %q", escalationRule))
+	}
+	return nil
 }
 
 func validateWorkItemMetadataArgs(checks []string, humanReview string) error {

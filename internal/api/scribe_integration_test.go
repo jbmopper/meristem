@@ -151,6 +151,7 @@ func TestScribeProposalInvalidInputsRecordRejectVerdicts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create system token: %v", err)
 	}
+	seedAPIScribeCultivar(t, ctx, pool, writer, systemResult.Token)
 	server := New(pool, nil)
 	workSvc := workitems.NewService(pool, writer)
 

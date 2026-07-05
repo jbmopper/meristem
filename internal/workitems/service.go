@@ -14,6 +14,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/registry"
 )
 
 var (
@@ -47,6 +48,8 @@ type CreateInput struct {
 	SuggestedConvergenceChecks []string
 	HumanReviewStatus          domain.HumanReviewStatus
 	Cultivar                   string
+	PatienceBudgetSeconds      int
+	EscalationRule             domain.EscalationRule
 }
 
 type UpdateMetadataInput struct {
@@ -74,6 +77,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (domain.WorkItem, 
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
+	createdPayload, err := buildCreatedPayload(ctx, s.pool, in, state, checks, humanReview)
+	if err != nil {
+		return domain.WorkItem{}, err
+	}
 	id := newSubjectID(ctx, "work_item")
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -86,13 +93,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (domain.WorkItem, 
 		Kind:         domain.EventWorkItemCreated,
 		Source:       sourceForActor(in.Actor),
 		ActorTokenID: &in.Actor.ID,
-		Payload: map[string]any{
-			"title":                        in.Title,
-			"body":                         in.Body,
-			"state":                        state,
-			"suggested_convergence_checks": checks,
-			"human_review_status":          humanReview,
-		},
+		Payload:      createdPayload,
 	}); err != nil {
 		return domain.WorkItem{}, err
 	}
@@ -130,6 +131,10 @@ func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.U
 	if err != nil {
 		return domain.WorkItem{}, false, err
 	}
+	createdPayload, err := buildCreatedPayload(ctx, s.pool, in, state, checks, humanReview)
+	if err != nil {
+		return domain.WorkItem{}, false, err
+	}
 	if childID == uuid.Nil {
 		return domain.WorkItem{}, false, fmt.Errorf("workitems: child id is required")
 	}
@@ -153,16 +158,6 @@ func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.U
 	}
 	if cycle {
 		return domain.WorkItem{}, false, ErrRelationCycle
-	}
-	createdPayload := map[string]any{
-		"title":                        in.Title,
-		"body":                         in.Body,
-		"state":                        state,
-		"suggested_convergence_checks": checks,
-		"human_review_status":          humanReview,
-	}
-	if strings.TrimSpace(in.Cultivar) != "" {
-		createdPayload["cultivar"] = strings.TrimSpace(in.Cultivar)
 	}
 	_, createdFresh, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectWorkItem,
@@ -360,6 +355,38 @@ func sourceForActor(actor domain.Token) domain.Source {
 	return domain.SourceHuman
 }
 
+func buildCreatedPayload(ctx context.Context, pool *pgxpool.Pool, in CreateInput, state domain.WorkItemState, checks []string, humanReview domain.HumanReviewStatus) (map[string]any, error) {
+	payload := map[string]any{
+		"title":                        in.Title,
+		"body":                         in.Body,
+		"state":                        state,
+		"suggested_convergence_checks": checks,
+		"human_review_status":          humanReview,
+	}
+	cultivarRef := strings.TrimSpace(in.Cultivar)
+	if cultivarRef != "" {
+		item, err := registry.NewService(pool, nil).GetCultivarRef(ctx, cultivarRef)
+		if err != nil {
+			return nil, err
+		}
+		payload["cultivar"] = fmt.Sprintf("%s@%d", item.Name, item.Version)
+	}
+	if in.PatienceBudgetSeconds < 0 {
+		return nil, fmt.Errorf("workitems: patience_budget_seconds must be >= 0")
+	}
+	if in.PatienceBudgetSeconds > 0 {
+		payload["patience_budget_seconds"] = in.PatienceBudgetSeconds
+	}
+	rule, err := normalizeEscalationRule(in.EscalationRule)
+	if err != nil {
+		return nil, err
+	}
+	if rule != "" {
+		payload["escalation_rule"] = string(rule)
+	}
+	return payload, nil
+}
+
 func normalizeSuggestedConvergenceChecks(in []string) ([]string, error) {
 	out := make([]string, 0, len(in))
 	for i, check := range in {
@@ -391,6 +418,16 @@ func normalizeHumanReviewStatus(status domain.HumanReviewStatus) (domain.HumanRe
 		return "", fmt.Errorf("workitems: invalid human_review_status %q", status)
 	}
 	return status, nil
+}
+
+func normalizeEscalationRule(rule domain.EscalationRule) (domain.EscalationRule, error) {
+	if rule == "" {
+		return "", nil
+	}
+	if !rule.Valid() {
+		return "", fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+	}
+	return rule, nil
 }
 
 // eventDiscriminator distinguishes distinct logical actions whose event

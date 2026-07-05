@@ -370,6 +370,161 @@ func TestScanOnceBlockedHumanReviewBreachesButDoesNotEscalate(t *testing.T) {
 	}
 }
 
+func TestScanOnceUsesExplicitLaunchPatienceRule(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-explicit-patience-rule")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                 "explicit launch budget",
+		State:                 domain.WorkItemCaptured,
+		PatienceBudgetSeconds: 60,
+		EscalationRule:        domain.EscalationRuleHandToHuman,
+		Actor:                 systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	stateEnteredAt := now.Add(-2 * time.Minute)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, stateEnteredAt)
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: 24 * time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	if result.PatienceEscalationsRequested != 1 {
+		t.Fatalf("patience escalations requested = %d, want 1", result.PatienceEscalationsRequested)
+	}
+	payload := patiencePayloadForSubject(t, ctx, pool, item.ID)
+	if payload.BudgetSeconds != 60 || payload.BudgetSource != budgetSourceItemMetadata {
+		t.Fatalf("payload budget = %ds/%s, want 60s/%s", payload.BudgetSeconds, payload.BudgetSource, budgetSourceItemMetadata)
+	}
+	if payload.EscalationRule != string(domain.EscalationRuleHandToHuman) {
+		t.Fatalf("escalation_rule = %q, want %q", payload.EscalationRule, domain.EscalationRuleHandToHuman)
+	}
+	if payload.StateEnteredAtUnix != stateEnteredAt.Unix() {
+		t.Fatalf("state_entered_at_unix = %d, want %d", payload.StateEnteredAtUnix, stateEnteredAt.Unix())
+	}
+}
+
+func TestScanOnceUsesCultivarXylemPatienceBudget(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-cultivar-patience-rule")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	seedFastWorkerCultivar(t, ctx, pool, writer, systemTok.Token, 60)
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:    "cultivar launch budget",
+		State:    domain.WorkItemCaptured,
+		Cultivar: "fast-worker@1",
+		Actor:    systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 7, 13, 0, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Minute))
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: 24 * time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	payload := patiencePayloadForSubject(t, ctx, pool, item.ID)
+	if payload.BudgetSeconds != 60 || payload.BudgetSource != budgetSourceCultivar {
+		t.Fatalf("payload budget = %ds/%s, want 60s/%s", payload.BudgetSeconds, payload.BudgetSource, budgetSourceCultivar)
+	}
+	if payload.Cultivar != "fast-worker@1" {
+		t.Fatalf("cultivar = %q, want fast-worker@1", payload.Cultivar)
+	}
+	if payload.EscalationRule != string(domain.EscalationRuleHandToHuman) {
+		t.Fatalf("escalation_rule = %q, want %q", payload.EscalationRule, domain.EscalationRuleHandToHuman)
+	}
+}
+
+func TestScanOnceRecordsPolicyFallbackPatienceRule(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-policy-patience-rule")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title: "policy fallback budget",
+		State: domain.WorkItemCaptured,
+		Actor: systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Minute))
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: time.Minute,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	payload := patiencePayloadForSubject(t, ctx, pool, item.ID)
+	if payload.BudgetSeconds != 60 || payload.BudgetSource != budgetSourcePolicy {
+		t.Fatalf("payload budget = %ds/%s, want 60s/%s", payload.BudgetSeconds, payload.BudgetSource, budgetSourcePolicy)
+	}
+	if payload.EscalationRule != string(domain.EscalationRuleHandToHuman) {
+		t.Fatalf("escalation_rule = %q, want %q", payload.EscalationRule, domain.EscalationRuleHandToHuman)
+	}
+}
+
 func TestScanOnceSpawnsDeterministicScribeChildForChecklessItem(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -491,6 +646,7 @@ func TestScanDispatchRequestsEligibleItems(t *testing.T) {
 		t.Fatalf("create system token: %v", err)
 	}
 	seedChecklistWorkerCultivar(t, ctx, pool, writer, systemTok.Token)
+	seedScribeCultivar(t, ctx, pool, writer, systemTok.Token)
 	service := workitems.NewService(pool, writer)
 	eligibleDefault, err := service.Create(ctx, workitems.CreateInput{
 		Title:                      "eligible default dispatch",
@@ -1256,6 +1412,71 @@ func seedChecklistWorkerCultivar(t *testing.T, ctx context.Context, pool *pgxpoo
 	if err != nil {
 		t.Fatalf("define checklist worker cultivar: %v", err)
 	}
+}
+
+func seedFastWorkerCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, maxWallSeconds int) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "fast-checklist",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "fast checklist test tropism",
+	})
+	if err != nil {
+		t.Fatalf("define fast tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "fast-worker",
+		Version:   1,
+		Rootstock: false,
+		Tropism:   registry.TropismRef{Name: "fast-checklist", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/fast-worker.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 3, MaxWallSeconds: maxWallSeconds, MaxDepth: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "fast worker test cultivar",
+	})
+	if err != nil {
+		t.Fatalf("define fast cultivar: %v", err)
+	}
+}
+
+type patiencePayload struct {
+	State              string `json:"state"`
+	BudgetSeconds      int64  `json:"budget_seconds"`
+	BudgetSource       string `json:"budget_source"`
+	EscalationRule     string `json:"escalation_rule"`
+	StateEnteredAtUnix int64  `json:"state_entered_at_unix"`
+	Cultivar           string `json:"cultivar"`
+}
+
+func patiencePayloadForSubject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) patiencePayload {
+	t.Helper()
+	var raw []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT payload
+		FROM events
+		WHERE subject_kind = $1 AND subject_id = $2 AND kind = $3
+	`, domain.SubjectWorkItem, id, domain.EventPatienceBreached).Scan(&raw); err != nil {
+		t.Fatalf("patience payload for %s: %v", id, err)
+	}
+	var payload patiencePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode patience payload: %v", err)
+	}
+	return payload
 }
 
 type dispatchPayload struct {

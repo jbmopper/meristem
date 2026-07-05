@@ -246,6 +246,21 @@ func (s HumanReviewStatus) Valid() bool {
 	return false
 }
 
+type EscalationRule string
+
+const (
+	EscalationRuleHandToHuman EscalationRule = "hand_to_human"
+)
+
+func (r EscalationRule) Valid() bool {
+	switch r {
+	case EscalationRuleHandToHuman:
+		return true
+	default:
+		return false
+	}
+}
+
 // WorkItem is the current-state projection for work_items.
 type WorkItem struct {
 	ID                         uuid.UUID

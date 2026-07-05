@@ -175,6 +175,44 @@ func scanCultivar(row rowScanner) (Cultivar, error) {
 	return item, nil
 }
 
+func scanCultivarDefinitionEvent(row rowScanner) (Cultivar, error) {
+	var (
+		eventID   uuid.UUID
+		payload   []byte
+		item      Cultivar
+		definedBy uuid.NullUUID
+		source    string
+	)
+	if err := row.Scan(&eventID, &payload, &item.DefinedAt, &definedBy, &source); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Cultivar{}, ErrUnknownCultivar
+		}
+		return Cultivar{}, fmt.Errorf("registry: scan cultivar definition event: %w", err)
+	}
+	var in DefineCultivarInput
+	if err := json.Unmarshal(payload, &in); err != nil {
+		return Cultivar{}, fmt.Errorf("registry: decode cultivar definition event: %w", err)
+	}
+	normalized, _, err := normalizeCultivarInput(in)
+	if err != nil {
+		return Cultivar{}, fmt.Errorf("registry: invalid cultivar definition event: %w", err)
+	}
+	item.Name = normalized.Name
+	item.Version = normalized.Version
+	item.Rootstock = normalized.Rootstock
+	item.Tropism = normalized.Tropism
+	item.Profile = normalized.Profile
+	item.Xylem = normalized.Xylem
+	item.Phloem = normalized.Phloem
+	item.Description = normalized.Description
+	item.EventID = eventID
+	if definedBy.Valid {
+		item.DefinedBy = &definedBy.UUID
+	}
+	item.Source = source
+	return item, nil
+}
+
 func sameTropism(current Tropism, in DefineTropismInput) bool {
 	if current.Name != in.Name ||
 		current.Version != in.Version ||

@@ -6,8 +6,8 @@
 // Scope of this slice:
 //
 //   - One-shot scan over work_items in non-terminal states (ScanOnce).
-//   - Per-state patience budgets (Budgets), with sane defaults from
-//     DefaultBudgets so callers can run without configuration.
+//   - Patience rule resolution from launch metadata, cultivar xylem, or
+//     the active policy profile's per-state fallback budgets.
 //   - One patience.breached event per (work_item, state-epoch) breach
 //     observed, followed by a deterministic human escalation for that epoch.
 //   - A narrow convergence pass for running work_items whose
@@ -115,6 +115,10 @@ type Candidate struct {
 	State             domain.WorkItemState
 	StateEnteredAt    time.Time
 	HumanReviewStatus domain.HumanReviewStatus
+	Budget            time.Duration
+	BudgetSource      string
+	EscalationRule    domain.EscalationRule
+	Cultivar          string
 }
 
 // Breach is the per-row outcome of EvaluateBreaches: a candidate that
@@ -128,25 +132,24 @@ type Breach struct {
 }
 
 // EvaluateBreaches is the pure breach decision: given the current time, a
-// list of candidates, and the budget map, return one Breach per candidate
-// whose dwell time exceeds its state's budget. Candidates whose state has
-// no budget (or a non-positive one) are skipped silently.
+// list of candidates with resolved patience rules, return one Breach per
+// candidate whose dwell time exceeds its budget. Candidates whose resolved
+// budget is non-positive are skipped silently.
 //
 // Order of returned breaches matches the input order. Stable input order +
 // deterministic event_id means a re-scan with the same candidates yields
 // the same emit sequence.
-func EvaluateBreaches(now time.Time, candidates []Candidate, budgets Budgets) []Breach {
+func EvaluateBreaches(now time.Time, candidates []Candidate) []Breach {
 	out := make([]Breach, 0, len(candidates))
 	for _, c := range candidates {
-		budget, ok := budgets.ByState[c.State]
-		if !ok || budget <= 0 {
+		if c.Budget <= 0 {
 			continue
 		}
 		age := now.Sub(c.StateEnteredAt)
-		if age <= budget {
+		if age <= c.Budget {
 			continue
 		}
-		out = append(out, Breach{Candidate: c, Budget: budget, Age: age})
+		out = append(out, Breach{Candidate: c, Budget: c.Budget, Age: age})
 	}
 	return out
 }
@@ -322,37 +325,13 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	out.ConvergenceRetries = convergenceResult.ConvergenceRetries
 	out.ConvergenceEscalations = convergenceResult.ConvergenceEscalations
 
-	states := w.budgets.states()
-	if len(states) > 0 {
-		rows, err := w.pool.Query(ctx, `
-			SELECT id, state, state_entered_at, human_review_status
-			FROM work_items
-			WHERE state = ANY($1::text[])
-			ORDER BY state_entered_at ASC
-		`, states)
-		if err != nil {
-			return Result{}, fmt.Errorf("worker: query work_items: %w", err)
-		}
-		var candidates []Candidate
-		for rows.Next() {
-			var c Candidate
-			var st string
-			var review string
-			if err := rows.Scan(&c.ID, &st, &c.StateEnteredAt, &review); err != nil {
-				rows.Close()
-				return Result{}, fmt.Errorf("worker: scan work_items row: %w", err)
-			}
-			c.State = domain.WorkItemState(st)
-			c.HumanReviewStatus = domain.HumanReviewStatus(review)
-			candidates = append(candidates, c)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return Result{}, fmt.Errorf("worker: iterate work_items: %w", err)
-		}
-
+	candidates, err := w.breachCandidates(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(candidates) > 0 {
 		out.Scanned = len(candidates)
-		for _, breach := range EvaluateBreaches(now, candidates, w.budgets) {
+		for _, breach := range EvaluateBreaches(now, candidates) {
 			fresh, err := w.emitBreach(ctx, breach)
 			if err != nil {
 				return out, fmt.Errorf("worker: emit breach for %s: %w", breach.Candidate.ID, err)
@@ -423,7 +402,10 @@ func (w *Worker) emitBreach(ctx context.Context, b Breach) (bool, error) {
 		Payload: map[string]any{
 			"state":                 string(b.Candidate.State),
 			"budget_seconds":        int64(b.Budget.Seconds()),
+			"budget_source":         b.Candidate.BudgetSource,
+			"escalation_rule":       string(b.Candidate.EscalationRule),
 			"state_entered_at_unix": b.Candidate.StateEnteredAt.Unix(),
+			"cultivar":              b.Candidate.Cultivar,
 		},
 	})
 	if err != nil {
@@ -441,6 +423,11 @@ func (w *Worker) emitBreach(ctx context.Context, b Breach) (bool, error) {
 // exclude observed age, so re-scanning the same state epoch converges on the
 // same escalation id instead of creating chatter.
 func (w *Worker) escalateBreach(ctx context.Context, b Breach) (bool, error) {
+	switch b.Candidate.EscalationRule {
+	case domain.EscalationRuleHandToHuman:
+	default:
+		return false, fmt.Errorf("unknown escalation rule %q", b.Candidate.EscalationRule)
+	}
 	actor := domain.Token{
 		ID:     *w.actor,
 		Source: domain.SourceSystem,
@@ -458,17 +445,21 @@ func (w *Worker) escalateBreach(ctx context.Context, b Breach) (bool, error) {
 }
 
 func patienceEscalationReason(b Breach) string {
-	return fmt.Sprintf("patience budget breached: state=%s budget_seconds=%d state_entered_at_unix=%d",
+	return fmt.Sprintf("patience budget breached: state=%s budget_seconds=%d budget_source=%s escalation_rule=%s state_entered_at_unix=%d",
 		b.Candidate.State,
 		int64(b.Budget.Seconds()),
+		b.Candidate.BudgetSource,
+		b.Candidate.EscalationRule,
 		b.Candidate.StateEnteredAt.Unix(),
 	)
 }
 
 func patienceEscalationSummary(b Breach) string {
-	return fmt.Sprintf("Worker metronome observed state %s past its %s patience budget. State epoch: state_entered_at_unix=%d. Declared timeout rule: hand to human by blocking the item and creating this escalation.",
+	return fmt.Sprintf("Worker metronome observed state %s past its %s patience budget (%s). State epoch: state_entered_at_unix=%d. Declared timeout rule: %s.",
 		b.Candidate.State,
 		b.Budget,
+		b.Candidate.BudgetSource,
 		b.Candidate.StateEnteredAt.Unix(),
+		b.Candidate.EscalationRule,
 	)
 }

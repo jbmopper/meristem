@@ -67,6 +67,24 @@ func TestCreate_RejectsInvalidMetadata(t *testing.T) {
 			},
 			want: "invalid human_review_status",
 		},
+		{
+			name: "negative patience budget",
+			in: CreateInput{
+				Title:                 "thing",
+				PatienceBudgetSeconds: -1,
+				Actor:                 testActor(),
+			},
+			want: "patience_budget_seconds must be >= 0",
+		},
+		{
+			name: "invalid escalation rule",
+			in: CreateInput{
+				Title:          "thing",
+				EscalationRule: domain.EscalationRule("wait_forever"),
+				Actor:          testActor(),
+			},
+			want: "invalid escalation_rule",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -92,6 +93,57 @@ func (s *Service) GetCultivar(ctx context.Context, name string) (Cultivar, error
 		return Cultivar{}, fmt.Errorf("%w: no cultivar named %s; consult registry.list", ErrUnknownCultivar, name)
 	}
 	return item, err
+}
+
+func (s *Service) GetCultivarRef(ctx context.Context, ref string) (Cultivar, error) {
+	if s.pool == nil {
+		return Cultivar{}, errors.New("registry: database is not configured")
+	}
+	name, version, err := ParseCultivarRef(ref)
+	if err != nil {
+		return Cultivar{}, err
+	}
+	if version == 0 {
+		return s.GetCultivar(ctx, name)
+	}
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, payload, occurred_at, actor_token_id, source
+		FROM events
+		WHERE subject_kind = $1
+		  AND kind = $2
+		  AND payload->>'name' = $3
+		  AND (payload->>'version')::integer = $4
+		ORDER BY occurred_at DESC, seq DESC
+		LIMIT 1
+	`, domain.SubjectCultivar, domain.EventCultivarDefined, name, version)
+	item, err := scanCultivarDefinitionEvent(row)
+	if errors.Is(err, ErrUnknownCultivar) {
+		return Cultivar{}, fmt.Errorf("%w: no cultivar named %s@%d; consult registry.list", ErrUnknownCultivar, name, version)
+	}
+	return item, err
+}
+
+func ParseCultivarRef(ref string) (string, int, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", 0, fmt.Errorf("%w: cultivar is required", ErrInvalidPayload)
+	}
+	name := ref
+	version := 0
+	if before, after, found := strings.Cut(ref, "@"); found {
+		name = strings.TrimSpace(before)
+		rawVersion := strings.TrimSpace(after)
+		parsed, err := strconv.Atoi(rawVersion)
+		if err != nil || parsed < 1 {
+			return "", 0, fmt.Errorf("%w: cultivar version must be >= 1", ErrInvalidVersion)
+		}
+		version = parsed
+	}
+	normalized, err := normalizeName(name)
+	if err != nil {
+		return "", 0, err
+	}
+	return normalized, version, nil
 }
 
 func (s *Service) DefineTropism(ctx context.Context, actor domain.Token, in DefineTropismInput) (Tropism, bool, error) {

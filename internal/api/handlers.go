@@ -369,6 +369,9 @@ func (s *Server) handleCreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		State                      string   `json:"state"`
 		SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
 		HumanReviewStatus          string   `json:"human_review_status"`
+		Cultivar                   string   `json:"cultivar"`
+		PatienceBudgetSeconds      int      `json:"patience_budget_seconds"`
+		EscalationRule             string   `json:"escalation_rule"`
 	}
 	if !decodeJSONRequest(w, r, &req) {
 		return
@@ -379,6 +382,9 @@ func (s *Server) handleCreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		State:                      domain.WorkItemState(req.State),
 		SuggestedConvergenceChecks: req.SuggestedConvergenceChecks,
 		HumanReviewStatus:          domain.HumanReviewStatus(req.HumanReviewStatus),
+		Cultivar:                   req.Cultivar,
+		PatienceBudgetSeconds:      req.PatienceBudgetSeconds,
+		EscalationRule:             domain.EscalationRule(req.EscalationRule),
 		Actor:                      actor,
 	})
 	if err != nil {
@@ -426,6 +432,9 @@ func (s *Server) handleSpawnChild(w http.ResponseWriter, r *http.Request) {
 		State                      string   `json:"state"`
 		SuggestedConvergenceChecks []string `json:"suggested_convergence_checks"`
 		HumanReviewStatus          string   `json:"human_review_status"`
+		Cultivar                   string   `json:"cultivar"`
+		PatienceBudgetSeconds      int      `json:"patience_budget_seconds"`
+		EscalationRule             string   `json:"escalation_rule"`
 	}
 	if !decodeJSONRequest(w, r, &req) {
 		return
@@ -436,6 +445,9 @@ func (s *Server) handleSpawnChild(w http.ResponseWriter, r *http.Request) {
 		State:                      domain.WorkItemState(req.State),
 		SuggestedConvergenceChecks: req.SuggestedConvergenceChecks,
 		HumanReviewStatus:          domain.HumanReviewStatus(req.HumanReviewStatus),
+		Cultivar:                   req.Cultivar,
+		PatienceBudgetSeconds:      req.PatienceBudgetSeconds,
+		EscalationRule:             domain.EscalationRule(req.EscalationRule),
 		Actor:                      actor,
 	})
 	if err != nil {

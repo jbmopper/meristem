@@ -84,13 +84,10 @@ func TestBudgetsStatesSkipsZeroAndNegative(t *testing.T) {
 func TestEvaluateBreachesSkipsItemsUnderBudget(t *testing.T) {
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	cs := []Candidate{
-		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-30 * time.Minute)},
-		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-90 * time.Minute)},
+		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-30 * time.Minute), Budget: time.Hour},
+		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-90 * time.Minute), Budget: time.Hour},
 	}
-	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
-		domain.WorkItemCaptured: time.Hour,
-	}}
-	breaches := EvaluateBreaches(now, cs, budgets)
+	breaches := EvaluateBreaches(now, cs)
 	if len(breaches) != 1 {
 		t.Fatalf("expected 1 breach, got %d", len(breaches))
 	}
@@ -112,28 +109,22 @@ func TestEvaluateBreachesSkipsItemsExactlyAtBudget(t *testing.T) {
 	// excludes.
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	cs := []Candidate{
-		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-time.Hour)},
+		{ID: uuid.New(), State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-time.Hour), Budget: time.Hour},
 	}
-	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
-		domain.WorkItemCaptured: time.Hour,
-	}}
-	if breaches := EvaluateBreaches(now, cs, budgets); len(breaches) != 0 {
+	if breaches := EvaluateBreaches(now, cs); len(breaches) != 0 {
 		t.Fatalf("expected 0 breaches at the boundary, got %d", len(breaches))
 	}
 }
 
 func TestEvaluateBreachesSkipsStatesWithoutBudget(t *testing.T) {
-	// A state with no entry in the budget map is implicitly infinite. This
-	// is the opt-in property: gradual budget rollout cannot accidentally
-	// breach states the operator has not yet reasoned about.
+	// A candidate with no resolved budget is implicitly infinite. This is the
+	// opt-in property: gradual budget rollout cannot accidentally breach states
+	// the operator has not yet reasoned about.
 	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 	cs := []Candidate{
 		{ID: uuid.New(), State: domain.WorkItemTriaged, StateEnteredAt: now.Add(-365 * 24 * time.Hour)},
 	}
-	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
-		domain.WorkItemCaptured: time.Hour,
-	}}
-	if breaches := EvaluateBreaches(now, cs, budgets); len(breaches) != 0 {
+	if breaches := EvaluateBreaches(now, cs); len(breaches) != 0 {
 		t.Fatalf("expected 0 breaches when state has no budget, got %d (%+v)", len(breaches), breaches)
 	}
 }
@@ -144,14 +135,11 @@ func TestEvaluateBreachesPreservesInputOrder(t *testing.T) {
 	b := uuid.New()
 	c := uuid.New()
 	cs := []Candidate{
-		{ID: a, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-2 * time.Hour)},
-		{ID: b, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-30 * time.Minute)},
-		{ID: c, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-3 * time.Hour)},
+		{ID: a, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-2 * time.Hour), Budget: time.Hour},
+		{ID: b, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-30 * time.Minute), Budget: time.Hour},
+		{ID: c, State: domain.WorkItemCaptured, StateEnteredAt: now.Add(-3 * time.Hour), Budget: time.Hour},
 	}
-	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
-		domain.WorkItemCaptured: time.Hour,
-	}}
-	breaches := EvaluateBreaches(now, cs, budgets)
+	breaches := EvaluateBreaches(now, cs)
 	if len(breaches) != 2 {
 		t.Fatalf("expected 2 breaches, got %d", len(breaches))
 	}
