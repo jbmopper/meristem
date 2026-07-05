@@ -1,6 +1,6 @@
 # Named projections and feeds as data: R6 implementation spec
 
-Status: implementable spec, drafted 2026-07-04 by the Claude spec session for
+Status: implemented spec, drafted 2026-07-04 by the Claude spec session for
 work item `d7a857a8` (R6, parent `c6ba707b`). Companion to
 [`docs/registry-spec.md`](registry-spec.md) (resolves its opaque `phloem`
 string refs) and to the R3 remainder `b6526f08` (provides the dispatch feed
@@ -134,9 +134,10 @@ Long-poll/SSE paths reuse the same resolved filter; no new transport.
    scopes do not.
 3. Taxonomy partition test: every kind in `domain.AllEventKinds` classified
    exactly once; `admin` kinds refused in definitions.
-4. Archive replay: June-2026 dump classified by the taxonomy — >90% of
-   `work_item.event_appended` volume classifies `progress`; the report is
-   committed as the validation artifact.
+4. Archive replay: June-2026 dump classified by the taxonomy; the committed
+   validation artifact records the observed progress/decision split and keeps
+   `coordination.*` classified as `decision` even though the original `>90%`
+   progress expectation was disproven by the sample.
 
 ## Deferred, explicitly
 

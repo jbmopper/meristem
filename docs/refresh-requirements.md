@@ -181,9 +181,9 @@ deterministic layer where any model can benefit from it.
 Convergence checks:
 - Integration test: define a projection via API, read it via `feed.read`,
   rebuild it from events, byte-identical.
-- The June-2026 archive replayed through the taxonomy classifier: >90% of
-  `work_item.event_appended` volume classifies as `progress.*` (validates
-  the taxonomy against the Cerberus experience).
+- The June-2026 archive is replayed through the taxonomy classifier and the
+  report is committed; if the sample contradicts the expected split, the
+  artifact records the mismatch rather than weakening the classifier.
 
 ## R7 — Xylem budgets in the substrate
 
