@@ -6,11 +6,17 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/cultivaractivation"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 func TestR5CultivarUpdateRebuildsFromEvents(t *testing.T) {
@@ -110,4 +116,114 @@ func TestR5CultivarUpdateRebuildsFromEvents(t *testing.T) {
 	if len(report.mismatches) != 0 {
 		t.Fatalf("rebuild had mismatches: %+v", report.mismatches)
 	}
+}
+
+func TestR5CultivarActivationRebuildsFromEvents(t *testing.T) {
+	ctx := context.Background()
+	pool := newCmdIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "r5-activation-root",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	root := rootResult.Token
+	registrySvc := registry.NewService(pool, writer)
+	_, fresh, err := registrySvc.DefineTropism(ctx, root, registry.DefineTropismInput{
+		Name:    "r5-activation-checklist",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":2,"escalation":"hand_to_human"}}`),
+		Description: "R5 activation replay test tropism",
+	})
+	if err != nil || !fresh {
+		t.Fatalf("define activation tropism fresh=%t err=%v", fresh, err)
+	}
+
+	proposal, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title:             "R5 activation replay proposal",
+		Actor:             root,
+		HumanReviewStatus: domain.HumanReviewApproved,
+	})
+	if err != nil {
+		t.Fatalf("create approved proposal: %v", err)
+	}
+	agent, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "r5-activation-agent",
+		Source: domain.SourceAgent,
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeWorkItemsWrite,
+			access.ScopeFeedReadAssigned,
+			"work_items.tree:" + proposal.ID.String(),
+		},
+		Actor: &root,
+	})
+	if err != nil {
+		t.Fatalf("create activation agent: %v", err)
+	}
+	beforeTokens := countCmdEvents(t, ctx, pool, domain.EventTokenCreated)
+	result, err := cultivaractivation.NewService(pool, writer).Activate(ctx, cultivaractivation.ActivateInput{
+		Actor:      agent.Token,
+		WorkItemID: proposal.ID,
+		Cultivar: registry.DefineCultivarInput{
+			Name:      "r5-activated-worker",
+			Version:   1,
+			Rootstock: false,
+			Tropism:   registry.TropismRef{Name: "r5-activation-checklist", Version: 1},
+			Profile: registry.Profile{
+				Briefing: "briefings/r5-activated-worker.md",
+				ScopesTemplate: []string{
+					"work_items.tree:{root}",
+					"work_items.read",
+					"work_items.write",
+					"feed.read_assigned",
+				},
+			},
+			Xylem:       registry.Xylem{MaxAttempts: 2, MaxWallSeconds: 1200, MaxDepth: 1},
+			Phloem:      "projection:r5-activation-brief",
+			Description: "R5 activation replay test worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("activate cultivar: %v", err)
+	}
+	if result.Disposition != grants.DispositionGrant || result.Cultivar == nil {
+		t.Fatalf("activation result = %+v, want granted cultivar", result)
+	}
+	if afterTokens := countCmdEvents(t, ctx, pool, domain.EventTokenCreated); afterTokens != beforeTokens {
+		t.Fatalf("activation minted token: before=%d after=%d", beforeTokens, afterTokens)
+	}
+	if got := countCmdEvents(t, ctx, pool, domain.EventCultivarActivationGranted); got != 1 {
+		t.Fatalf("cultivar_activation.granted events = %d, want 1", got)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	report, err := rebuildAndDiff(ctx, pool, app.NewProjectionRegistry(), "r5_activation_rebuild", logger, false)
+	if err != nil {
+		t.Fatalf("rebuild after activation: %v", err)
+	}
+	if len(report.mismatches) != 0 {
+		t.Fatalf("activation rebuild had mismatches: %+v", report.mismatches)
+	}
+}
+
+func countCmdEvents(t *testing.T, ctx context.Context, pool *pgxpool.Pool, kind string) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind = $1`, kind).Scan(&count); err != nil {
+		t.Fatalf("count events for %s: %v", kind, err)
+	}
+	return count
 }
