@@ -11,8 +11,9 @@ This slice is **not** operator-tunable via environment variables. Policy lives i
 | `MaxRequestBodyBytes` | Upper bound on JSON request bodies for handlers that use the shared JSON decoder (e.g. inbox, signals, work-item commands). Requests over the limit receive **413** with `request_too_large`. |
 | `MaxFeedWait` | Maximum `wait` query duration on **`GET /v1/feed`** watcher mode. Larger values receive **400** with `wait_too_large`. |
 | `PatienceBudgets` | Positive duration per **non-terminal** `work_item` state. Used by `internal/worker` default budgets and validated at startup so the bounded-patience invariant has explicit numbers. |
+| `MaxDelegationDepth` | Fallback maximum subactor delegation depth when a target work item has no cultivar-specific `xylem.max_depth`. Over-budget grant requests escalate and mint no token. |
 
-Default values are defined in `internal/safety/policy.go` (currently 1 MiB bodies, 60s max feed wait, and the same per-state patience defaults the worker used historically). `MaxPatienceBudget` is the shared finite ceiling: policy profiles, explicit work-item `patience_budget_seconds`, and cultivar-derived xylem wall-clock budgets must not create an effectively infinite wait.
+Default values are defined in `internal/safety/policy.go` (currently 1 MiB bodies, 60s max feed wait, max delegation depth 5, and the same per-state patience defaults the worker used historically). `MaxPatienceBudget` is the shared finite ceiling: policy profiles, explicit work-item `patience_budget_seconds`, and cultivar-derived xylem wall-clock budgets must not create an effectively infinite wait.
 
 ## Fingerprint
 

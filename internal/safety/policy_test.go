@@ -19,6 +19,9 @@ func TestDefaultPolicyValidates(t *testing.T) {
 	if p.MaxFeedWait <= 0 {
 		t.Fatal("default policy must bound feed waits")
 	}
+	if p.MaxDelegationDepth <= 0 {
+		t.Fatal("default policy must bound delegation depth")
+	}
 }
 
 func TestValidateRequiresEveryNonTerminalBudget(t *testing.T) {
@@ -62,6 +65,15 @@ func TestValidateRejectsNegativePatience(t *testing.T) {
 
 	if err := p.Validate(); err == nil {
 		t.Fatal("expected negative patience to fail validation")
+	}
+}
+
+func TestValidateRejectsNegativeDelegationDepth(t *testing.T) {
+	p := DefaultPolicy()
+	p.MaxDelegationDepth = -1
+
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected negative delegation depth to fail validation")
 	}
 }
 

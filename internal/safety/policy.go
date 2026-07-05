@@ -22,6 +22,7 @@ type Policy struct {
 	MaxRequestBodyBytes int64                                  `json:"max_request_body_bytes"`
 	MaxFeedWait         time.Duration                          `json:"max_feed_wait"`
 	PatienceBudgets     map[domain.WorkItemState]time.Duration `json:"patience_budgets"`
+	MaxDelegationDepth  int                                    `json:"max_delegation_depth"`
 }
 
 const (
@@ -30,6 +31,7 @@ const (
 	// the future object-storage interface, not in Postgres request bodies.
 	defaultMaxRequestBodyBytes int64 = 1 << 20 // 1 MiB
 	defaultMaxFeedWait               = 60 * time.Second
+	defaultMaxDelegationDepth        = 5
 
 	// MaxPatienceBudget is the ceiling on any patience budget in
 	// any profile. Bounded patience is the invariant (spec principle 3);
@@ -59,6 +61,7 @@ func DefaultPolicy() Policy {
 	return Policy{
 		MaxRequestBodyBytes: defaultMaxRequestBodyBytes,
 		MaxFeedWait:         defaultMaxFeedWait,
+		MaxDelegationDepth:  defaultMaxDelegationDepth,
 		PatienceBudgets: map[domain.WorkItemState]time.Duration{
 			domain.WorkItemCaptured:         24 * time.Hour,
 			domain.WorkItemTriaged:          72 * time.Hour,
@@ -79,6 +82,7 @@ func Profiles() map[string]Policy {
 		ProfileBringUp: {
 			MaxRequestBodyBytes: defaultMaxRequestBodyBytes,
 			MaxFeedWait:         defaultMaxFeedWait,
+			MaxDelegationDepth:  defaultMaxDelegationDepth,
 			PatienceBudgets: map[domain.WorkItemState]time.Duration{
 				domain.WorkItemCaptured:         7 * 24 * time.Hour,
 				domain.WorkItemTriaged:          14 * 24 * time.Hour,
@@ -116,6 +120,9 @@ func (p Policy) Validate() error {
 	}
 	if p.MaxFeedWait <= 0 {
 		return fmt.Errorf("safety: max_feed_wait must be positive")
+	}
+	if p.MaxDelegationDepth < 0 {
+		return fmt.Errorf("safety: max_delegation_depth must be >= 0")
 	}
 	for _, state := range nonTerminalStates() {
 		dur, ok := p.PatienceBudgets[state]
@@ -164,10 +171,12 @@ func (p Policy) Fingerprint() (string, error) {
 	canonical := struct {
 		MaxRequestBodyBytes int64            `json:"max_request_body_bytes"`
 		MaxFeedWaitSeconds  int64            `json:"max_feed_wait_seconds"`
+		MaxDelegationDepth  int              `json:"max_delegation_depth"`
 		PatienceSeconds     map[string]int64 `json:"patience_seconds"`
 	}{
 		MaxRequestBodyBytes: p.MaxRequestBodyBytes,
 		MaxFeedWaitSeconds:  int64(p.MaxFeedWait.Seconds()),
+		MaxDelegationDepth:  p.MaxDelegationDepth,
 		PatienceSeconds:     make(map[string]int64, len(p.PatienceBudgets)),
 	}
 	for state, dur := range p.PatienceBudgets {

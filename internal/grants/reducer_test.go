@@ -1,6 +1,7 @@
 package grants
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -103,6 +104,31 @@ func TestReduceEscalatesOutsideTree(t *testing.T) {
 
 	if decision.Disposition != DispositionEscalate {
 		t.Fatalf("disposition = %s, want escalate", decision.Disposition)
+	}
+}
+
+func TestReduceEscalatesOverDelegationDepthBudget(t *testing.T) {
+	root := uuid.New()
+	decision := Reduce(Request{
+		Parent:               agentToken(root, access.ScopeWorkItemsRead, access.ScopeFeedReadAssigned),
+		Template:             TemplateSameTreeReadProgress,
+		RequestedSource:      domain.SourceAgent,
+		RequestedTreeRoot:    uuid.New(),
+		TreeRelation:         TreeDescendant,
+		DelegationDepthKnown: true,
+		DelegationDepth:      2,
+		MaxDelegationDepth:   1,
+		DepthBudgetSource:    "cultivar:depth-one-worker@1",
+		HumanReviewStatus:    domain.HumanReviewWavedThrough,
+	})
+
+	if decision.Disposition != DispositionEscalate {
+		t.Fatalf("disposition = %s, want escalate", decision.Disposition)
+	}
+	for _, want := range []string{"delegation_depth_exceeded", "2", "1", "cultivar:depth-one-worker@1"} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason %q missing %q", decision.Reason, want)
+		}
 	}
 }
 

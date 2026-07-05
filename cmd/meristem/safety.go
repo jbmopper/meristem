@@ -27,12 +27,14 @@ func runSafety(_ context.Context, logger *slog.Logger, args []string) error {
 		SafetyPolicy        string           `json:"safety_policy"`
 		MaxRequestBodyBytes int64            `json:"max_request_body_bytes"`
 		MaxFeedWaitSeconds  int64            `json:"max_feed_wait_seconds"`
+		MaxDelegationDepth  int              `json:"max_delegation_depth"`
 		PatienceSeconds     map[string]int64 `json:"patience_seconds"`
 	}{
 		Status:              "ok",
 		SafetyPolicy:        policyID,
 		MaxRequestBodyBytes: policy.MaxRequestBodyBytes,
 		MaxFeedWaitSeconds:  int64(policy.MaxFeedWait.Seconds()),
+		MaxDelegationDepth:  policy.MaxDelegationDepth,
 		PatienceSeconds:     make(map[string]int64, len(policy.PatienceBudgets)),
 	}
 	for state, budget := range policy.PatienceBudgets {

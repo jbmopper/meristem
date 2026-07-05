@@ -36,6 +36,7 @@ func TestRunSafetyCheckPrintsPolicy(t *testing.T) {
 		`"status": "ok"`,
 		`"safety_policy":`,
 		`"max_request_body_bytes":`,
+		`"max_delegation_depth":`,
 		`"patience_seconds":`,
 	} {
 		if !strings.Contains(out, want) {

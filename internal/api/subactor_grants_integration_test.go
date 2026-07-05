@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,8 +14,10 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -168,6 +171,118 @@ func TestSubactorGrantEndpointEscalatesWriteGrantWithoutApproval(t *testing.T) {
 	}
 	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewBlocked {
 		t.Fatalf("work item not blocked by escalation: state=%s review=%s", updated.State, updated.HumanReviewStatus)
+	}
+}
+
+func TestSubactorGrantEndpointEscalatesOverDepthBudget(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "depth-root",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	root := rootResult.Token
+	defineDepthOneCultivar(t, ctx, pool, writer, root)
+	workSvc := workitems.NewService(pool, writer)
+	parent, err := workSvc.Create(ctx, workitems.CreateInput{
+		Title: "depth root",
+		Actor: root,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	child, err := workSvc.SpawnChild(ctx, parent.ID, workitems.CreateInput{
+		Title: "depth child",
+		Actor: root,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	grandchild, err := workSvc.SpawnChild(ctx, child.ID, workitems.CreateInput{
+		Title:    "depth grandchild",
+		Actor:    root,
+		Cultivar: "depth-one-worker@1",
+	})
+	if err != nil {
+		t.Fatalf("create grandchild: %v", err)
+	}
+	parentResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "depth-parent-agent",
+		Source: domain.SourceAgent,
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeFeedReadAssigned,
+			"work_items.tree:" + parent.ID.String(),
+		},
+		Actor: &root,
+	})
+	if err != nil {
+		t.Fatalf("create parent token: %v", err)
+	}
+	beforeTokens := eventCount(t, pool, domain.EventTokenCreated)
+	server := New(pool, nil)
+	body := []byte(`{"template":"same_tree_read_progress","work_item_id":"` + grandchild.ID.String() + `"}`)
+
+	rec := doREST(t, server.Handler(), http.MethodPost, "/v1/subactor-grants", parentResult.Secret, "grant-depth", body)
+	assertRESTStatus(t, rec, http.StatusCreated)
+	var resp subactorGrantResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Disposition != grants.DispositionEscalate {
+		t.Fatalf("disposition = %s, want escalate: %s", resp.Disposition, resp.Reason)
+	}
+	for _, want := range []string{"delegation_depth_exceeded", "2", "1", "cultivar:depth-one-worker@1"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+	if resp.Token != nil || resp.TokenSecret != "" {
+		t.Fatalf("over-depth escalation returned token material: %+v", resp)
+	}
+	if resp.Escalation == nil || resp.Escalation.ID == uuid.Nil {
+		t.Fatalf("escalation response missing durable escalation: %+v", resp)
+	}
+	assertEventCount(t, pool, domain.EventSubactorGrantRequested, 1)
+	assertEventCount(t, pool, domain.EventSubactorGrantEscalated, 1)
+	assertEventCount(t, pool, domain.EventEscalationRequested, 1)
+	if afterTokens := eventCount(t, pool, domain.EventTokenCreated); afterTokens != beforeTokens {
+		t.Fatalf("over-depth request created token: before=%d after=%d", beforeTokens, afterTokens)
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, `SELECT payload FROM events WHERE id = $1`, resp.Events.Requested).Scan(&raw); err != nil {
+		t.Fatalf("read grant request payload: %v", err)
+	}
+	var payload struct {
+		DelegationDepthKnown bool   `json:"delegation_depth_known"`
+		DelegationDepth      int    `json:"delegation_depth"`
+		MaxDelegationDepth   int    `json:"max_delegation_depth"`
+		DepthBudgetSource    string `json:"depth_budget_source"`
+		Cultivar             string `json:"cultivar"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode grant request payload: %v", err)
+	}
+	if !payload.DelegationDepthKnown || payload.DelegationDepth != 2 || payload.MaxDelegationDepth != 1 {
+		t.Fatalf("unexpected depth payload: %+v", payload)
+	}
+	if payload.DepthBudgetSource != "cultivar:depth-one-worker@1" || payload.Cultivar != "depth-one-worker@1" {
+		t.Fatalf("unexpected budget source payload: %+v", payload)
+	}
+	updated, err := workSvc.Get(ctx, grandchild.ID)
+	if err != nil {
+		t.Fatalf("get updated grandchild: %v", err)
+	}
+	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewBlocked {
+		t.Fatalf("work item not blocked by depth escalation: state=%s review=%s", updated.State, updated.HumanReviewStatus)
 	}
 }
 
@@ -330,5 +445,43 @@ func assertNoEventSecret(t *testing.T, pool *pgxpool.Pool, secret string) {
 	}
 	if count != 0 {
 		t.Fatalf("event payload leaked token secret")
+	}
+}
+
+func defineDepthOneCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "depth-one-checklist",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "depth budget test tropism",
+	})
+	if err != nil {
+		t.Fatalf("define depth-one tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "depth-one-worker",
+		Version:   1,
+		Rootstock: false,
+		Tropism:   registry.TropismRef{Name: "depth-one-checklist", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/depth-one-worker.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"feed.read_assigned",
+			},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 3, MaxWallSeconds: 1800, MaxDepth: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "depth budget test cultivar",
+	})
+	if err != nil {
+		t.Fatalf("define depth-one cultivar: %v", err)
 	}
 }

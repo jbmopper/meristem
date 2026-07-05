@@ -53,6 +53,10 @@ them in:
 - requested scopes, if the caller supplied them explicitly
 - tree relation between the parent assignment and requested root:
   `same | descendant | outside | unknown`
+- delegation depth facts resolved from the parent token's `work_items.tree`
+  root(s): whether depth is known, the target depth, the max depth, and whether
+  that max came from the target work item's cultivar `xylem.max_depth` or the
+  safety-policy fallback
 - human review status attached to the grant request
 - whether logs visibility or approval authority was requested
 
@@ -95,7 +99,8 @@ the delegation path is new.
 - `escalate` is for requests that might be valid with human judgment but must
   not self-issue: out-of-tree roots, unknown ancestry, legacy unscoped parents,
   root delegation, non-agent source changes, logs visibility, approval
-  authority, scope widening, or write-capable grants without approval.
+  authority, scope widening, over-budget delegation depth, or write-capable
+  grants without approval.
 
 Reducer decisions are recorded as feed-visible events:
 
@@ -131,6 +136,11 @@ token metadata but no secret.
 Do not write token rows directly. Do not record plaintext token secrets in
 events. Do not expose this over HTTP MCP write tools until the MCP mutation
 idempotency contract is resolved.
+
+`subactor_grant.requested` records the depth-budget facts used by the reducer:
+`delegation_depth_known`, `delegation_depth` when known,
+`max_delegation_depth`, and `depth_budget_source`. A cultivar-scoped source is
+recorded as `cultivar:<name>@<version>`; otherwise it is `safety_policy`.
 
 ## Expiry
 

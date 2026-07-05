@@ -41,15 +41,19 @@ const (
 )
 
 type Request struct {
-	Parent             domain.Token
-	Template           Template
-	RequestedSource    domain.Source
-	RequestedTreeRoot  uuid.UUID
-	RequestedScopes    []string
-	TreeRelation       TreeRelation
-	HumanReviewStatus  domain.HumanReviewStatus
-	ApprovalAuthority  bool
-	RequestedLogsScope bool
+	Parent               domain.Token
+	Template             Template
+	RequestedSource      domain.Source
+	RequestedTreeRoot    uuid.UUID
+	RequestedScopes      []string
+	TreeRelation         TreeRelation
+	DelegationDepthKnown bool
+	DelegationDepth      int
+	MaxDelegationDepth   int
+	DepthBudgetSource    string
+	HumanReviewStatus    domain.HumanReviewStatus
+	ApprovalAuthority    bool
+	RequestedLogsScope   bool
 }
 
 type Decision struct {
@@ -92,6 +96,13 @@ func Reduce(req Request) Decision {
 		return escalate("requested tree root is outside parent assignment")
 	default:
 		return escalate("requested tree relation is unknown")
+	}
+	if req.DelegationDepthKnown && req.DelegationDepth > req.MaxDelegationDepth {
+		source := strings.TrimSpace(req.DepthBudgetSource)
+		if source == "" {
+			source = "unknown"
+		}
+		return escalate(fmt.Sprintf("delegation_depth_exceeded: target depth %d exceeds max %d from %s", req.DelegationDepth, req.MaxDelegationDepth, source))
 	}
 
 	templateScopes, writeTemplate, ok := templateScopeSet(req.Template, req.RequestedTreeRoot)

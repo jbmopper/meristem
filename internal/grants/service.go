@@ -2,6 +2,7 @@ package grants
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"github.com/jbmopper/meristem/internal/escalations"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/registry"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 var ErrWorkItemNotFound = errors.New("grants: work_item not found")
@@ -107,15 +110,28 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 	if err != nil {
 		return IssueResult{}, err
 	}
+	depthBudget, err := s.delegationDepthBudget(ctx, tx, in.Parent, in.WorkItemID, item.Cultivar)
+	if err != nil {
+		return IssueResult{}, err
+	}
 	requestPayload := map[string]any{
-		"parent_token_id":     in.Parent.ID,
-		"work_item_id":        in.WorkItemID,
-		"template":            in.Template,
-		"requested_source":    domain.SourceAgent,
-		"requested_scopes":    requestedScopes,
-		"token_name":          tokenName,
-		"tree_relation":       relation,
-		"human_review_status": item.HumanReviewStatus,
+		"parent_token_id":        in.Parent.ID,
+		"work_item_id":           in.WorkItemID,
+		"template":               in.Template,
+		"requested_source":       domain.SourceAgent,
+		"requested_scopes":       requestedScopes,
+		"token_name":             tokenName,
+		"tree_relation":          relation,
+		"human_review_status":    item.HumanReviewStatus,
+		"delegation_depth_known": depthBudget.Known,
+		"max_delegation_depth":   depthBudget.MaxDepth,
+		"depth_budget_source":    depthBudget.Source,
+	}
+	if depthBudget.Known {
+		requestPayload["delegation_depth"] = depthBudget.Depth
+	}
+	if depthBudget.Cultivar != "" {
+		requestPayload["cultivar"] = depthBudget.Cultivar
 	}
 	requestEventID, _, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectSubactorGrant,
@@ -130,13 +146,17 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 	}
 
 	decision := Reduce(Request{
-		Parent:            in.Parent,
-		Template:          in.Template,
-		RequestedSource:   domain.SourceAgent,
-		RequestedTreeRoot: in.WorkItemID,
-		RequestedScopes:   requestedScopes,
-		TreeRelation:      relation,
-		HumanReviewStatus: item.HumanReviewStatus,
+		Parent:               in.Parent,
+		Template:             in.Template,
+		RequestedSource:      domain.SourceAgent,
+		RequestedTreeRoot:    in.WorkItemID,
+		RequestedScopes:      requestedScopes,
+		TreeRelation:         relation,
+		DelegationDepthKnown: depthBudget.Known,
+		DelegationDepth:      depthBudget.Depth,
+		MaxDelegationDepth:   depthBudget.MaxDepth,
+		DepthBudgetSource:    depthBudget.Source,
+		HumanReviewStatus:    item.HumanReviewStatus,
 	})
 
 	result := IssueResult{
@@ -246,16 +266,21 @@ type grantWorkItem struct {
 	ID                uuid.UUID
 	Title             string
 	HumanReviewStatus domain.HumanReviewStatus
+	Cultivar          string
 }
 
 func scanGrantWorkItem(ctx context.Context, tx pgx.Tx, id uuid.UUID) (grantWorkItem, error) {
 	var item grantWorkItem
 	var humanReview string
 	err := tx.QueryRow(ctx, `
-		SELECT id, title, human_review_status
-		FROM work_items
-		WHERE id = $1
-	`, id).Scan(&item.ID, &item.Title, &humanReview)
+		SELECT wi.id, wi.title, wi.human_review_status, COALESCE(created.payload->>'cultivar', '')
+		FROM work_items wi
+		LEFT JOIN events created
+			ON created.subject_kind = $2
+			AND created.subject_id = wi.id
+			AND created.kind = $3
+		WHERE wi.id = $1
+	`, id, domain.SubjectWorkItem, domain.EventWorkItemCreated).Scan(&item.ID, &item.Title, &humanReview, &item.Cultivar)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return grantWorkItem{}, ErrWorkItemNotFound
@@ -267,6 +292,14 @@ func scanGrantWorkItem(ctx context.Context, tx pgx.Tx, id uuid.UUID) (grantWorkI
 		return grantWorkItem{}, fmt.Errorf("grants: invalid human_review_status %q", humanReview)
 	}
 	return item, nil
+}
+
+type delegationDepthBudget struct {
+	Known    bool
+	Depth    int
+	MaxDepth int
+	Source   string
+	Cultivar string
 }
 
 func existingIssueResult(ctx context.Context, tx pgx.Tx, grantID uuid.UUID) (IssueResult, bool, error) {
@@ -391,6 +424,64 @@ func (s *IssuanceService) workItemInTree(ctx context.Context, tx pgx.Tx, root, t
 		return false, fmt.Errorf("grants: tree relation: %w", err)
 	}
 	return ok, nil
+}
+
+func (s *IssuanceService) delegationDepthBudget(ctx context.Context, tx pgx.Tx, parent domain.Token, target uuid.UUID, cultivarRef string) (delegationDepthBudget, error) {
+	budget := delegationDepthBudget{
+		MaxDepth: safety.DefaultPolicy().MaxDelegationDepth,
+		Source:   "safety_policy",
+	}
+	cultivarRef = strings.TrimSpace(cultivarRef)
+	if cultivarRef != "" {
+		item, err := registry.NewService(s.pool, nil).GetCultivarRef(ctx, cultivarRef)
+		if err != nil {
+			return delegationDepthBudget{}, err
+		}
+		budget.MaxDepth = item.Xylem.MaxDepth
+		budget.Source = fmt.Sprintf("cultivar:%s@%d", item.Name, item.Version)
+		budget.Cultivar = fmt.Sprintf("%s@%d", item.Name, item.Version)
+	}
+	depth, known, err := s.delegationDepth(ctx, tx, parent, target)
+	if err != nil {
+		return delegationDepthBudget{}, err
+	}
+	budget.Known = known
+	budget.Depth = depth
+	return budget, nil
+}
+
+func (s *IssuanceService) delegationDepth(ctx context.Context, tx pgx.Tx, parent domain.Token, target uuid.UUID) (int, bool, error) {
+	roots := parentTreeRoots(parent.Scopes)
+	if len(roots) == 0 {
+		return 0, false, nil
+	}
+	known := false
+	minDepth := 0
+	for _, root := range roots {
+		var depth sql.NullInt64
+		err := tx.QueryRow(ctx, `
+			WITH RECURSIVE subtree(id, depth) AS (
+				SELECT $1::uuid, 0
+				UNION ALL
+				SELECT wir.child_id, subtree.depth + 1
+				FROM work_item_relations wir
+				JOIN subtree ON wir.parent_id = subtree.id
+			)
+			SELECT MIN(depth) FROM subtree WHERE id = $2
+		`, root, target).Scan(&depth)
+		if err != nil {
+			return 0, false, fmt.Errorf("grants: delegation depth: %w", err)
+		}
+		if !depth.Valid {
+			continue
+		}
+		current := int(depth.Int64)
+		if !known || current < minDepth {
+			known = true
+			minDepth = current
+		}
+	}
+	return minDepth, known, nil
 }
 
 func parentTreeRoots(scopes []string) []uuid.UUID {
