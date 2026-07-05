@@ -66,6 +66,8 @@ func main() {
 		err = runSeed(ctx, logger, args)
 	case "rebuild":
 		err = runRebuild(ctx, logger, args)
+	case "export":
+		err = runExport(ctx, logger, args)
 	case "worker":
 		err = runWorker(ctx, logger, args)
 	case "feed":
