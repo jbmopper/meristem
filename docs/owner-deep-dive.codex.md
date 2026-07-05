@@ -116,6 +116,11 @@ they include the owner's planning diary, token topology, and verbatim inbox
 content. The exported corpus is the shareable artifact; raw dumps are for
 restore and replay.
 
+`meristem export --validate` runs the same export in memory and compares the
+result against private token names and `message.captured` bodies still present
+in the database. It prints only counts and leak classes, so the report can be
+used as public proof while the restored archive stays private.
+
 `meristem rebuild` is the truth test for projections. It opens a transaction,
 creates a sandbox schema, replays every event through the registered projectors,
 and diffs the rebuilt projection tables against live tables. A clean rebuild
@@ -125,8 +130,8 @@ mismatch means the system's read model has drifted from its truth source.
 Archive replay is not fully automated as a single command. The shipped helper
 can create and inspect private Postgres custom-format dumps. The operator lane
 is: restore a dump into scratch Postgres, point `MERISTEM_DATABASE_URL` there,
-run `meristem rebuild --verbose`, then run `meristem export` and inspect the
-publishable corpus.
+run `meristem rebuild --verbose`, then run `meristem export --validate` and
+publish only the non-sensitive report.
 
 ## 8. Git forwarding
 

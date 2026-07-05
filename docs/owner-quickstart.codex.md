@@ -76,6 +76,8 @@ MERISTEM_TOKEN="$(tr -d '\n' < .meristem/operator.token)" "$BIN" feed --watch
 ```bash
 "$BIN" export > .meristem/corpus.jsonl
 # share corpus.jsonl, not raw dumps
+"$BIN" export --validate
+# -> {"events_exported":N,...,"valid":true}
 "$BIN" rebuild --verbose
 # -> rebuild complete with 0 mismatched projection tables
 scripts/snapshot-db.sh create
@@ -84,7 +86,7 @@ scripts/snapshot-db.sh list .meristem/backups/meristem-YYYYMMDDTHHMMSSZ.dump
 
 Archive replay is an operator lane: restore private dumps into scratch
 Postgres, point `MERISTEM_DATABASE_URL` there, then run `"$BIN" rebuild
---verbose` and `"$BIN" export`.
+--verbose` and `"$BIN" export --validate`.
 
 ## 8. Fast-forward `footgun`
 ```bash

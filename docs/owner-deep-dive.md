@@ -286,10 +286,11 @@ timestamp.
 ## Step 6 — Export the publishable corpus
 
 **What you run.** `"$BIN" export > corpus.jsonl` for the scrubbed, shareable
-corpus; then `"$BIN" rebuild` to validate that folding events through the
-projectors into a sandbox schema matches live (no drift), which is also your
-archive-dump / restore validation against private backups in
-`.meristem/backups/`.
+corpus; `"$BIN" export --validate` for a non-sensitive proof that the export
+contains only allowlisted kinds and no token names or inbox bodies; then
+`"$BIN" rebuild` to validate that folding events through the projectors into a
+sandbox schema matches live (no drift), which is also your archive-dump /
+restore validation against private backups in `.meristem/backups/`.
 
 **Privacy posture: two corpora, one log.** The refresh doc (R8) draws a hard
 line. Raw database dumps are the owner's *private legible planning diary* —

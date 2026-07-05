@@ -90,6 +90,20 @@ func TestExportScrubsAndFiltersSeededDatabase(t *testing.T) {
 			t.Errorf("corpus line exports private actor_token_id: %.120s", line)
 		}
 	}
+
+	report, err := Validate(ctx, pool)
+	if err != nil {
+		t.Fatalf("validate corpus: %v", err)
+	}
+	if !report.Valid {
+		t.Fatalf("validation report not valid: %+v", report)
+	}
+	if report.EventsExported != n || report.LinesChecked != n {
+		t.Fatalf("validation counts = events_exported:%d lines_checked:%d, want %d", report.EventsExported, report.LinesChecked, n)
+	}
+	if report.TokenNamesChecked == 0 || report.MessageBodiesChecked == 0 {
+		t.Fatalf("validation did not check private fixtures: %+v", report)
+	}
 }
 
 func eventCount(t *testing.T, pool *pgxpool.Pool) int {

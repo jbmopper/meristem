@@ -91,6 +91,7 @@ projection (cross-projection reuse is refused). MCP equivalents:
 
 ```bash
 "$BIN" export > corpus.jsonl        # allowlisted kinds only; free-text scrubbed
+"$BIN" export --validate            # non-sensitive JSON validation report
 ```
 Guarantees: no token names, no `message.captured` inbox bodies, no
 `actor_token_id` attribution. Validate private backups by replay:
@@ -98,6 +99,10 @@ Guarantees: no token names, no `message.captured` inbox bodies, no
 "$BIN" rebuild                      # fold events -> sandbox schema, diff vs live; expect no drift
 ```
 Raw dumps in `.meristem/backups/` stay private; only `corpus.jsonl` is shareable.
+For an archived dump, restore it into scratch Postgres, point
+`MERISTEM_DATABASE_URL` at that scratch database, then run `"$BIN" rebuild`
+and `"$BIN" export --validate`. The validation report contains counts only,
+not token names or message bodies.
 
 ## 7. Trunk hygiene
 

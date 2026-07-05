@@ -227,6 +227,9 @@ publishable corpus is produced by a deterministic exporter with an
 event-kind allowlist and a scrub pass over free-text fields. The exporter is
 a fold over the log — the first instance of "assessed by being asked."
 Replay test: restore an archive dump → replay → projections identical.
+Archive export validation is local-only: restore the private dump into
+scratch Postgres, point `MERISTEM_DATABASE_URL` at it, and run
+`meristem export --validate` for a non-sensitive count report.
 
 Convergence checks:
 - `seed` twice on a fresh database: second run appends zero fresh events.
@@ -235,8 +238,8 @@ Convergence checks:
   `bring-up` switch, and a recorded token-grant/review step for the first
   worker.
 - Exporter output on the 2026-06-06 archive contains no token names, no
-  inbox `message.captured` bodies, and no non-allowlisted kinds (test
-  asserts the allowlist).
+  inbox `message.captured` bodies, and no non-allowlisted kinds (`meristem
+  export --validate` plus tests assert the allowlist).
 - Replay test green on all archived dumps.
 
 ## R9 — Dogma conformance and role-scoped briefings

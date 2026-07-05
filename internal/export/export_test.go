@@ -1,6 +1,7 @@
 package export
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,73 @@ func TestKindAllowlistExcludesAuditAndInboxKinds(t *testing.T) {
 			t.Errorf("kind %s must never be exported", kind)
 		}
 	}
+}
+
+func TestValidateCorpusRejectsPrivateLeaks(t *testing.T) {
+	corpus := strings.Join([]string{
+		mustJSONLine(t, map[string]any{
+			"kind":           "work_item.created",
+			"actor_token_id": "private-token-id",
+			"payload": map[string]any{
+				"title": "archive-token-name",
+			},
+		}),
+		mustJSONLine(t, map[string]any{
+			"kind": "message.captured",
+			"payload": map[string]any{
+				"text": "verbatim owner archive body",
+			},
+		}),
+	}, "\n")
+
+	report, err := ValidateCorpus([]byte(corpus), []string{"archive-token-name"}, []string{"verbatim owner archive body"})
+	if err == nil {
+		t.Fatal("ValidateCorpus should reject private leaks")
+	}
+	if report.ActorTokenIDLeaks != 1 {
+		t.Errorf("ActorTokenIDLeaks = %d, want 1", report.ActorTokenIDLeaks)
+	}
+	if report.NonAllowlistedKinds != 1 {
+		t.Errorf("NonAllowlistedKinds = %d, want 1", report.NonAllowlistedKinds)
+	}
+	if report.TokenNameLeaks != 1 {
+		t.Errorf("TokenNameLeaks = %d, want 1", report.TokenNameLeaks)
+	}
+	if report.MessageBodyLeaks != 1 {
+		t.Errorf("MessageBodyLeaks = %d, want 1", report.MessageBodyLeaks)
+	}
+	if report.Valid {
+		t.Error("report.Valid = true for rejected corpus")
+	}
+}
+
+func TestValidateCorpusAcceptsScrubbedAllowlistedCorpus(t *testing.T) {
+	corpus := mustJSONLine(t, map[string]any{
+		"kind": "work_item.created",
+		"payload": map[string]any{
+			"title": "[scrubbed 24 chars]",
+			"state": "captured",
+		},
+	})
+	report, err := ValidateCorpus([]byte(corpus+"\n"), []string{"archive-token-name"}, []string{"verbatim owner archive body"})
+	if err != nil {
+		t.Fatalf("ValidateCorpus rejected scrubbed corpus: %v", err)
+	}
+	if !report.Valid {
+		t.Error("report.Valid = false")
+	}
+	if report.LinesChecked != 1 {
+		t.Errorf("LinesChecked = %d, want 1", report.LinesChecked)
+	}
+}
+
+func mustJSONLine(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal test JSON: %v", err)
+	}
+	return string(b)
 }
 
 func strFromAny(v any) string {
