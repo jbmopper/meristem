@@ -41,6 +41,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/escalations"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 )
 
@@ -186,6 +187,12 @@ type Result struct {
 	// ScribeChildrenAlreadyPresent is the count of checkless parent items that
 	// already had their deterministic scribe child.
 	ScribeChildrenAlreadyPresent int
+	// ScribePassSkippedMissingCultivar is 1 when the scribe pass stood down
+	// because the convergence-scribe rootstock cultivar is not in the
+	// registry (unseeded database). The refusal to spawn under an unknown
+	// cultivar is hard, but it is scoped to the scribe pass: breach and
+	// convergence enforcement must not die of a missing registry row.
+	ScribePassSkippedMissingCultivar int
 
 	// ConvergenceCandidatesScanned is the count of running work_items
 	// with suggested convergence checks and therefore a chance to advance
@@ -269,7 +276,14 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	out.ScribeChildrenSpawned = scribeResult.ScribeChildrenSpawned
 	out.ScribeChildrenAlreadyPresent = scribeResult.ScribeChildrenAlreadyPresent
 	if err != nil {
-		return out, fmt.Errorf("worker: scribe pass: %w", err)
+		if errors.Is(err, registry.ErrUnknownCultivar) {
+			// Skip-with-structured-observation, per the scribe spec:
+			// the scribe pass stands down when its rootstock cultivar
+			// is unseeded; the metronome's other passes continue.
+			out.ScribePassSkippedMissingCultivar = 1
+		} else {
+			return out, fmt.Errorf("worker: scribe pass: %w", err)
+		}
 	}
 
 	convergenceResult, err := w.scanConvergence(ctx)

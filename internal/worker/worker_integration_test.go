@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"errors"
 	"net/url"
 	"os"
 	"strings"
@@ -464,17 +463,17 @@ func TestScanOnceRefusesMissingScribeCultivar(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	result, err := w.ScanOnce(ctx)
-	if !errors.Is(err, registry.ErrUnknownCultivar) {
-		t.Fatalf("ScanOnce error = %v, want unknown cultivar", err)
+	if err != nil {
+		t.Fatalf("ScanOnce must not abort on a missing scribe cultivar (skip-with-observation): %v", err)
+	}
+	if result.ScribePassSkippedMissingCultivar != 1 {
+		t.Fatalf("scribe pass skip not recorded: %+v", result)
 	}
 	if result.ScribeCandidatesScanned != 1 || result.ScribeChildrenSpawned != 0 {
 		t.Fatalf("scribe result = candidates %d spawned %d, want 1/0", result.ScribeCandidatesScanned, result.ScribeChildrenSpawned)
 	}
 	if got := countRelationsForParent(t, ctx, pool, parent.ID); got != 0 {
 		t.Fatalf("missing cultivar should not spawn child; got %d relations", got)
-	}
-	if !strings.Contains(err.Error(), "registry.list") {
-		t.Fatalf("unknown cultivar error should name registry.list, got %v", err)
 	}
 }
 
