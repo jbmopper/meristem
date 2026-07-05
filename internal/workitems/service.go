@@ -31,6 +31,10 @@ var (
 	// convergence checks tries to move into execution states. The scribe worker
 	// is the deterministic path for filling those checks.
 	ErrConvergenceChecksRequired = errors.New("workitems: convergence checks required")
+	// ErrXylemBudgetExhausted is returned after the service has recorded a
+	// structured xylem.exhausted event and routed the parent item through its
+	// escalation rule. No requested child is created for the exhausted spawn.
+	ErrXylemBudgetExhausted = errors.New("workitems: xylem budget exhausted")
 )
 
 type Service struct {
@@ -145,7 +149,8 @@ func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.U
 		return domain.WorkItem{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := scanWorkItem(ctx, tx, parentID); err != nil {
+	parent, err := scanWorkItemForUpdate(ctx, tx, parentID)
+	if err != nil {
 		return domain.WorkItem{}, false, err
 	}
 	// Self-loops are blocked by the work_item_relations CHECK
@@ -160,6 +165,22 @@ func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.U
 	}
 	if cycle {
 		return domain.WorkItem{}, false, ErrRelationCycle
+	}
+	related, err := childRelationExists(ctx, tx, parentID, childID)
+	if err != nil {
+		return domain.WorkItem{}, false, err
+	}
+	if !related {
+		exhausted, budgetErr, err := s.enforceChildCountBudget(ctx, tx, parent, childID, in)
+		if err != nil {
+			return domain.WorkItem{}, false, err
+		}
+		if exhausted {
+			if err := tx.Commit(ctx); err != nil {
+				return domain.WorkItem{}, false, err
+			}
+			return domain.WorkItem{}, false, budgetErr
+		}
 	}
 	_, createdFresh, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectWorkItem,
@@ -350,6 +371,310 @@ SELECT EXISTS (SELECT 1 FROM ancestry WHERE id = $2)`
 	return found, nil
 }
 
+func childRelationExists(ctx context.Context, tx pgx.Tx, parent, child uuid.UUID) (bool, error) {
+	var found bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM work_item_relations
+			WHERE parent_id = $1 AND child_id = $2
+		)
+	`, parent, child).Scan(&found); err != nil {
+		return false, fmt.Errorf("workitems: child relation exists: %w", err)
+	}
+	return found, nil
+}
+
+type childCountBudget struct {
+	Max            int
+	Source         string
+	Cultivar       string
+	EscalationRule domain.EscalationRule
+}
+
+type createdLaunchMetadata struct {
+	Cultivar       string                `json:"cultivar"`
+	EscalationRule domain.EscalationRule `json:"escalation_rule"`
+}
+
+func (s *Service) enforceChildCountBudget(ctx context.Context, tx pgx.Tx, parent domain.WorkItem, childID uuid.UUID, in CreateInput) (bool, error, error) {
+	budget, err := s.resolveChildCountBudget(ctx, tx, parent.ID)
+	if err != nil {
+		return false, nil, err
+	}
+	current, err := countedChildCount(ctx, tx, parent.ID)
+	if err != nil {
+		return false, nil, err
+	}
+	if current < budget.Max {
+		return false, nil, nil
+	}
+	payload := map[string]any{
+		"budget":                "max_children_per_item",
+		"current_children":      current,
+		"max_children_per_item": budget.Max,
+		"budget_source":         budget.Source,
+		"cultivar":              budget.Cultivar,
+		"escalation_rule":       string(budget.EscalationRule),
+		"attempted_child_id":    childID,
+		"attempted_child_title": in.Title,
+		"parent_state":          parent.State,
+		"count_excludes":        []string{"human_attention_escalation_children"},
+	}
+	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    parent.ID,
+		Kind:         domain.EventXylemExhausted,
+		Source:       sourceForActor(in.Actor),
+		ActorTokenID: &in.Actor.ID,
+		Payload:      payload,
+	}); err != nil {
+		return false, nil, err
+	}
+	switch budget.EscalationRule {
+	case domain.EscalationRuleHandToHuman:
+	default:
+		return false, nil, fmt.Errorf("workitems: unknown escalation rule %q", budget.EscalationRule)
+	}
+	reason := childCountBudgetEscalationReason()
+	summary := childCountBudgetEscalationSummary(parent, current, budget)
+	if err := s.requestXylemEscalationInTx(ctx, tx, parent, reason, summary, in.Actor); err != nil {
+		return false, nil, err
+	}
+	return true, fmt.Errorf("%w: max_children_per_item exhausted for parent %s: current_children=%d max=%d source=%s", ErrXylemBudgetExhausted, parent.ID, current, budget.Max, budget.Source), nil
+}
+
+func (s *Service) resolveChildCountBudget(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) (childCountBudget, error) {
+	meta, err := parentLaunchMetadata(ctx, tx, parentID)
+	if err != nil {
+		return childCountBudget{}, err
+	}
+	rule := meta.EscalationRule
+	if rule == "" {
+		rule = domain.EscalationRuleHandToHuman
+	}
+	if !rule.Valid() {
+		return childCountBudget{}, fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+	}
+	budget := childCountBudget{
+		Max:            safety.DefaultPolicy().MaxChildrenPerItem,
+		Source:         "safety_policy",
+		EscalationRule: rule,
+	}
+	cultivarRef := strings.TrimSpace(meta.Cultivar)
+	if cultivarRef == "" {
+		return budget, nil
+	}
+	item, err := registry.NewService(s.pool, nil).GetCultivarRef(ctx, cultivarRef)
+	if err != nil {
+		return childCountBudget{}, err
+	}
+	budget.Cultivar = fmt.Sprintf("%s@%d", item.Name, item.Version)
+	if item.Xylem.MaxChildrenPerItem > 0 {
+		budget.Max = item.Xylem.MaxChildrenPerItem
+		budget.Source = "cultivar:" + budget.Cultivar
+	}
+	return budget, nil
+}
+
+func parentLaunchMetadata(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) (createdLaunchMetadata, error) {
+	var raw []byte
+	err := tx.QueryRow(ctx, `
+		SELECT payload
+		FROM events
+		WHERE subject_kind = $1
+		  AND subject_id = $2
+		  AND kind = $3
+		ORDER BY occurred_at ASC
+		LIMIT 1
+	`, domain.SubjectWorkItem, parentID, domain.EventWorkItemCreated).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return createdLaunchMetadata{}, nil
+		}
+		return createdLaunchMetadata{}, fmt.Errorf("workitems: load parent launch metadata: %w", err)
+	}
+	var meta createdLaunchMetadata
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return createdLaunchMetadata{}, fmt.Errorf("workitems: decode parent launch metadata: %w", err)
+	}
+	meta.Cultivar = strings.TrimSpace(meta.Cultivar)
+	return meta, nil
+}
+
+func countedChildCount(ctx context.Context, tx pgx.Tx, parentID uuid.UUID) (int, error) {
+	var count int
+	err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM work_item_relations wir
+		WHERE wir.parent_id = $1
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM events e
+			WHERE e.kind = $2
+			  AND e.payload->>'work_item_id' = $1::uuid::text
+			  AND e.payload->>'human_work_item_id' = wir.child_id::text
+		  )
+	`, parentID, domain.EventEscalationRequested).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("workitems: count children for xylem budget: %w", err)
+	}
+	return count, nil
+}
+
+func childCountBudgetEscalationReason() string {
+	return "xylem budget exhausted: max_children_per_item"
+}
+
+func childCountBudgetEscalationSummary(parent domain.WorkItem, current int, budget childCountBudget) string {
+	return fmt.Sprintf(
+		"Work item %s (%s) exhausted max_children_per_item: current_children=%d max=%d source=%s",
+		parent.ID,
+		parent.Title,
+		current,
+		budget.Max,
+		budget.Source,
+	)
+}
+
+func (s *Service) requestXylemEscalationInTx(ctx context.Context, tx pgx.Tx, parent domain.WorkItem, reason string, summary string, actor domain.Token) error {
+	escalationID := deterministicEscalationID(parent.ID, reason, summary)
+	humanWorkItemID := deterministicHumanWorkItemID(escalationID)
+	if ok, err := escalationExists(ctx, tx, escalationID); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	actorID := &actor.ID
+	source := sourceForActor(actor)
+	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectEscalation,
+		SubjectID:    escalationID,
+		Kind:         domain.EventEscalationRequested,
+		Source:       source,
+		ActorTokenID: actorID,
+		Payload: map[string]any{
+			"work_item_id":        parent.ID,
+			"human_work_item_id":  humanWorkItemID,
+			"reason":              reason,
+			"summary":             summary,
+			"origin_state":        parent.State,
+			"origin_state_reason": parent.StateReason,
+		},
+	}); err != nil {
+		return err
+	}
+	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    humanWorkItemID,
+		Kind:         domain.EventWorkItemCreated,
+		Source:       source,
+		ActorTokenID: actorID,
+		Payload: map[string]any{
+			"title":                        "Human attention: " + parent.Title,
+			"body":                         humanWorkItemBody(parent, reason, summary),
+			"state":                        domain.WorkItemCaptured,
+			"suggested_convergence_checks": []string{"human_response_recorded"},
+			"human_review_status":          domain.HumanReviewBlocked,
+		},
+	}); err != nil {
+		return err
+	}
+	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    parent.ID,
+		Kind:         domain.EventWorkItemRelationAdded,
+		Source:       source,
+		ActorTokenID: actorID,
+		Payload: map[string]any{
+			"parent_id": parent.ID,
+			"child_id":  humanWorkItemID,
+		},
+	}); err != nil {
+		return err
+	}
+	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    parent.ID,
+		Kind:         domain.EventWorkItemMetadataUpdated,
+		Source:       source,
+		ActorTokenID: actorID,
+		Payload: map[string]any{
+			"from": map[string]any{
+				"suggested_convergence_checks": parent.SuggestedConvergenceChecks,
+				"human_review_status":          parent.HumanReviewStatus,
+			},
+			"to": map[string]any{
+				"suggested_convergence_checks": parent.SuggestedConvergenceChecks,
+				"human_review_status":          domain.HumanReviewBlocked,
+			},
+		},
+	}); err != nil {
+		return err
+	}
+	if parent.State != domain.WorkItemBlocked {
+		if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+			SubjectKind:  domain.SubjectWorkItem,
+			SubjectID:    parent.ID,
+			Kind:         domain.EventWorkItemTransitioned,
+			Source:       source,
+			ActorTokenID: actorID,
+			Payload: map[string]any{
+				"from":   parent.State,
+				"to":     domain.WorkItemBlocked,
+				"reason": "human escalation requested: " + reason,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func escalationExists(ctx context.Context, tx pgx.Tx, escalationID uuid.UUID) (bool, error) {
+	var ok bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM events
+			WHERE subject_kind = $1 AND subject_id = $2 AND kind = $3
+		)
+	`, domain.SubjectEscalation, escalationID, domain.EventEscalationRequested).Scan(&ok); err != nil {
+		return false, fmt.Errorf("workitems: check existing escalation: %w", err)
+	}
+	return ok, nil
+}
+
+func deterministicEscalationID(workItemID uuid.UUID, reason string, summary string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(strings.Join([]string{
+		"meristem",
+		"escalation",
+		workItemID.String(),
+		reason,
+		summary,
+	}, "\x00")))
+}
+
+func deterministicHumanWorkItemID(escalationID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(strings.Join([]string{
+		"meristem",
+		"escalation",
+		"human-work-item",
+		escalationID.String(),
+	}, "\x00")))
+}
+
+func humanWorkItemBody(parent domain.WorkItem, reason string, summary string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Escalation requested for work_item %s.\n\n", parent.ID)
+	fmt.Fprintf(&b, "Reason: %s\n\n", reason)
+	if summary != reason {
+		fmt.Fprintf(&b, "Summary: %s\n\n", summary)
+	}
+	fmt.Fprintf(&b, "Respond by appending a human decision or by moving the original work_item out of blocked once resolved.")
+	return b.String()
+}
+
 func sourceForActor(actor domain.Token) domain.Source {
 	if actor.Source.Valid() {
 		return actor.Source
@@ -494,6 +819,11 @@ type rowScanner interface {
 
 func scanWorkItem(ctx context.Context, q queryer, id uuid.UUID) (domain.WorkItem, error) {
 	row := q.QueryRow(ctx, `SELECT id, title, body, state, state_reason, suggested_convergence_checks, human_review_status, created_by, created_at, state_entered_at, updated_at FROM work_items WHERE id = $1`, id)
+	return scanWorkItemRow(row)
+}
+
+func scanWorkItemForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) (domain.WorkItem, error) {
+	row := tx.QueryRow(ctx, `SELECT id, title, body, state, state_reason, suggested_convergence_checks, human_review_status, created_by, created_at, state_entered_at, updated_at FROM work_items WHERE id = $1 FOR UPDATE`, id)
 	return scanWorkItemRow(row)
 }
 

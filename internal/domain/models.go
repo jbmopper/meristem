@@ -16,6 +16,7 @@ const (
 	EventWorkItemEventAppended      = "work_item.event_appended"
 	EventWorkItemRelationAdded      = "work_item.relation_added"
 	EventWorkItemMetadataUpdated    = "work_item.metadata_updated"
+	EventXylemExhausted             = "xylem.exhausted"
 	EventSignalReceived             = "signal.received"
 	EventDeterministicErrorReported = "deterministic_error.reported"
 	EventDeterministicErrorMasked   = "deterministic_error.masked"
@@ -90,6 +91,7 @@ var AllEventKinds = []string{
 	EventWorkItemEventAppended,
 	EventWorkItemRelationAdded,
 	EventWorkItemMetadataUpdated,
+	EventXylemExhausted,
 	EventSignalReceived,
 	EventDeterministicErrorReported,
 	EventDeterministicErrorMasked,

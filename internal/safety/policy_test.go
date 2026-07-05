@@ -22,6 +22,9 @@ func TestDefaultPolicyValidates(t *testing.T) {
 	if p.MaxDelegationDepth <= 0 {
 		t.Fatal("default policy must bound delegation depth")
 	}
+	if p.MaxChildrenPerItem <= 0 {
+		t.Fatal("default policy must bound children per item")
+	}
 }
 
 func TestValidateRequiresEveryNonTerminalBudget(t *testing.T) {
@@ -74,6 +77,17 @@ func TestValidateRejectsNegativeDelegationDepth(t *testing.T) {
 
 	if err := p.Validate(); err == nil {
 		t.Fatal("expected negative delegation depth to fail validation")
+	}
+}
+
+func TestValidateRejectsNonPositiveChildrenPerItem(t *testing.T) {
+	for _, value := range []int{0, -1} {
+		p := DefaultPolicy()
+		p.MaxChildrenPerItem = value
+
+		if err := p.Validate(); err == nil {
+			t.Fatalf("expected max_children_per_item=%d to fail validation", value)
+		}
 	}
 }
 

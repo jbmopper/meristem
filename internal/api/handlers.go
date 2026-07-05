@@ -889,6 +889,10 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "convergence_checks_required", err.Error())
 		return
 	}
+	if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
+		writeAPIError(w, http.StatusConflict, "xylem_budget_exhausted", err.Error())
+		return
+	}
 	if strings.Contains(err.Error(), "invalid state") {
 		writeAPIError(w, http.StatusBadRequest, "invalid_state", err.Error())
 		return

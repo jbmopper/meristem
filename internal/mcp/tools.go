@@ -283,7 +283,7 @@ func (s *Server) toolRegistryDefineCultivar() Tool {
 			"rootstock":   schemaBool("Whether this cultivar is immutable rootstock."),
 			"tropism":     schemaAny("Tropism reference object: {name, version}."),
 			"profile":     schemaAny("Worker profile object: {briefing, scopes_template}."),
-			"xylem":       schemaAny("Budget envelope object: {max_attempts, max_wall_seconds, max_depth}."),
+			"xylem":       schemaAny("Budget envelope object: {max_attempts, max_wall_seconds, max_depth, max_children_per_item}."),
 			"phloem":      schemaString("Projection/reference used for context flow."),
 			"description": schemaString("Human-readable description."),
 		}),
@@ -736,6 +736,9 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 				}
 				if errors.Is(err, workitems.ErrRelationCycle) {
 					return nil, replayableToolErr(fmt.Errorf("relation cycle: parent %s descends from child", parent))
+				}
+				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
+					return nil, replayableToolErr(err)
 				}
 				return nil, err
 			}

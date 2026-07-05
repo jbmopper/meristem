@@ -239,6 +239,7 @@ func TestFeedItemAnchorsCoverIncludedKinds(t *testing.T) {
 		domain.EventWorkItemEventAppended:      {domain.SubjectWorkItem, subjectAnchored},
 		domain.EventWorkItemRelationAdded:      {domain.SubjectWorkItem, []uuid.UUID{subject, payloadWorkItem, payloadHuman}},
 		domain.EventWorkItemMetadataUpdated:    {domain.SubjectWorkItem, subjectAnchored},
+		domain.EventXylemExhausted:             {domain.SubjectWorkItem, subjectAnchored},
 		domain.EventSignalReceived:             {domain.SubjectSignal, payloadAnchored},
 		domain.EventDeterministicErrorReported: {domain.SubjectDeterministicError, nil},
 		domain.EventDeterministicErrorMasked:   {domain.SubjectDeterministicError, nil},

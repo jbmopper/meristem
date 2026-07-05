@@ -63,6 +63,7 @@ payload:
     max_attempts: 3
     max_wall_seconds: 1800
     max_depth: 1
+    max_children_per_item: 0                  -- optional; 0/absent uses safety policy fallback
   phloem:     "projection:work-item-brief"    -- string ref until R6 lands; resolved ref after
   description: "<free text>"                  -- narrative
 ```

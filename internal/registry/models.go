@@ -28,9 +28,10 @@ type Profile struct {
 }
 
 type Xylem struct {
-	MaxAttempts    int `json:"max_attempts"`
-	MaxWallSeconds int `json:"max_wall_seconds"`
-	MaxDepth       int `json:"max_depth"`
+	MaxAttempts        int `json:"max_attempts"`
+	MaxWallSeconds     int `json:"max_wall_seconds"`
+	MaxDepth           int `json:"max_depth"`
+	MaxChildrenPerItem int `json:"max_children_per_item,omitempty"`
 }
 
 type Tropism struct {

@@ -30,6 +30,7 @@ func TestExpectedKindsAreClassified(t *testing.T) {
 		domain.EventWorkItemEventAppended,
 		domain.EventWorkItemRelationAdded,
 		domain.EventWorkItemMetadataUpdated,
+		domain.EventXylemExhausted,
 		domain.EventSignalReceived,
 		domain.EventDeterministicErrorReported,
 		domain.EventDeterministicErrorMasked,

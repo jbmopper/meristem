@@ -93,6 +93,7 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventWorkItemTransitioned,
 		domain.EventWorkItemRelationAdded,
 		domain.EventWorkItemMetadataUpdated,
+		domain.EventXylemExhausted,
 		domain.EventSignalReceived,
 		domain.EventEscalationRequested,
 		domain.EventPatienceBreached,

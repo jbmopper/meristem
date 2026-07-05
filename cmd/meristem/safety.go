@@ -28,6 +28,7 @@ func runSafety(_ context.Context, logger *slog.Logger, args []string) error {
 		MaxRequestBodyBytes int64            `json:"max_request_body_bytes"`
 		MaxFeedWaitSeconds  int64            `json:"max_feed_wait_seconds"`
 		MaxDelegationDepth  int              `json:"max_delegation_depth"`
+		MaxChildrenPerItem  int              `json:"max_children_per_item"`
 		PatienceSeconds     map[string]int64 `json:"patience_seconds"`
 	}{
 		Status:              "ok",
@@ -35,6 +36,7 @@ func runSafety(_ context.Context, logger *slog.Logger, args []string) error {
 		MaxRequestBodyBytes: policy.MaxRequestBodyBytes,
 		MaxFeedWaitSeconds:  int64(policy.MaxFeedWait.Seconds()),
 		MaxDelegationDepth:  policy.MaxDelegationDepth,
+		MaxChildrenPerItem:  policy.MaxChildrenPerItem,
 		PatienceSeconds:     make(map[string]int64, len(policy.PatienceBudgets)),
 	}
 	for state, budget := range policy.PatienceBudgets {
