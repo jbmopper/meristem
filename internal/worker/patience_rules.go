@@ -9,6 +9,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/registry"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 const (
@@ -91,8 +92,9 @@ func (w *Worker) resolvePatienceRule(ctx context.Context, state domain.WorkItemS
 		return patienceResolution{}, fmt.Errorf("patience_budget_seconds must be >= 0")
 	}
 	if meta.PatienceBudgetSeconds > 0 {
+		budget := capPatienceBudgetSeconds(meta.PatienceBudgetSeconds)
 		return patienceResolution{
-			Budget:         time.Duration(meta.PatienceBudgetSeconds) * time.Second,
+			Budget:         budget,
 			BudgetSource:   budgetSourceItemMetadata,
 			EscalationRule: rule,
 			Cultivar:       cultivarRef,
@@ -106,8 +108,9 @@ func (w *Worker) resolvePatienceRule(ctx context.Context, state domain.WorkItemS
 		if item.Xylem.MaxWallSeconds <= 0 {
 			return patienceResolution{}, fmt.Errorf("cultivar %s@%d has non-positive xylem.max_wall_seconds", item.Name, item.Version)
 		}
+		budget := capPatienceBudgetSeconds(item.Xylem.MaxWallSeconds)
 		return patienceResolution{
-			Budget:         time.Duration(item.Xylem.MaxWallSeconds) * time.Second,
+			Budget:         budget,
 			BudgetSource:   budgetSourceCultivar,
 			EscalationRule: rule,
 			Cultivar:       fmt.Sprintf("%s@%d", item.Name, item.Version),
@@ -130,6 +133,13 @@ func decodeLaunchMetadata(raw []byte) (launchMetadata, error) {
 	}
 	meta.Cultivar = strings.TrimSpace(meta.Cultivar)
 	return meta, nil
+}
+
+func capPatienceBudgetSeconds(seconds int) time.Duration {
+	if int64(seconds) > int64(safety.MaxPatienceBudget/time.Second) {
+		return safety.MaxPatienceBudget
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func nonTerminalStateStrings() []string {

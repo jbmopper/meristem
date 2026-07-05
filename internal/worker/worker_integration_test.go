@@ -19,6 +19,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/registry"
+	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -475,6 +476,56 @@ func TestScanOnceUsesCultivarXylemPatienceBudget(t *testing.T) {
 	}
 	if payload.EscalationRule != string(domain.EscalationRuleHandToHuman) {
 		t.Fatalf("escalation_rule = %q, want %q", payload.EscalationRule, domain.EscalationRuleHandToHuman)
+	}
+}
+
+func TestScanOnceCapsCultivarXylemPatienceBudgetAtFiniteMaximum(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-cultivar-patience-cap")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	seedFastWorkerCultivar(t, ctx, pool, writer, systemTok.Token, int(safety.MaxPatienceBudget/time.Second)+1)
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:    "cultivar launch budget capped",
+		State:    domain.WorkItemCaptured,
+		Cultivar: "fast-worker@1",
+		Actor:    systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 7, 13, 30, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-safety.MaxPatienceBudget-time.Minute))
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	payload := patiencePayloadForSubject(t, ctx, pool, item.ID)
+	if payload.BudgetSeconds != int64(safety.MaxPatienceBudget/time.Second) || payload.BudgetSource != budgetSourceCultivar {
+		t.Fatalf("payload budget = %ds/%s, want %ds/%s",
+			payload.BudgetSeconds,
+			payload.BudgetSource,
+			int64(safety.MaxPatienceBudget/time.Second),
+			budgetSourceCultivar)
 	}
 }
 

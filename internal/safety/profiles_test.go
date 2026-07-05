@@ -43,7 +43,7 @@ func TestProfileByNameUnknownIsStructured(t *testing.T) {
 
 func TestValidateRejectsEffectivelyInfinitePatience(t *testing.T) {
 	p := DefaultPolicy()
-	p.PatienceBudgets[domain.WorkItemCaptured] = 365 * 24 * time.Hour
+	p.PatienceBudgets[domain.WorkItemCaptured] = MaxPatienceBudget + time.Second
 	if err := p.Validate(); err == nil {
 		t.Fatal("expected a patience budget beyond the finite cap to fail validation")
 	}

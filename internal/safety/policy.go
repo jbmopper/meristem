@@ -31,12 +31,12 @@ const (
 	defaultMaxRequestBodyBytes int64 = 1 << 20 // 1 MiB
 	defaultMaxFeedWait               = 60 * time.Second
 
-	// maxPatienceBudget is the ceiling on any per-state patience budget in
+	// MaxPatienceBudget is the ceiling on any patience budget in
 	// any profile. Bounded patience is the invariant (spec principle 3);
 	// "relaxed" may stretch a budget, never sever it. A budget above this
 	// cap is treated as an attempt to encode "wait forever" and fails
 	// validation.
-	maxPatienceBudget = 30 * 24 * time.Hour
+	MaxPatienceBudget = 30 * 24 * time.Hour
 )
 
 // Profile names. The profile set is code-owned like the policy itself:
@@ -50,7 +50,7 @@ const (
 	ProfileSteady = "steady"
 	// ProfileBringUp relaxes patience for a system whose backlog and
 	// reconcilers are still being stood up: budgets are generous but every
-	// one remains finite and under maxPatienceBudget.
+	// one remains finite and under MaxPatienceBudget.
 	ProfileBringUp = "bring-up"
 )
 
@@ -136,8 +136,8 @@ func (p Policy) Validate() error {
 		if dur <= 0 {
 			return fmt.Errorf("safety: patience budget for state %q must be positive", state)
 		}
-		if dur > maxPatienceBudget {
-			return fmt.Errorf("safety: patience budget for state %q exceeds the %s finite cap; bounded patience admits no effectively-infinite budget", state, maxPatienceBudget)
+		if dur > MaxPatienceBudget {
+			return fmt.Errorf("safety: patience budget for state %q exceeds the %s finite cap; bounded patience admits no effectively-infinite budget", state, MaxPatienceBudget)
 		}
 	}
 	return nil

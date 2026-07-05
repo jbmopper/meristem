@@ -5,11 +5,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 // All Service tests in this file exercise paths that return *before* the
@@ -84,6 +86,15 @@ func TestCreate_RejectsInvalidMetadata(t *testing.T) {
 				Actor:          testActor(),
 			},
 			want: "invalid escalation_rule",
+		},
+		{
+			name: "patience budget above finite cap",
+			in: CreateInput{
+				Title:                 "thing",
+				PatienceBudgetSeconds: int(safety.MaxPatienceBudget/time.Second) + 1,
+				Actor:                 testActor(),
+			},
+			want: "finite cap",
 		},
 	}
 	for _, tc := range cases {

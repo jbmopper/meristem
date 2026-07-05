@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 func TestDefaultBudgetsCoversAllNonTerminalStates(t *testing.T) {
@@ -149,6 +152,29 @@ func TestEvaluateBreachesPreservesInputOrder(t *testing.T) {
 	if breaches[0].Candidate.ID != a || breaches[1].Candidate.ID != c {
 		t.Errorf("EvaluateBreaches did not preserve input order; got [%s, %s], want [%s, %s]",
 			breaches[0].Candidate.ID, breaches[1].Candidate.ID, a, c)
+	}
+}
+
+func TestResolvePatienceRuleCapsExplicitBudgetAtFiniteMaximum(t *testing.T) {
+	w := &Worker{}
+	raw := []byte(fmt.Sprintf(`{"patience_budget_seconds":%d}`, int64(safety.MaxPatienceBudget/time.Second)+1))
+
+	resolved, err := w.resolvePatienceRule(context.Background(), domain.WorkItemCaptured, raw)
+	if err != nil {
+		t.Fatalf("resolvePatienceRule: %v", err)
+	}
+	if resolved.Budget != safety.MaxPatienceBudget {
+		t.Fatalf("budget = %s, want finite cap %s", resolved.Budget, safety.MaxPatienceBudget)
+	}
+	if resolved.BudgetSource != budgetSourceItemMetadata {
+		t.Fatalf("budget_source = %q, want %q", resolved.BudgetSource, budgetSourceItemMetadata)
+	}
+}
+
+func TestCapPatienceBudgetSecondsLeavesUnderCapAlone(t *testing.T) {
+	got := capPatienceBudgetSeconds(90)
+	if got != 90*time.Second {
+		t.Fatalf("budget = %s, want 90s", got)
 	}
 }
 

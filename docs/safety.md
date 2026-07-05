@@ -12,7 +12,7 @@ This slice is **not** operator-tunable via environment variables. Policy lives i
 | `MaxFeedWait` | Maximum `wait` query duration on **`GET /v1/feed`** watcher mode. Larger values receive **400** with `wait_too_large`. |
 | `PatienceBudgets` | Positive duration per **non-terminal** `work_item` state. Used by `internal/worker` default budgets and validated at startup so the bounded-patience invariant has explicit numbers. |
 
-Default values are defined in `internal/safety/policy.go` (currently 1 MiB bodies, 60s max feed wait, and the same per-state patience defaults the worker used historically).
+Default values are defined in `internal/safety/policy.go` (currently 1 MiB bodies, 60s max feed wait, and the same per-state patience defaults the worker used historically). `MaxPatienceBudget` is the shared finite ceiling: policy profiles, explicit work-item `patience_budget_seconds`, and cultivar-derived xylem wall-clock budgets must not create an effectively infinite wait.
 
 ## Fingerprint
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,7 @@ import (
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/registry"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 var (
@@ -375,6 +377,9 @@ func buildCreatedPayload(ctx context.Context, pool *pgxpool.Pool, in CreateInput
 		return nil, fmt.Errorf("workitems: patience_budget_seconds must be >= 0")
 	}
 	if in.PatienceBudgetSeconds > 0 {
+		if int64(in.PatienceBudgetSeconds) > int64(safety.MaxPatienceBudget/time.Second) {
+			return nil, fmt.Errorf("workitems: patience_budget_seconds exceeds the %s finite cap; bounded patience admits no effectively-infinite budget", safety.MaxPatienceBudget)
+		}
 		payload["patience_budget_seconds"] = in.PatienceBudgetSeconds
 	}
 	rule, err := normalizeEscalationRule(in.EscalationRule)
