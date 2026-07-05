@@ -210,12 +210,16 @@ Convergence checks:
 - **Stage 1 — human, one command.** `meristem seed` under a
   `system`-source token. Idempotent (discriminator-aware). Plants: the
   substrate backlog (these R-items), rootstock cultivars, named
-  projections including the dispatch feed, and both policy profiles with
-  `bring-up` active. Client-token minting remains a root/human act; the
-  seed plants token *requests* as work items awaiting the owner.
+  projections including the dispatch feed. Policy profiles are code-owned
+  and reported through `/readyz`; switching to `bring-up` remains an explicit
+  non-root human action so agents are governed by the profile rather than
+  authoring it. Client-token minting remains a root/human act; until the
+  approval-table substrate exists, any token-request handoff is represented
+  as ordinary work_item/review state, not an auto-approved side effect.
 - **Stage 2 — agents.** Everything else. The first minted worker connects,
   reads the dispatch feed, and the system grows itself. Human touchpoints
-  from here: approvals, escalations, profile switches, panic revoke.
+  from here: token grants, explicit profile switches, escalations, future
+  approvals, and panic revoke.
 
 Corpus: raw dumps stay private (they are the owner's legible planning
 diary — inbox captures verbatim, tooling topology, working hours). The
@@ -227,7 +231,9 @@ Replay test: restore an archive dump → replay → projections identical.
 Convergence checks:
 - `seed` twice on a fresh database: second run appends zero fresh events.
 - Fresh bootstrap + seed on a clean host reaches "first worker dispatched"
-  with exactly two human commands and one token approval.
+  with root custody, system-token seed attribution, an explicit human
+  `bring-up` switch, and a recorded token-grant/review step for the first
+  worker.
 - Exporter output on the 2026-06-06 archive contains no token names, no
   inbox `message.captured` bodies, and no non-allowlisted kinds (test
   asserts the allowlist).
