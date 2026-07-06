@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - footgun
+      - main
+      - v1
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOCACHE: /tmp/meristem-go-cache
+  MERISTEM_DATABASE_URL: postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable
+  MERISTEM_TEST_DATABASE_URL: postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable
+
+jobs:
+  test:
+    name: Unit, integration, and rebuild
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meristem
+          POSTGRES_PASSWORD: meristem
+          POSTGRES_DB: meristem
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meristem -d meristem"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Unit test suite
+        run: go test ./... -count=1
+
+      - name: Postgres integration suite
+        env:
+          MERISTEM_INTEGRATION: "1"
+        run: go test ./... -count=1
+
+      - name: Seeded projection rebuild gate
+        run: |
+          go run ./cmd/meristem safety check
+          go run ./cmd/meristem migrate
+
+          root_out="$(go run ./cmd/meristem tokens create --root --name ci-root --source human)"
+          root_token="$(printf '%s\n' "$root_out" | awk -F= '$1 == "secret" { print $2 }')"
+          test -n "$root_token"
+
+          seed_out="$(MERISTEM_TOKEN="$root_token" go run ./cmd/meristem tokens create --name ci-seed --source system)"
+          seed_token="$(printf '%s\n' "$seed_out" | awk -F= '$1 == "secret" { print $2 }')"
+          test -n "$seed_token"
+
+          MERISTEM_TOKEN="$seed_token" go run ./cmd/meristem seed v1
+          go run ./cmd/meristem rebuild --verbose

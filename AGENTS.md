@@ -191,7 +191,7 @@ an external model provider is pointed at a workspace.
 ## Testing
 
 - Pure logic (parsers, validators, deterministic id generation, projection writers): plain unit tests, no external services. Projection writers are the *most important* place for unit tests — given an event, assert the derived row.
-- Anything that touches Postgres: integration tests against a real Postgres (the current harness uses Docker Compose or an existing local Postgres via `MERISTEM_TEST_DATABASE_URL`). No mock pools.
+- Anything that touches Postgres: integration tests against a real Postgres (the current harness uses Docker Compose or an existing local Postgres via `MERISTEM_TEST_DATABASE_URL`). No mock pools. CI runs the integration lane with `MERISTEM_INTEGRATION=1` and also runs `meristem rebuild` against a migrated, seeded fixture database.
 - Tests must pass without flakes when run repeatedly. Idempotent.
 - Add a regression test alongside any bug fix.
 

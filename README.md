@@ -242,16 +242,15 @@ The default test suite is unit-level and does not require Postgres:
 GOCACHE=/tmp/meristem-go-cache go test ./...
 ```
 
-Postgres integration tests are opt-in. They create a temporary database on the same server as `MERISTEM_DATABASE_URL`, apply migrations, exercise the HTTP API through `httptest`, then drop the temporary database.
+Postgres integration tests are opt-in locally and mandatory in CI. They create a temporary database on the same server as `MERISTEM_DATABASE_URL` or `MERISTEM_TEST_DATABASE_URL`, apply migrations, exercise the HTTP API through `httptest`, then drop the temporary database.
 
 ```bash
 docker compose up -d postgres
-export MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable'
-MERISTEM_INTEGRATION=1 GOCACHE=/tmp/meristem-go-cache \
-  go test ./internal/api -run TestSignalsEndpointIntegration -count=1 -v
+export MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable'
+MERISTEM_INTEGRATION=1 GOCACHE=/tmp/meristem-go-cache go test ./... -count=1
 ```
 
-Use `MERISTEM_TEST_DATABASE_URL` instead of `MERISTEM_DATABASE_URL` if you want integration tests to target a different Postgres server.
+Use `MERISTEM_TEST_DATABASE_URL` instead of `MERISTEM_DATABASE_URL` if you want integration tests to target a different Postgres server. The GitHub Actions workflow also runs `meristem safety check`, migrates a seeded fixture database, runs `meristem seed v1`, and gates the build on `meristem rebuild --verbose` reporting no projection drift.
 
 ## Configuration
 
