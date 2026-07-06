@@ -77,6 +77,8 @@ Expect, per pass (all idempotent on re-run — a second tick emits ~0 fresh):
 - breach: `patience.breached` per over-budget epoch, escalated to human-attention
   items under bring-up budgets. Items already `human_review_status=blocked` are
   the fixed point — recorded, never re-escalated.
+  A breach is open only while the item is still in the same state epoch named
+  by the breach payload; later lifecycle transitions make it historical.
 
 ## 5. Read the system
 
@@ -84,7 +86,7 @@ Expect, per pass (all idempotent on re-run — a second tick emits ~0 fresh):
 OP="Authorization: Bearer $(tr -d '\n' < .meristem/operator.token)"
 curl -sS -H "$OP" 'localhost:8080/v1/backlog/readiness?limit=200'           # grouped board
 curl -sS -H "$OP" 'localhost:8080/v1/feed?projection=activity'              # default activity log
-curl -sS -H "$OP" 'localhost:8080/v1/feed?projection=owner-attention'       # escalations + breaches
+curl -sS -H "$OP" 'localhost:8080/v1/feed?projection=owner-attention'       # escalations + breach history
 curl -sS -H "$OP" 'localhost:8080/v1/feed?projection=dispatch'              # launcher work queue
 ```
 Feeds page by opaque **cursor**, never by timestamp; a cursor is bound to its

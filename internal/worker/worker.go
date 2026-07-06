@@ -3,27 +3,29 @@
 // escalation path. v0 left this as a manual concern; the worker is the v1
 // substrate that closes it.
 //
-// Scope of this slice:
+// Current scope:
 //
-//   - One-shot scan over work_items in non-terminal states (ScanOnce).
+//   - One-shot scan over work_items in non-terminal states (ScanOnce), with
+//     cmd/meristem wrapping it in the always-on daemon loop.
 //   - Patience rule resolution from launch metadata, cultivar xylem, or
 //     the active policy profile's per-state fallback budgets.
 //   - One patience.breached event per (work_item, state-epoch) breach
 //     observed, followed by a deterministic human escalation for that epoch.
+//     Open vs resolved breach attention is a read-side correlation: a breach is
+//     open only while the current work_items projection still names the same
+//     state and state_entered_at epoch recorded in the breach payload.
 //   - A narrow convergence pass for running work_items whose
 //     suggested_convergence_checks declare the all-pass checklist pattern.
 //     The worker records a convergence verdict before any lifecycle action.
 //
 // Out of scope (next slices):
 //
-//   - Daemon loop. ScanOnce is the kernel; wrapping it in time.Tick + the
-//     shutdown dance is mechanical and lives in the cmd-side runner.
 //   - Job execution from the durable queue. dispatch.requested now enqueues
 //     jobs and the queue exposes a SKIP LOCKED lease primitive, but ScanOnce
 //     still performs the deterministic reconciliation pass directly.
-//   - Resolution events (patience.resolved when an item leaves the breached
-//     state). For now resolution is implicit in the work_item.transitioned
-//     event already in the log; consumers correlate on (subject_id, time).
+//   - First-class resolution events such as patience.resolved. The current
+//     contract deliberately avoids redundant events because work_item.transitioned
+//     already changes the replayed state epoch that resolves a breach.
 package worker
 
 import (

@@ -13,8 +13,8 @@ name a concrete test or deterministic check in this repository.
 
 ### Deterministic event ids.
 
-- Check: `internal/events/events_test.go` pins canonical payload identity, discriminator behavior, subject/kind separation, nil payload handling, and attribution exclusion; `internal/events/canonical_test.go` pins canonical JSON; `internal/api/transition_cycle_integration_test.go` covers repeated transition payloads through the REST idempotency seam.
-- Evidence: event identity is tested at the pure reducer layer and at the API transition cycle that previously exposed payload-only collisions.
+- Check: `internal/events/events_test.go` pins canonical payload identity, discriminator behavior, subject/kind separation, nil payload handling, and attribution exclusion; `internal/events/canonical_test.go` pins canonical JSON; `internal/api/transition_cycle_integration_test.go` covers repeated transition payloads through the REST idempotency seam; `internal/worker/worker_integration_test.go` covers the patience attention contract where one `patience.breached` event remains the durable breach fact and later `work_item.transitioned` events resolve it by state-epoch correlation rather than by appending redundant resolution events.
+- Evidence: event identity is tested at the pure reducer layer, at the API transition cycle that previously exposed payload-only collisions, and at the bounded-patience read model that distinguishes open from resolved attention after replaying the same event log into `work_items`.
 
 ### `SELECT … FOR UPDATE SKIP LOCKED`
 

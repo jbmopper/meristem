@@ -217,6 +217,9 @@ runs four passes in order (`internal/worker`):
 4. **Breach**. For every still-non-terminal item with a budget, it emits one
    `patience.breached` per over-budget state epoch and routes that epoch through
    the human-escalation path — *unless* the item is already at the fixed point.
+   Breach resolution is not another event: consumers correlate the breach
+   payload's state epoch with the replayed `work_items` projection. If the item
+   has since transitioned, the breach is historical.
 
 **Deterministic event ids with discriminators.** Every event id is
 `uuid(sha256(subject_kind || ':' || subject_id || ':' || kind ||
@@ -262,8 +265,9 @@ having lied, and `meristem rebuild` (step 6) exists to prove it hasn't.
 over event kinds and taxonomy classes — added by a write
 (`projection.defined`, scope `registry.write`), not a deploy. The seed plants
 `activity@1` (the default feed — the no-argument read path is literally this
-projection), `owner-attention@1` (`escalation.requested` +
-`patience.breached` — your nudge feed), and `dispatch@1` (the launcher queue).
+projection), `owner-attention@1` (`escalation.requested` plus
+`patience.breached` history — your nudge feed), and `dispatch@1` (the launcher
+queue).
 Critically, **projections select content; they never grant or narrow
 authority.** Every projection read still passes through your token's access
 reduction, so a projection can show you nothing your scopes would hide and hide

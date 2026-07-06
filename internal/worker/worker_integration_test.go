@@ -371,6 +371,84 @@ func TestScanOnceBlockedHumanReviewBreachesButDoesNotEscalate(t *testing.T) {
 	}
 }
 
+func TestPatienceAttentionResolutionFollowsStateEpoch(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-patience-attention-resolution")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:             "owner-held patience breach",
+		State:             domain.WorkItemCaptured,
+		HumanReviewStatus: domain.HumanReviewBlocked,
+		Actor:             systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Hour))
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	if result.PatienceEscalationsSkippedAwaitingHuman != 1 {
+		t.Fatalf("skipped awaiting human = %d, want 1", result.PatienceEscalationsSkippedAwaitingHuman)
+	}
+
+	open, err := ListPatienceAttention(ctx, pool, PatienceAttentionOptions{})
+	if err != nil {
+		t.Fatalf("list open patience attention: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open patience attention count = %d, want 1: %+v", len(open), open)
+	}
+	if open[0].WorkItemID != item.ID || open[0].Status != PatienceAttentionOpen {
+		t.Fatalf("open attention = %+v, want item %s status open", open[0], item.ID)
+	}
+	if open[0].State != domain.WorkItemCaptured {
+		t.Fatalf("open attention state = %s, want captured", open[0].State)
+	}
+
+	if _, err := service.Transition(ctx, item.ID, domain.WorkItemCanceled, "owner resolved patience attention", systemTok.Token); err != nil {
+		t.Fatalf("resolve item: %v", err)
+	}
+	open, err = ListPatienceAttention(ctx, pool, PatienceAttentionOptions{})
+	if err != nil {
+		t.Fatalf("list open patience attention after transition: %v", err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open patience attention after transition = %+v, want none", open)
+	}
+	all, err := ListPatienceAttention(ctx, pool, PatienceAttentionOptions{IncludeResolved: true})
+	if err != nil {
+		t.Fatalf("list all patience attention: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("all patience attention count = %d, want 1: %+v", len(all), all)
+	}
+	if all[0].Status != PatienceAttentionResolved || all[0].CurrentState != domain.WorkItemCanceled {
+		t.Fatalf("resolved attention = %+v, want resolved/current canceled", all[0])
+	}
+}
+
 func TestScanOnceUsesExplicitLaunchPatienceRule(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
