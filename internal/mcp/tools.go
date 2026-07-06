@@ -1611,6 +1611,9 @@ func validateWorkItemStateArg(state string) error {
 }
 
 func schemaObject(required []string, properties map[string]any) map[string]any {
+	if properties == nil {
+		properties = map[string]any{}
+	}
 	out := map[string]any{
 		"type":                 "object",
 		"properties":           properties,
