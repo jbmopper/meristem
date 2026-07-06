@@ -63,6 +63,14 @@ func TestAPIErrorMappersUseTypedDomainErrors(t *testing.T) {
 			code:   "xylem_budget_exhausted",
 		},
 		{
+			name: "unexpected event dedupe",
+			write: func(w http.ResponseWriter) {
+				writeWorkItemError(w, fmt.Errorf("%w: kind=work_item.transitioned", workitems.ErrUnexpectedEventDedupe))
+			},
+			status: http.StatusConflict,
+			code:   "unexpected_event_dedupe",
+		},
+		{
 			name: "access denied",
 			write: func(w http.ResponseWriter) {
 				writeAccessError(w, access.ErrDenied, "token cannot read work_items")

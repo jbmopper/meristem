@@ -892,6 +892,10 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "xylem_budget_exhausted", err.Error())
 		return
 	}
+	if errors.Is(err, workitems.ErrUnexpectedEventDedupe) {
+		writeAPIError(w, http.StatusConflict, "unexpected_event_dedupe", err.Error())
+		return
+	}
 	if errors.Is(err, workitems.ErrInvalidTransition) {
 		writeAPIError(w, http.StatusConflict, "invalid_transition", err.Error())
 		return

@@ -1357,7 +1357,8 @@ func workItemToolErr(err error, notFound error) error {
 		errors.Is(err, workitems.ErrInvalidTransition),
 		errors.Is(err, workitems.ErrRelationCycle),
 		errors.Is(err, workitems.ErrConvergenceChecksRequired),
-		errors.Is(err, workitems.ErrXylemBudgetExhausted):
+		errors.Is(err, workitems.ErrXylemBudgetExhausted),
+		errors.Is(err, workitems.ErrUnexpectedEventDedupe):
 		return replayableToolErr(err)
 	default:
 		return err

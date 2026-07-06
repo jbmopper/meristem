@@ -23,6 +23,7 @@ func TestMCPToolErrorMappersUseTypedDomainErrors(t *testing.T) {
 		{"work item invalid transition", workItemToolErr(fmt.Errorf("%w: from done to running", workitems.ErrInvalidTransition), nil)},
 		{"work item validation", workItemToolErr(fmt.Errorf("%w: title is required", workitems.ErrInvalidRequest), nil)},
 		{"xylem budget", workItemToolErr(fmt.Errorf("%w: max_children_per_item", workitems.ErrXylemBudgetExhausted), nil)},
+		{"unexpected event dedupe", workItemToolErr(fmt.Errorf("%w: kind=work_item.transitioned", workitems.ErrUnexpectedEventDedupe), nil)},
 		{"registry conflict", registryToolErr(fmt.Errorf("%w: cultivar already exists", registry.ErrVersionConflict))},
 		{"projection conflict", projectionToolErr(fmt.Errorf("%w: projection already exists", projectiondefs.ErrVersionConflict))},
 		{"approval validation", approvalToolErr(fmt.Errorf("%w: summary is required", approvals.ErrInvalidRequest))},
