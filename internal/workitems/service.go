@@ -41,6 +41,12 @@ var (
 	// convergence checks tries to move into execution states. The scribe worker
 	// is the deterministic path for filling those checks.
 	ErrConvergenceChecksRequired = errors.New("workitems: convergence checks required")
+	// ErrUnexpectedEventDedupe is returned when a first-attempt mutation's
+	// event collides with an existing row while NOT running under the
+	// idempotency contract. Without a discriminator, fresh=false here means
+	// the action was silently swallowed (the original 2026-07-03 live bug);
+	// failing loudly turns silent state desync into a reportable error.
+	ErrUnexpectedEventDedupe = errors.New("workitems: unexpected_event_dedupe: identical event already exists; if this is a distinct action, retry through the idempotency contract")
 	// ErrXylemBudgetExhausted is returned after the service has recorded a
 	// structured xylem.exhausted event and routed the affected item through
 	// its escalation rule. The requested over-budget action is not appended.
@@ -632,6 +638,13 @@ func (s *Service) appendWorkItemEventWithRateBudget(ctx context.Context, tx pgx.
 		return false, nil, err
 	}
 	if exists {
+		if spec.Discriminator == "" {
+			// A first-attempt append outside the idempotency contract just
+			// collided with an existing event: without a discriminator this
+			// is the silent-swallow bug class (2026-07-03), not a replay.
+			// Fail loudly so callers surface it instead of desyncing.
+			return false, nil, fmt.Errorf("%w: kind=%s subject=%s", ErrUnexpectedEventDedupe, spec.Kind, spec.SubjectID)
+		}
 		return false, nil, nil
 	}
 	class, ok := feed.ClassifyEvent(spec.Kind, spec.Payload)
