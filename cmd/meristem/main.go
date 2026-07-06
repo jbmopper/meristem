@@ -3,7 +3,7 @@
 // Two runtime modes share one codebase and one database, per the spec:
 //
 //	meristem api               - HTTP surface
-//	meristem worker --once     - one-shot bounded-patience scan (v1 kernel)
+//	meristem worker            - deterministic reconciler daemon
 //
 // Plus operational subcommands:
 //
@@ -151,7 +151,8 @@ usage:
   meristem mcp               run the MCP stdio server (reads MERISTEM_TOKEN)
   meristem seed v1           seed the v1 substrate backlog (reads MERISTEM_TOKEN, must be source=system)
   meristem rebuild           fold events through projectors into a sandbox schema and diff vs live
-  meristem worker --once     one-shot bounded-patience scan (reads MERISTEM_TOKEN, must be source=system)
+  meristem worker            run the deterministic reconciler daemon (reads MERISTEM_TOKEN, must be source=system)
+  meristem worker --once     run one deterministic reconciler tick
   meristem feed [--watch]    human-readable terminal view of the activity log
   meristem safety check      validate deterministic resource-safety controls
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
@@ -159,8 +160,8 @@ usage:
   meristem help              show this message
 
 environment:
-  MERISTEM_DATABASE_URL  Postgres DSN (required for api, migrate, mcp, tokens, seed)
+  MERISTEM_DATABASE_URL  Postgres DSN (required for api, worker, migrate, mcp, tokens, seed)
   MERISTEM_HTTP_ADDR     listen address for the api (default :8080)
-  MERISTEM_TOKEN         bearer secret for mcp (any token), tokens (root), seed (system)
+  MERISTEM_TOKEN         bearer secret for mcp (any token), tokens (root), seed/worker (system)
 `, version)
 }

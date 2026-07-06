@@ -697,7 +697,7 @@ func resolveFeedToken() (token, source string, err error) {
 // priorityTokens is the file-discovery order resolveFeedToken uses inside a
 // .meristem/ directory. Order is most-permissive-first: root can do anything,
 // agent-A is the standard non-root bearer minted by bootstrap, seed is the
-// system token used by `meristem seed v1` and `meristem worker --once`.
+// system token used by `meristem seed v1` and `meristem worker`.
 var priorityTokens = []string{
 	"root.token",
 	"agent-A.token",

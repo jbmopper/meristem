@@ -15,6 +15,7 @@ Currently shipped:
 - `meristem migrate` — apply embedded Postgres migrations.
 - `meristem safety check` — validate deterministic resource limits (request bodies, feed long-poll cap, patience budgets); `api`, `worker`, `mcp`, and non–dry-run `seed v1` refuse to start if invalid.
 - `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, work-item routes, and read-only Streamable HTTP MCP at `/mcp`.
+- `meristem worker` — always-on deterministic reconciler daemon; `worker --once` remains the one-tick verification path.
 - `meristem tokens {create, list, revoke}` plus `POST /v1/tokens/revoke-all` — bearer token lifecycle and root-only panic revocation.
 - `meristem mcp` — JSON-RPC over stdio MCP server with parity to the v0 REST surface; this remains the write-capable compatibility transport while HTTP MCP write idempotency is specified.
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
@@ -67,6 +68,9 @@ After bootstrap, start the API and post a signal:
 go run ./cmd/meristem safety check
 MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
   go run ./cmd/meristem api &
+MERISTEM_TOKEN="$(cat .meristem/seed.token)" \
+  MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+  go run ./cmd/meristem worker &
 
 MERISTEM_TOKEN=$(cat .meristem/root.token) \
   go run ./cmd/meristem tokens create --name example --source agent
@@ -93,6 +97,12 @@ go run ./cmd/meristem tokens create --root          # one-time
 go run ./cmd/meristem api
 ```
 
+In another shell, keep the reconciler running:
+
+```bash
+MERISTEM_TOKEN="$(cat .meristem/seed.token)" go run ./cmd/meristem worker
+```
+
 In another shell:
 
 ```bash
@@ -110,7 +120,7 @@ go run ./cmd/meristem migrate down
 
 ### Container: `meristem` in Docker (compose profile `app`)
 
-Use this when another project on the same host needs a stable, always-on endpoint. Builds the meristem image from the local source and runs `meristem migrate` once as an init container before bringing up the api.
+Use this when another project on the same host needs a stable, always-on endpoint. Builds the meristem image from the local source and runs `meristem migrate` once as an init container before bringing up the api. Run `meristem worker` beside the API with a dedicated source=system token so reconciliation is also always-on.
 
 If you have an **older** local compose volume from before the Postgres role/database matched this repo, drop the stale named volume or `docker volume prune` so Postgres re-initializes with the `meristem` user and database from `docker-compose.yml`.
 

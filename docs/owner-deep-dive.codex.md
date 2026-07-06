@@ -77,14 +77,15 @@ the operator can retry the POST with the same idempotency key and not create
 extra history. Agents cannot switch the profile because they are governed by
 it.
 
-## 5. Worker tick
+## 5. Worker daemon and verification tick
 
-`meristem worker --once` is the metronome slice. It is deterministic noticing,
-not model-authored judgment. It scans non-terminal work items, resolves
-per-state patience budgets from the active policy profile unless an explicit
-override applies, records bounded-patience breaches, runs checklist convergence
-for running items with declared checks, and routes breached states through the
-declared escalation behavior.
+`meristem worker` is the metronome daemon; `meristem worker --once` is the
+one-tick verification path. It is deterministic noticing, not model-authored
+judgment. Each tick scans non-terminal work items, resolves per-state patience
+budgets from the active policy profile unless an explicit override applies,
+records bounded-patience breaches, runs checklist convergence for running items
+with declared checks, and routes breached states through the declared
+escalation behavior.
 
 The worker requires a source=`system` token, like `seed v1`. That gives the
 audit trail a concrete worker identity while keeping root out of automation.
@@ -93,8 +94,9 @@ already-recorded repeats, convergence verdicts, stale-input skips, accepts,
 retries, and escalations. Re-running a tick should be safe because event ids and
 idempotency identities collapse retries.
 
-The daemon loop is still future work. Today the owner or a wrapper runs
-`worker --once` when they want a tick.
+The daemon runs one tick immediately and then repeats serially after its
+configured interval until SIGINT/SIGTERM. Operators should keep it supervised
+beside the API; `worker --once` remains the smoke test and manual repair lever.
 
 ## 6. Readiness and feeds
 

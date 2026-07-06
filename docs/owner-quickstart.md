@@ -60,12 +60,16 @@ curl -sS localhost:8080/readyz                 # -> "policy_profile":"bring-up" 
 ```
 (Stdio MCP path instead of HTTP: `MERISTEM_TOKEN=... "$BIN" mcp`, tool `policy_profile.switch`.)
 
-## 4. First live worker tick
+## 4. Start the worker
 
 ```bash
 MERISTEM_TOKEN="$(tr -d '\n' < .meristem/seed.token)" "$BIN" worker --once
 # -> worker --once: scanned=N emitted=M already_recorded=K ... dispatch_requested=D ...
+
+MERISTEM_TOKEN="$(tr -d '\n' < .meristem/seed.token)" "$BIN" worker --interval=30s &
+# -> JSON logs: "worker daemon starting", then "worker tick complete" per pass
 ```
+The `--once` line is the verification tick; the daemon is the live postcondition.
 Expect, per pass (all idempotent on re-run — a second tick emits ~0 fresh):
 - scribe: one `convergence-scribe` child per checkless captured/triaged item;
 - dispatch: `dispatch.requested` entries naming the handling cultivar;
@@ -116,6 +120,8 @@ The refresh parent's last convergence check is these docs reaching trunk.
 
 - **Approve escalations:** work `owner-attention`; record your decision as an
   event on each `human_review_status=blocked` item (exempt from escalation storms).
+- **Worker liveness:** keep one `"$BIN" worker` process supervised beside the API;
+  use SIGTERM/SIGINT for graceful stop and restart with the same source=system token.
 - **Panic revoke** (root only): `curl -s -X POST localhost:8080/v1/tokens/revoke-all -H "Authorization: Bearer $(tr -d '\n' < .meristem/root.token)" -H "Idempotency-Key: panic-$(date +%s)"` -> `{"revoked_count":N,...}`.
 - **Back to steady** when bring-up exit criteria are met: repeat step 3 with `{"profile":"steady"}`.
 - **Substrate down:** coordinate in `docs/coord/outage-YYYYMMDD.md`, then replay

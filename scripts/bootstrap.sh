@@ -196,6 +196,11 @@ Next steps:
   # Start the API on the host:
   MERISTEM_DATABASE_URL='$MERISTEM_DATABASE_URL' $MERISTEM_BIN api
 
+  # In another supervised shell/process, start the deterministic worker:
+  MERISTEM_DATABASE_URL='$MERISTEM_DATABASE_URL' \\
+    MERISTEM_TOKEN=\$(cat $SEED_TOKEN_FILE) \\
+    $MERISTEM_BIN worker
+
   # In another shell, mint a per-service token (one per integrator):
   MERISTEM_TOKEN=\$(cat $ROOT_TOKEN_FILE) \\
     $MERISTEM_BIN tokens create --name jay --source agent

@@ -1,15 +1,12 @@
-// `meristem worker --once` runs a single bounded-patience scan: it reads
-// every non-terminal work_item, runs checklist convergence for running
-// work_items with suggested checks, compares remaining dwell time against the
-// per-state budget, appends one patience.breached event per observed breach,
-// and routes each breached state epoch to a human escalation unless it is
-// already awaiting human review.
+// `meristem worker` runs the deterministic reconciler. The default form is an
+// always-on daemon loop; `meristem worker --once` runs a single bounded-patience
+// scan for verification and manual operation.
 //
-// The intent of this slice is to land the kernel and the on-the-wire
-// signal: by adding the worker subcommand and the patience.breached event
-// kind, the running system can now observe bounded-patience invariant
-// violations and reconcile checklist-declared convergence. The daemon loop is
-// a subsequent slice.
+// Each tick reads non-terminal work_items, runs checklist convergence for
+// running work_items with suggested checks, compares remaining dwell time
+// against the per-state budget, appends one patience.breached event per
+// observed breach, and routes each breached state epoch to a human escalation
+// unless it is already awaiting human review.
 //
 // Authentication mirrors `meristem seed v1`: MERISTEM_TOKEN must be a
 // system-source token. The events the worker writes attribute to "system"
@@ -19,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -26,34 +24,89 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/worker"
 )
 
 func runWorker(ctx context.Context, logger *slog.Logger, args []string) error {
-	if len(args) == 0 {
-		workerUsage(os.Stderr)
-		return fmt.Errorf("worker: missing mode (only --once is supported in this slice)")
+	if len(args) > 0 {
+		switch args[0] {
+		case "--once", "once":
+			return runWorkerOnce(ctx, logger, args[1:])
+		case "daemon":
+			return runWorkerDaemon(ctx, logger, args[1:])
+		}
+	}
+	return runWorkerDaemon(ctx, logger, args)
+}
+
+type workerRuntime struct {
+	pool          *pgxpool.Pool
+	writer        *events.Writer
+	systemTok     domain.Token
+	uniformBudget time.Duration
+}
+
+func newWorkerRuntime(ctx context.Context, logger *slog.Logger, uniformBudget time.Duration) (*workerRuntime, error) {
+	if _, _, err := validateStartupSafety(logger); err != nil {
+		return nil, err
 	}
 
-	switch args[0] {
-	case "--once", "once":
-		return runWorkerOnce(ctx, logger, args[1:])
-	default:
-		workerUsage(os.Stderr)
-		return fmt.Errorf("worker: unknown mode %q (only --once is supported in this slice)", args[0])
+	cfg, err := storage.LoadConfigFromEnv()
+	if err != nil {
+		return nil, err
 	}
+	pool, err := storage.Open(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	writer := app.NewEventWriter()
+	authService := auth.NewService(pool, writer)
+	systemTok, err := resolveWorkerSystemToken(ctx, authService)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+
+	return &workerRuntime{
+		pool:          pool,
+		writer:        writer,
+		systemTok:     systemTok,
+		uniformBudget: uniformBudget,
+	}, nil
+}
+
+func (r *workerRuntime) Close() {
+	r.pool.Close()
+}
+
+func (r *workerRuntime) ScanOnce(ctx context.Context) (worker.Result, error) {
+	profileSvc := policyprofile.NewService(r.pool, r.writer)
+	active, err := profileSvc.Active(ctx)
+	if err != nil {
+		return worker.Result{}, fmt.Errorf("worker: resolve active policy profile: %w", err)
+	}
+	budgets := worker.Budgets{ByState: active.Policy.PatienceBudgets}
+	if r.uniformBudget > 0 {
+		budgets = uniformBudgets(r.uniformBudget)
+	}
+
+	w, err := worker.New(r.pool, r.writer, budgets, &r.systemTok.ID, nil)
+	if err != nil {
+		return worker.Result{}, err
+	}
+	return w.ScanOnce(ctx)
 }
 
 func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) error {
-	if _, _, err := validateStartupSafety(logger); err != nil {
-		return err
-	}
-
 	fs := flag.NewFlagSet("worker --once", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	// --budget=DURATION overrides the per-state budgets with a single
@@ -66,51 +119,107 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		workerUsage(os.Stderr)
 		return err
 	}
+	if fs.NArg() > 0 {
+		workerUsage(os.Stderr)
+		return fmt.Errorf("worker --once: unexpected argument %q", fs.Arg(0))
+	}
 
-	cfg, err := storage.LoadConfigFromEnv()
+	runtime, err := newWorkerRuntime(ctx, logger, *uniformBudget)
 	if err != nil {
 		return err
 	}
-	pool, err := storage.Open(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
+	defer runtime.Close()
 
-	writer := app.NewEventWriter()
-	authService := auth.NewService(pool, writer)
-
-	systemTok, err := resolveWorkerSystemToken(ctx, authService)
+	result, err := runtime.ScanOnce(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Budgets come from the active policy profile (bring-up vs steady),
-	// resolved from the event-sourced projection; an un-switched or
-	// pre-0014 database resolves to steady, which equals the previous
-	// hardcoded defaults. --budget still overrides everything for
-	// operator/CI verification runs.
-	profileSvc := policyprofile.NewService(pool, writer)
-	active, err := profileSvc.Active(ctx)
-	if err != nil {
-		return fmt.Errorf("worker: resolve active policy profile: %w", err)
+	logWorkerResult(logger, "worker scan complete", runtime.systemTok, result)
+	fmt.Fprintln(os.Stdout, formatWorkerOnceResult(result))
+	return nil
+}
+
+func runWorkerDaemon(ctx context.Context, logger *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	interval := fs.Duration("interval", 30*time.Second, "duration between daemon worker ticks")
+	uniformBudget := fs.Duration("budget", 0, "uniform budget applied to every non-terminal state (overrides active profile; for verification)")
+	if err := fs.Parse(args); err != nil {
+		workerUsage(os.Stderr)
+		return err
 	}
-	budgets := worker.Budgets{ByState: active.Policy.PatienceBudgets}
-	if *uniformBudget > 0 {
-		budgets = uniformBudgets(*uniformBudget)
+	if fs.NArg() > 0 {
+		workerUsage(os.Stderr)
+		return fmt.Errorf("worker: unknown mode or argument %q", fs.Arg(0))
+	}
+	if *interval <= 0 {
+		return fmt.Errorf("worker: --interval must be positive, got %s", interval.String())
 	}
 
-	w, err := worker.New(pool, writer, budgets, &systemTok.ID, nil)
+	runtime, err := newWorkerRuntime(ctx, logger, *uniformBudget)
 	if err != nil {
 		return err
 	}
+	defer runtime.Close()
 
-	result, err := w.ScanOnce(ctx)
-	if err != nil {
-		return err
+	logger.Info("worker daemon starting",
+		slog.String("interval", interval.String()),
+		slog.String("token_id", runtime.systemTok.ID.String()),
+		slog.String("token_source", string(runtime.systemTok.Source)),
+	)
+	return runWorkerLoop(ctx, logger, *interval, func(ctx context.Context) (worker.Result, domain.Token, error) {
+		result, err := runtime.ScanOnce(ctx)
+		return result, runtime.systemTok, err
+	})
+}
+
+type workerScanFunc func(context.Context) (worker.Result, domain.Token, error)
+
+func runWorkerLoop(ctx context.Context, logger *slog.Logger, interval time.Duration, scan workerScanFunc) error {
+	if interval <= 0 {
+		return fmt.Errorf("worker: interval must be positive, got %s", interval.String())
 	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-	logger.Info("worker scan complete",
+		result, actor, err := scan(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			logger.Error("worker tick failed",
+				slog.String("token_id", actor.ID.String()),
+				slog.String("token_source", string(actor.Source)),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			logWorkerResult(logger, "worker tick complete", actor, result)
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result worker.Result) {
+	logger.Info(msg,
+		slog.String("token_id", actor.ID.String()),
+		slog.String("token_source", string(actor.Source)),
 		slog.Int("scanned", result.Scanned),
 		slog.Int("breaches_emitted", result.BreachesEmitted),
 		slog.Int("breaches_already_recorded", result.BreachesAlreadyRecorded),
@@ -132,8 +241,6 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		slog.Int("convergence_retries", result.ConvergenceRetries),
 		slog.Int("convergence_escalations", result.ConvergenceEscalations),
 	)
-	fmt.Fprintln(os.Stdout, formatWorkerOnceResult(result))
-	return nil
 }
 
 func formatWorkerOnceResult(result worker.Result) string {
@@ -197,22 +304,26 @@ func resolveWorkerSystemToken(ctx context.Context, service tokenAuthenticator) (
 
 func workerUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
+  MERISTEM_TOKEN=mrs_<system> meristem worker [--interval=DURATION] [--budget=DURATION]
   MERISTEM_TOKEN=mrs_<system> meristem worker --once [--budget=DURATION]
+  MERISTEM_TOKEN=mrs_<system> meristem worker daemon [--interval=DURATION] [--budget=DURATION]
 
-Runs a single bounded-patience scan. Runs checklist convergence for running
-work_items with suggested_convergence_checks, then reads remaining
-non-terminal work_items, compares dwell time to the per-state budget, appends
-one patience.breached event per observed breach, and escalates breached state
-epochs to human attention unless they are already waiting on human review.
-Idempotent: re-running with the same convergence signals does not consume a new
-convergence attempt.
+Runs the deterministic reconciler. The default form is an always-on daemon:
+it runs one tick immediately, then repeats every --interval until SIGINT or
+SIGTERM. Each tick runs checklist convergence for running work_items with
+suggested_convergence_checks, then reads remaining non-terminal work_items,
+compares dwell time to the per-state budget, appends one patience.breached
+event per observed breach, and escalates breached state epochs to human
+attention unless they are already waiting on human review. Re-running with
+the same convergence signals does not consume a new convergence attempt.
 
+  --interval=DURATION interval between daemon ticks. Default: 30s.
   --budget=DURATION   override the per-state defaults with one uniform
                       budget applied to every non-terminal state. Intended
                       for operator/CI verification, not production policy.
                       Examples: --budget=1m, --budget=10s, --budget=72h.
 
-This is the v1 substrate "Convergence loop ..." kernel. The daemon-loop
-form is a subsequent slice.
+Use --once for a single manual or CI tick. The daemon and --once paths both
+require MERISTEM_TOKEN to authenticate as a dedicated source=system token.
 `)
 }

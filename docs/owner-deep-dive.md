@@ -169,9 +169,13 @@ patience under forgiving budgets while the seeded backlog is still cold.
 
 ## Step 4 — First live worker tick
 
-**What you run.** `MERISTEM_TOKEN=<seed/system token> "$BIN" worker --once`. It
-prints `scanned=N emitted=M already_recorded=K`. Run it again and the fresh
-counts collapse toward zero — every pass is idempotent.
+**What you run.** First run
+`MERISTEM_TOKEN=<seed/system token> "$BIN" worker --once` as the verification
+tick. It prints `scanned=N emitted=M already_recorded=K`. Run it again and the
+fresh counts collapse toward zero — every pass is idempotent. Then keep
+`MERISTEM_TOKEN=<seed/system token> "$BIN" worker --interval=30s` supervised
+beside the API. `SIGINT`/`SIGTERM` is the graceful shutdown path; restart with
+the same dedicated `system`-source token.
 
 **The noticing/acting split.** R3's central idea: the deterministic layer owns
 **noticing**; agents own **acting**. `meristem worker` runs deterministic ticks
@@ -185,8 +189,10 @@ are deterministic; the hands are agents. Requiring a `system`-source token (root
 refused) keeps this automation attributable to a worker process, distinct from
 you.
 
-**The metronome passes.** One `ScanOnce` runs four passes in order
-(`internal/worker`):
+**The metronome passes.** The daemon runs one tick immediately and then repeats
+serially after the configured interval, so ticks never overlap in one process.
+Each tick resolves the active policy profile before scanning, then `ScanOnce`
+runs four passes in order (`internal/worker`):
 
 1. **Scribe** (R1). A work item that arrives with no convergence checks is a
    *state*, not an error. The scribe pass finds checkless `captured`/`triaged`

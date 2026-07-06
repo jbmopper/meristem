@@ -51,10 +51,17 @@ Equivalent manual order:
 
    Create a root token if needed, mint a `system`-source token for `meristem seed v1`, then run seed. The bootstrap script automates this; by hand, follow [`README.md`](../README.md) Quickstart.
 
-6. **API**
+6. **API and worker**
 
    ```bash
    go run ./cmd/meristem api
+   ```
+
+   In a second supervised process, run the deterministic reconciler with a
+   dedicated source=system token:
+
+   ```bash
+   MERISTEM_TOKEN="$(cat .meristem/seed.token)" go run ./cmd/meristem worker
    ```
 
 7. **Verify**
@@ -62,20 +69,26 @@ Equivalent manual order:
    ```bash
    curl -sS http://127.0.0.1:8080/healthz
    curl -sS http://127.0.0.1:8080/readyz
+   MERISTEM_TOKEN="$(cat .meristem/seed.token)" go run ./cmd/meristem worker --once
    ```
 
    `/readyz` includes `safety` and `safety_policy` when the database ping succeeds.
+   `worker --once` should print `worker --once: ...`; fresh counts may be zero
+   if the daemon already processed the same facts.
 
 Optional services (each runs the same safety validation before opening the database):
 
 - **MCP:** `MERISTEM_TOKEN=... go run ./cmd/meristem mcp`
-- **Worker:** `MERISTEM_TOKEN=... go run ./cmd/meristem worker --once`
+- **Manual worker tick:** `MERISTEM_TOKEN=... go run ./cmd/meristem worker --once`
 
 ## Shutdown
 
-### API or MCP (foreground process)
+### API, MCP, or worker (foreground process)
 
-Send **SIGINT** (Ctrl-C) or **SIGTERM**. The API shuts down gracefully (in-flight requests get a bounded shutdown window).
+Send **SIGINT** (Ctrl-C) or **SIGTERM**. The API shuts down gracefully
+(in-flight requests get a bounded shutdown window). The worker finishes the
+current tick, stops before the next interval, and exits through context
+cancellation.
 
 ### Background `go run ... api &`
 
@@ -86,6 +99,12 @@ pkill -TERM -f 'cmd/meristem api'
 ```
 
 (or use the PID from your shell job control).
+
+For a background worker:
+
+```bash
+pkill -TERM -f 'cmd/meristem worker'
+```
 
 ### Postgres (Docker)
 

@@ -36,6 +36,7 @@ The following **re-validate** policy on startup (after `safety check` in bootstr
 
 - `meristem api`
 - `meristem mcp`
+- `meristem worker`
 - `meristem worker --once`
 - `meristem seed v1` (not **`--dry-run`**)
 

@@ -57,8 +57,8 @@ type Budgets struct {
 
 // DefaultBudgets returns the conservative defaults for v1's first slice.
 // They are deliberately generous; the spec invariant is "no item waits
-// indefinitely", not "every item is impatient." Operators can tighten via
-// configuration once the daemon ships.
+// indefinitely", not "every item is impatient." Operators can tighten by
+// switching policy profiles or by using verification-only worker budget flags.
 func DefaultBudgets() Budgets {
 	policy := safety.DefaultPolicy()
 	out := make(map[domain.WorkItemState]time.Duration, len(policy.PatienceBudgets))

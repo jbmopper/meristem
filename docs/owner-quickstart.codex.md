@@ -55,10 +55,13 @@ curl -fsS "$API/readyz"
 # -> ... "policy_profile":"bring-up" ...
 ```
 
-## 5. Run the first worker tick
+## 5. Start the worker
 ```bash
 MERISTEM_TOKEN="$(tr -d '\n' < .meristem/seed.token)" "$BIN" worker --once
 # -> worker --once: scanned=N emitted=M already_recorded=K ... dispatch_requested=D ...
+
+MERISTEM_TOKEN="$(tr -d '\n' < .meristem/seed.token)" "$BIN" worker --interval=30s &
+# -> JSON logs: "worker daemon starting", then "worker tick complete" per pass
 ```
 
 Use a separate source=`system` worker token later for split audit identity.
