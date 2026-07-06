@@ -22,10 +22,13 @@ BIN=.meristem/generated/meristem-bin
 Agents must not share the primary checkout. See [`agent-worktrees.md`](agent-worktrees.md).
 
 ```bash
-for t in codex claude-code-gui cursor-mcp; do
+for t in codex claude-code-gui; do
   scripts/prepare-agent-worktree.sh --target "$t"
 done                                   # -> target/worktree/branch/base per target
-scripts/provision-assistant-access.sh  # regenerate secret-free launch wrappers
+scripts/provision-assistant-access.sh --targets codex,claude-code-gui --print-remote
+# Optional Cursor local MCP:
+# scripts/prepare-agent-worktree.sh --target cursor-mcp
+# scripts/cursor-mcp-command.sh uses .meristem/cursor-mcp.token and ../meristem-cursor-mcp.
 ```
 Then relaunch each agent so it picks up its wrapper. Rebuild the shared binary
 only from a clean worktree at `v1` (procedure in `agent-worktrees.md`).

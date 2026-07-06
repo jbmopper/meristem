@@ -46,12 +46,15 @@ Throughout, `$BIN` is `.meristem/generated/meristem-bin` and
 
 ## Step 1 — Per-agent worktrees
 
-**What you run.** For each agent (`codex`, `claude-code-gui`, `cursor-mcp`),
-`scripts/prepare-agent-worktree.sh --target <agent>`, then
-`scripts/provision-assistant-access.sh` to regenerate the launch wrappers, then
-relaunch the agents. This is the human acknowledgement on the worktree-discipline
-work item — a step no agent can take for itself, because the whole point is to
-stop agents from stepping on each other.
+**What you run.** Prepare worktrees for the generated-wrapper agents
+(`codex`, `claude-code-gui`), then run
+`scripts/provision-assistant-access.sh --targets codex,claude-code-gui --print-remote`
+to regenerate the launch wrappers, then relaunch the agents. If you use Cursor
+local MCP, prepare `cursor-mcp` separately; it uses
+`scripts/cursor-mcp-command.sh` and `.meristem/cursor-mcp.token`, not the
+generated-wrapper provisioner. This is the human acknowledgement on the
+worktree-discipline work item — a step no agent can take for itself, because
+the whole point is to stop agents from stepping on each other.
 
 **The collision history.** Early on, multiple assistants shared the primary
 source checkout. The primary checkout owns local state under `.meristem/`
