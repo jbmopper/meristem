@@ -139,8 +139,8 @@ fetch_page() {
   local tmp
   tmp="$(mktemp)"
   if curl -sf -H "Authorization: Bearer $TOKEN" "$url" -o "$tmp"; then
-    process_response "$tmp"
-    local rc=$?
+    local rc=0
+    process_response "$tmp" || rc=$?
     rm -f "$tmp"
     return "$rc"
   fi
@@ -156,8 +156,8 @@ while true; do
     CURSOR="$(tr -d '[:space:]' < "$CURSOR_FILE")"
   fi
   while true; do
-    fetch_page "$CURSOR"
-    rc=$?
+    rc=0
+    fetch_page "$CURSOR" || rc=$?
     if [ "$rc" -eq 2 ]; then
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) feed curl failed" >>"$LOG_FILE"
       sleep 5
