@@ -149,7 +149,8 @@ out" while you are unreachable.
 budgets, plus body-size, feed-wait, child-count, delegation-depth, concurrency,
 and per-class event-rate ceilings. Crucially, `MaxPatienceBudget` is a shared
 *finite* ceiling: no profile, explicit `patience_budget_seconds`, or
-cultivar-derived wall-clock budget may create an effectively infinite wait.
+cultivar-derived wall-clock budget for a running item may create an effectively
+infinite wait.
 `Policy.Fingerprint()` is a short stable hex id over the canonical JSON of the
 policy; it appears in logs, in `/readyz`, and in `meristem safety check`, so a
 runbook can answer "which policy build is this binary running?" at a glance.
@@ -218,8 +219,10 @@ runs four passes in order (`internal/worker`):
    (accept -> `done`) or escalates on exhaustion. Stale identical inputs do not
    burn an attempt.
 4. **Breach**. For every still-non-terminal item with a budget, it emits one
-   `patience.breached` per over-budget state epoch and routes that epoch through
-   the human-escalation path — *unless* the item is already at the fixed point.
+   `patience.breached` per over-budget state epoch. Pre-claim
+   agent-cultivar waits converge on `dispatch.requested`; other breached
+   epochs route through the human-escalation path — *unless* the item is
+   already at the fixed point.
    Breach resolution is not another event: consumers correlate the breach
    payload's state epoch with the replayed `work_items` projection. If the item
    has since transitioned, the breach is historical.

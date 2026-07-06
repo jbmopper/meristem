@@ -100,7 +100,7 @@ func (w *Worker) resolvePatienceRule(ctx context.Context, state domain.WorkItemS
 			Cultivar:       cultivarRef,
 		}, nil
 	}
-	if cultivarRef != "" {
+	if cultivarRef != "" && state == domain.WorkItemRunning {
 		item, err := registry.NewService(w.pool, nil).GetCultivarRef(ctx, cultivarRef)
 		if err != nil {
 			return patienceResolution{}, err
@@ -120,6 +120,7 @@ func (w *Worker) resolvePatienceRule(ctx context.Context, state domain.WorkItemS
 		Budget:         w.budgets.ByState[state],
 		BudgetSource:   budgetSourcePolicy,
 		EscalationRule: rule,
+		Cultivar:       cultivarRef,
 	}, nil
 }
 

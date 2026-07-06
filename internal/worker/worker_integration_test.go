@@ -498,7 +498,7 @@ func TestScanOnceUsesExplicitLaunchPatienceRule(t *testing.T) {
 	}
 }
 
-func TestScanOnceUsesCultivarXylemPatienceBudget(t *testing.T) {
+func TestScanOnceUsesCultivarXylemPatienceBudgetForRunningItems(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
 	if err := storage.Migrate(ctx, pool, nil); err != nil {
@@ -514,7 +514,7 @@ func TestScanOnceUsesCultivarXylemPatienceBudget(t *testing.T) {
 	service := workitems.NewService(pool, writer)
 	item, err := service.Create(ctx, workitems.CreateInput{
 		Title:    "cultivar launch budget",
-		State:    domain.WorkItemCaptured,
+		State:    domain.WorkItemRunning,
 		Cultivar: "fast-worker@1",
 		Actor:    systemTok.Token,
 	})
@@ -525,7 +525,7 @@ func TestScanOnceUsesCultivarXylemPatienceBudget(t *testing.T) {
 	now := time.Date(2026, 6, 7, 13, 0, 0, 0, time.UTC)
 	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Minute))
 	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
-		domain.WorkItemCaptured: 24 * time.Hour,
+		domain.WorkItemRunning: 24 * time.Hour,
 	}}, &systemTok.Token.ID, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -550,6 +550,118 @@ func TestScanOnceUsesCultivarXylemPatienceBudget(t *testing.T) {
 	}
 }
 
+func TestScanOnceUsesPolicyPatienceForPreClaimCultivarWait(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-preclaim-cultivar-policy")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	seedFastWorkerCultivar(t, ctx, pool, writer, systemTok.Token, 60)
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "preclaim cultivar waits on profile",
+		State:                      domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		Cultivar:                   "fast-worker@1",
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 7, 13, 15, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Minute))
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemTriaged: 24 * time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 0 {
+		t.Fatalf("breaches emitted = %d, want 0; cultivar xylem wall must not govern triaged wait", result.BreachesEmitted)
+	}
+	if result.DispatchesRequested != 1 {
+		t.Fatalf("dispatch requested = %d, want 1", result.DispatchesRequested)
+	}
+	if got := countEventsForSubject(t, ctx, pool, item.ID, domain.EventPatienceBreached); got != 0 {
+		t.Fatalf("patience breaches for preclaim item = %d, want 0", got)
+	}
+}
+
+func TestScanOnceRoutesPreClaimCultivarPatienceBreachToDispatch(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-preclaim-cultivar-dispatch")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	seedFastWorkerCultivar(t, ctx, pool, writer, systemTok.Token, 60)
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "stale preclaim agent wait",
+		State:                      domain.WorkItemPlanned,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		Cultivar:                   "fast-worker@1",
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	now := time.Date(2026, 6, 7, 13, 45, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Hour))
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemPlanned: time.Hour,
+	}}, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce: %v", err)
+	}
+	if result.BreachesEmitted != 1 {
+		t.Fatalf("breaches emitted = %d, want 1", result.BreachesEmitted)
+	}
+	if result.PatienceDispatchesAlreadyRequested != 1 || result.PatienceDispatchesRequested != 0 {
+		t.Fatalf("patience dispatch result = requested %d already %d, want 0/1",
+			result.PatienceDispatchesRequested, result.PatienceDispatchesAlreadyRequested)
+	}
+	if result.PatienceEscalationsRequested != 0 {
+		t.Fatalf("patience escalations = %d, want 0", result.PatienceEscalationsRequested)
+	}
+	payload := patiencePayloadForSubject(t, ctx, pool, item.ID)
+	if payload.BudgetSeconds != 3600 || payload.BudgetSource != budgetSourcePolicy || payload.Cultivar != "fast-worker@1" {
+		t.Fatalf("patience payload = %+v, want 3600s policy with fast-worker@1", payload)
+	}
+	if got := countEventsForSubject(t, ctx, pool, item.ID, domain.EventDispatchRequested); got != 1 {
+		t.Fatalf("dispatch events for preclaim breach = %d, want 1", got)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 0 {
+		t.Fatalf("escalation events = %d, want 0", got)
+	}
+	if got := countHumanAttentionItems(t, ctx, pool); got != 0 {
+		t.Fatalf("human attention items = %d, want 0", got)
+	}
+}
+
 func TestScanOnceCapsCultivarXylemPatienceBudgetAtFiniteMaximum(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -566,7 +678,7 @@ func TestScanOnceCapsCultivarXylemPatienceBudgetAtFiniteMaximum(t *testing.T) {
 	service := workitems.NewService(pool, writer)
 	item, err := service.Create(ctx, workitems.CreateInput{
 		Title:    "cultivar launch budget capped",
-		State:    domain.WorkItemCaptured,
+		State:    domain.WorkItemRunning,
 		Cultivar: "fast-worker@1",
 		Actor:    systemTok.Token,
 	})
@@ -577,7 +689,7 @@ func TestScanOnceCapsCultivarXylemPatienceBudgetAtFiniteMaximum(t *testing.T) {
 	now := time.Date(2026, 6, 7, 13, 30, 0, 0, time.UTC)
 	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-safety.MaxPatienceBudget-time.Minute))
 	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
-		domain.WorkItemCaptured: time.Hour,
+		domain.WorkItemRunning: time.Hour,
 	}}, &systemTok.Token.ID, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("New: %v", err)

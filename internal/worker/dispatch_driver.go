@@ -18,6 +18,8 @@ import (
 
 const defaultDispatchCultivarName = "checklist-worker"
 
+const dispatchReasonAgentAttentionRequested = "agent_attention_requested"
+
 type dispatchPassResult struct {
 	DispatchCandidatesScanned        int
 	DispatchesRequested              int
@@ -51,7 +53,7 @@ func (w *Worker) scanDispatch(ctx context.Context) (dispatchPassResult, error) {
 			}
 			cultivar = defaultCultivar
 		}
-		fresh, err := w.appendDispatch(ctx, candidate, cultivar)
+		fresh, err := w.appendDispatch(ctx, candidate, cultivar, dispatchReasonAgentAttentionRequested)
 		if err != nil {
 			return result, err
 		}
@@ -126,7 +128,7 @@ func dispatchCultivarFromCreatedPayload(raw []byte) string {
 	return strings.TrimSpace(payload.Cultivar)
 }
 
-func (w *Worker) appendDispatch(ctx context.Context, candidate dispatchCandidate, cultivar string) (bool, error) {
+func (w *Worker) appendDispatch(ctx context.Context, candidate dispatchCandidate, cultivar string, reason string) (bool, error) {
 	tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, err
@@ -144,7 +146,7 @@ func (w *Worker) appendDispatch(ctx context.Context, candidate dispatchCandidate
 			"state":                  candidate.State,
 			"state_entered_at_unix":  candidate.StateEnteredAt.Unix(),
 			"cultivar":               cultivar,
-			"reason":                 "agent_attention_requested",
+			"reason":                 reason,
 			"source_reconciler_pass": "dispatch",
 		},
 	})
@@ -155,4 +157,45 @@ func (w *Worker) appendDispatch(ctx context.Context, candidate dispatchCandidate
 		return false, err
 	}
 	return fresh, nil
+}
+
+func shouldRoutePatienceBreachToDispatch(b Breach) bool {
+	if !preClaimDispatchState(b.Candidate.State) {
+		return false
+	}
+	cultivar := strings.TrimSpace(b.Candidate.Cultivar)
+	if cultivar == "" {
+		return false
+	}
+	return !isHumanAttentionCultivarRef(cultivar)
+}
+
+func preClaimDispatchState(state domain.WorkItemState) bool {
+	switch state {
+	case domain.WorkItemCaptured, domain.WorkItemTriaged, domain.WorkItemPlanned:
+		return true
+	default:
+		return false
+	}
+}
+
+func isHumanAttentionCultivarRef(ref string) bool {
+	name := strings.TrimSpace(ref)
+	if before, _, ok := strings.Cut(name, "@"); ok {
+		name = before
+	}
+	return name == "human-attention"
+}
+
+func (w *Worker) dispatchPatienceBreach(ctx context.Context, b Breach) (bool, error) {
+	cultivar := strings.TrimSpace(b.Candidate.Cultivar)
+	if cultivar == "" {
+		return false, errors.New("dispatch patience breach: cultivar is required")
+	}
+	return w.appendDispatch(ctx, dispatchCandidate{
+		ID:             b.Candidate.ID,
+		State:          b.Candidate.State,
+		StateEnteredAt: b.Candidate.StateEnteredAt,
+		Cultivar:       cultivar,
+	}, cultivar, dispatchReasonAgentAttentionRequested)
 }

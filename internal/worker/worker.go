@@ -8,12 +8,17 @@
 //   - One-shot scan over work_items in non-terminal states (ScanOnce), with
 //     cmd/meristem wrapping it in the always-on daemon loop.
 //   - Patience rule resolution from launch metadata, cultivar xylem, or
-//     the active policy profile's per-state fallback budgets.
+//     the active policy profile's per-state fallback budgets. Cultivar xylem
+//     wall-clock budgets apply only while a work_item is running; waiting for
+//     pickup remains governed by the profile unless an item declares an
+//     explicit patience budget.
 //   - One patience.breached event per (work_item, state-epoch) breach
-//     observed, followed by a deterministic human escalation for that epoch.
-//     Open vs resolved breach attention is a read-side correlation: a breach is
-//     open only while the current work_items projection still names the same
-//     state and state_entered_at epoch recorded in the breach payload.
+//     observed, followed by deterministic routing for that epoch. Pre-claim
+//     agent-cultivar waits are routed back to dispatch; other breaches route to
+//     human escalation. Open vs resolved breach attention is a read-side
+//     correlation: a breach is open only while the current work_items projection
+//     still names the same state and state_entered_at epoch recorded in the
+//     breach payload.
 //   - A narrow convergence pass for running work_items whose
 //     suggested_convergence_checks declare the all-pass checklist pattern.
 //     The worker records a convergence verdict before any lifecycle action.
@@ -180,6 +185,13 @@ type Result struct {
 	// human-review fixed point. The worker still records patience.breached for
 	// these items, but does not recursively escalate them.
 	PatienceEscalationsSkippedAwaitingHuman int
+	// PatienceDispatchesRequested is the count of breached pre-claim
+	// agent-cultivar waits freshly routed back to dispatch instead of owner
+	// escalation.
+	PatienceDispatchesRequested int
+	// PatienceDispatchesAlreadyRequested is the count of breached pre-claim
+	// agent-cultivar waits whose deterministic dispatch routing already existed.
+	PatienceDispatchesAlreadyRequested int
 
 	// ScribeCandidatesScanned is the count of captured/triaged work_items
 	// missing suggested convergence checks that the scribe pass inspected.
@@ -278,10 +290,10 @@ func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid
 // convergence.verdict_recorded, and only then transitions or escalates according
 // to the convergence budget. The breach pass then reads every still
 // non-terminal work_item with a budget, emits one patience.breached event per
-// observed state epoch, and routes that epoch through the deterministic human
-// escalation path unless the item is already waiting on owner review. Each
-// emitted fact lands in its own transaction so a per-row failure does not abort
-// the whole pass.
+// observed state epoch, and routes that epoch through either dispatch or the
+// deterministic human escalation path unless the item is already waiting on
+// owner review. Each emitted fact lands in its own transaction so a per-row
+// failure does not abort the whole pass.
 func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	now := w.clock().UTC()
 	out := Result{}
@@ -342,6 +354,18 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 			}
 			if breach.Candidate.HumanReviewStatus == domain.HumanReviewBlocked {
 				out.PatienceEscalationsSkippedAwaitingHuman++
+				continue
+			}
+			if shouldRoutePatienceBreachToDispatch(breach) {
+				dispatchFresh, err := w.dispatchPatienceBreach(ctx, breach)
+				if err != nil {
+					return out, fmt.Errorf("worker: dispatch breached wait for %s: %w", breach.Candidate.ID, err)
+				}
+				if dispatchFresh {
+					out.PatienceDispatchesRequested++
+				} else {
+					out.PatienceDispatchesAlreadyRequested++
+				}
 				continue
 			}
 			escalationFresh, err := w.escalateBreach(ctx, breach)

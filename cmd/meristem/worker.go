@@ -5,8 +5,8 @@
 // Each tick reads non-terminal work_items, runs checklist convergence for
 // running work_items with suggested checks, compares remaining dwell time
 // against the per-state budget, appends one patience.breached event per
-// observed breach, and routes each breached state epoch to a human escalation
-// unless it is already awaiting human review.
+// observed breach, and routes each breached state epoch to dispatch or human
+// escalation unless it is already awaiting human review.
 //
 // Authentication mirrors `meristem seed v1`: MERISTEM_TOKEN must be a
 // system-source token. The events the worker writes attribute to "system"
@@ -226,6 +226,8 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 		slog.Int("patience_escalations_requested", result.PatienceEscalationsRequested),
 		slog.Int("patience_escalations_already_requested", result.PatienceEscalationsAlreadyRequested),
 		slog.Int("patience_escalations_skipped_awaiting_human", result.PatienceEscalationsSkippedAwaitingHuman),
+		slog.Int("patience_dispatches_requested", result.PatienceDispatchesRequested),
+		slog.Int("patience_dispatches_already_requested", result.PatienceDispatchesAlreadyRequested),
 		slog.Int("scribe_candidates", result.ScribeCandidatesScanned),
 		slog.Int("scribe_children_spawned", result.ScribeChildrenSpawned),
 		slog.Int("scribe_children_already_present", result.ScribeChildrenAlreadyPresent),
@@ -244,13 +246,15 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 }
 
 func formatWorkerOnceResult(result worker.Result) string {
-	return fmt.Sprintf("worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
+	return fmt.Sprintf("worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
 		result.Scanned,
 		result.BreachesEmitted,
 		result.BreachesAlreadyRecorded,
 		result.PatienceEscalationsRequested,
 		result.PatienceEscalationsAlreadyRequested,
 		result.PatienceEscalationsSkippedAwaitingHuman,
+		result.PatienceDispatchesRequested,
+		result.PatienceDispatchesAlreadyRequested,
 		result.ScribeCandidatesScanned,
 		result.ScribeChildrenSpawned,
 		result.ScribeChildrenAlreadyPresent,
@@ -313,9 +317,9 @@ it runs one tick immediately, then repeats every --interval until SIGINT or
 SIGTERM. Each tick runs checklist convergence for running work_items with
 suggested_convergence_checks, then reads remaining non-terminal work_items,
 compares dwell time to the per-state budget, appends one patience.breached
-event per observed breach, and escalates breached state epochs to human
-attention unless they are already waiting on human review. Re-running with
-the same convergence signals does not consume a new convergence attempt.
+event per observed breach, and routes breached state epochs to dispatch or
+human attention unless they are already waiting on human review. Re-running
+with the same convergence signals does not consume a new convergence attempt.
 
   --interval=DURATION interval between daemon ticks. Default: 30s.
   --budget=DURATION   override the per-state defaults with one uniform
