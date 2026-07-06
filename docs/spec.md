@@ -393,8 +393,8 @@ v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the 
 - ✅ Append-only `events` with full attribution.
 - ✅ Idempotency at every POST per the **Idempotency** section.
 - 🚧 `POST /v1/inbox/messages` ✅ (text only); multi-modal parts open. `GET /v1/feed` ✅, with SSE push.
-- 🚧 Worker with `job_queue` and `SELECT … FOR UPDATE SKIP LOCKED` — `worker --once` bounded-patience kernel, package, and migration are in place; daemon loop plus enqueue/claim semantics remain open.
-- 🚧 Convergence loop that drives every work item to a terminal state without owner babysitting — scribe, dispatch, checklist convergence, breach detection, and finite policy profiles are in place; always-on operation, approvals, connector retries, and full terminal convergence remain open.
+- 🚧 Worker with `job_queue` and `SELECT … FOR UPDATE SKIP LOCKED` — `worker --once` bounded-patience kernel, package, migration, dispatch enqueue, and lease-claim primitive are in place; daemon loop plus job execution semantics remain open.
+- 🚧 Convergence loop that drives every work item to a terminal state without owner babysitting — scribe, dispatch, durable queue enqueue/claim, checklist convergence, breach detection, and finite policy profiles are in place; always-on operation, approvals, connector retries, and full terminal convergence remain open.
 - ◻︎ Generic HTTP connector with read/write declaration, approval gate on writes, retries, and dead-lettering.
 - ◻︎ Webhook verification.
 - ◻︎ Approvals with expiry, re-prompt cadence, and the convergence semantics above.

@@ -18,11 +18,9 @@
 //
 //   - Daemon loop. ScanOnce is the kernel; wrapping it in time.Tick + the
 //     shutdown dance is mechanical and lives in the cmd-side runner.
-//   - SELECT … FOR UPDATE SKIP LOCKED job queue. ScanOnce is safe under
-//     concurrent execution today (the deterministic event_id collapses
-//     duplicate observations); the SKIP LOCKED queue is the v1 work_item
-//     "Worker with job_queue and SELECT … FOR UPDATE SKIP LOCKED" and ships
-//     when there is real work to gate.
+//   - Job execution from the durable queue. dispatch.requested now enqueues
+//     jobs and the queue exposes a SKIP LOCKED lease primitive, but ScanOnce
+//     still performs the deterministic reconciliation pass directly.
 //   - Resolution events (patience.resolved when an item leaves the breached
 //     state). For now resolution is implicit in the work_item.transitioned
 //     event already in the log; consumers correlate on (subject_id, time).
@@ -241,9 +239,8 @@ type Result struct {
 // Worker holds no state across calls; ScanOnce is safe to call concurrently
 // from multiple processes (each will independently observe the breach and
 // attempt the insert; the deterministic event_id makes the second insert
-// a no-op via the events writer's ON CONFLICT DO NOTHING). A future slice
-// will introduce SKIP LOCKED claim semantics to make the parallel topology
-// efficient; nothing in this slice precludes it.
+// a no-op via the events writer's ON CONFLICT DO NOTHING). Dispatch jobs use
+// the separate jobqueue lease primitive for efficient SKIP LOCKED claiming.
 type Worker struct {
 	pool    *pgxpool.Pool
 	writer  *events.Writer

@@ -1,13 +1,12 @@
 -- 0007_job_queue: durable job rows for the v1 worker queue.
 --
--- Rationale: `internal/worker` currently scans `work_items` in-process;
+-- Rationale: `internal/worker` initially scanned `work_items` in-process;
 -- a separate queue lets multiple worker processes claim disjoint units
--- of work with SELECT … FOR UPDATE SKIP LOCKED in a follow-on slice.
+-- of work with SELECT … FOR UPDATE SKIP LOCKED.
 --
--- This migration is schema-only. No writer enqueues yet; the table is
--- empty until enqueue semantics land (separate work_items). Rebuild
--- does not include job_queue: it is not a deterministic projection of
--- `events` in this phase.
+-- This migration introduced the table schema only. Dispatch enqueue/backfill
+-- semantics land later in 0018. Rebuild does not diff job_queue because
+-- lease state is operational worker coordination, not a pure projection.
 
 CREATE TABLE job_queue (
     id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),

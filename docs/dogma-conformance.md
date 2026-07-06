@@ -18,8 +18,8 @@ name a concrete test or deterministic check in this repository.
 
 ### `SELECT … FOR UPDATE SKIP LOCKED`
 
-- Check: `cmd/meristem/seed_test.go` pins the seeded substrate item named `Worker with job_queue and SELECT … FOR UPDATE SKIP LOCKED`; `internal/worker/worker.go` documents the current deterministic duplicate-collapse behavior and the queued SKIP LOCKED slice boundary.
-- Evidence: this technique is a tracked substrate obligation, not silently implied by the current `ScanOnce` kernel. The map must be updated to a queue-claim implementation test when that slice lands.
+- Check: `internal/worker/job_queue_integration_test.go` appends `dispatch.requested`, verifies one dispatch-derived `job_queue` row per event id, and starts competing claimers that lease disjoint rows through `SELECT ... FOR UPDATE SKIP LOCKED`; `cmd/meristem/seed_test.go` still pins the seeded substrate item named `Worker with job_queue and SELECT … FOR UPDATE SKIP LOCKED`.
+- Evidence: dispatch enqueue is caused by durable event-log facts, while runtime leases are coordinated by Postgres row locks instead of process memory.
 
 ### Append-only enforcement on `events`
 

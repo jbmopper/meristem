@@ -8,7 +8,7 @@ The voice is imperative and the rules are concrete on purpose: any compliant age
 
 ## What meristem is, in one paragraph
 
-A portable, editor-agnostic, single-operator coordination plane. One human (the owner) issues instructions through any channel; meristem normalizes each into a graph of `work_item`s, dispatches to humans, agents, or connectors, and drives every item to a terminal state (`done | failed | canceled`) without further intervention beyond approvals. Two runtime modes share one binary: `meristem api` (HTTP) and `meristem worker`. The worker currently ships the one-shot bounded-patience kernel (`worker --once`); the daemon loop and `job_queue` claim path remain tracked v1 substrate work. The conceptual substrate is the **event log**; today the durable backing store is Postgres, but the system's identity does not depend on that.
+A portable, editor-agnostic, single-operator coordination plane. One human (the owner) issues instructions through any channel; meristem normalizes each into a graph of `work_item`s, dispatches to humans, agents, or connectors, and drives every item to a terminal state (`done | failed | canceled`) without further intervention beyond approvals. Two runtime modes share one binary: `meristem api` (HTTP) and `meristem worker`. The worker currently ships the one-shot bounded-patience kernel (`worker --once`) plus the durable dispatch enqueue / `SKIP LOCKED` claim primitive; the daemon loop and job execution wiring remain tracked v1 substrate work. The conceptual substrate is the **event log**; today the durable backing store is Postgres, but the system's identity does not depend on that.
 
 ## Principles
 
@@ -54,7 +54,7 @@ These are how the principles above are made true in code. They are non-optional 
 - **`event`** — an immutable fact appended whenever object state changes. The audit log and the substrate of truth.
 - **`deterministic_error`** — an error report emitted by the deterministic subsystem. It is projected from `deterministic_error.*` events into `deterministic_errors` and may be masked from active views without deleting or mutating the audit trail.
 - **`projection`** — a deterministic read view derived from `events`. Recomputing any projection from `events` yields identical state. Most non-`events` tables are projections.
-- **`reconciler`** — the deterministic `meristem worker` process that observes work_items in non-terminal states and moves them forward, respecting bounded patience. Today `worker --once` is the shipped kernel; always-on scheduling and `SELECT … FOR UPDATE SKIP LOCKED` queue claims are separate v1 work items.
+- **`reconciler`** — the deterministic `meristem worker` process that observes work_items in non-terminal states and moves them forward, respecting bounded patience. Today `worker --once` is the shipped kernel; dispatch requests enqueue durable jobs and competing claimers lease them with `SELECT … FOR UPDATE SKIP LOCKED`. Always-on scheduling and job execution wiring remain separate v1 work items.
 - **`fixed point`** — a work_item state from which no further transition occurs: `done | failed | canceled`.
 - **`token`** — a scoped client credential. Attributed on every event it causes.
 - **`approval`** — a gated decision required before a write action proceeds. v1 only.

@@ -59,6 +59,14 @@ var projectionTables = []string{
 	"projections",
 }
 
+// rebuildScratchTables are event-caused operational tables that projectors
+// may write while replaying, but whose mutable runtime fields are not part of
+// the projection honesty diff. job_queue is the current example: enqueue rows
+// are caused by dispatch.requested, while lease state is worker coordination.
+var rebuildScratchTables = []string{
+	"job_queue",
+}
+
 func runRebuild(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("rebuild", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -204,6 +212,12 @@ func createSandboxSchema(ctx context.Context, tx pgx.Tx, schema string) error {
 		ddl := fmt.Sprintf(`CREATE TABLE %s.%s (LIKE public.%s INCLUDING ALL)`, qSchema, t, t)
 		if _, err := tx.Exec(ctx, ddl); err != nil {
 			return fmt.Errorf("rebuild: clone schema for %s: %w", t, err)
+		}
+	}
+	for _, t := range rebuildScratchTables {
+		ddl := fmt.Sprintf(`CREATE TABLE %s.%s (LIKE public.%s INCLUDING ALL)`, qSchema, t, t)
+		if _, err := tx.Exec(ctx, ddl); err != nil {
+			return fmt.Errorf("rebuild: clone scratch schema for %s: %w", t, err)
 		}
 	}
 	return nil
