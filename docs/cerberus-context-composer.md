@@ -1,5 +1,9 @@
 # Cerberus Context Composer
 
+> Status: experimental Cerberus/Aegis pilot design record. This is not the
+> current general agent bootstrap path; use [`AGENTS.md`](../AGENTS.md) and
+> [`mcp-worker-bootstrap.md`](mcp-worker-bootstrap.md) for active worker rules.
+
 This document defines the model-facing context contract for the planned
 Cerberus/Aegis worker net. It is advisory until promoted into code, but it is
 intended to be the source input for the scoped-token, reducer-event,

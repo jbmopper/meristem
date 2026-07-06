@@ -1,5 +1,10 @@
 # Self-Building API Synthesis
 
+> Status: advisory synthesis, not a canonical API contract. Current substrate
+> requirements live in [`spec.md`](spec.md), [`v0.md`](v0.md), and live
+> meristem work_items. Use this file as design history unless a current spec
+> links to a specific section.
+
 Validated locally on 2026-04-24 in `America/Denver`.
 
 This document records the synthesis of `meristem`'s API direction with the auto-repair, issue-agent, and repo-repair patterns found in nearby projects. It is intended for another assistant to reproduce the same API recommendation without needing the original chat context.
@@ -296,4 +301,3 @@ Then inspect the auto-repair references:
 
 Synthesize them into a meristem API direction. Preserve `docs/spec.md` as canonical, but include the `docs/thoughts.md` reframe: convergence is the model, the event log is truth, and idempotency is an implementation property. Recommend first-class `signals`, `artifacts`, `runs`, `plans`, `reviews`, `actions`, and approvals rather than separate repo-local auto-healing systems. Distinguish `Idempotency-Key`, `dedupe_key`, `fingerprint`, and `event_id`.
 ```
-

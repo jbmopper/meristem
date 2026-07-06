@@ -1,5 +1,9 @@
 # Cerberus Budget And Force-Convergence Protocol
 
+> Status: experimental Cerberus/Aegis pilot design record. This is not the
+> current general agent bootstrap path; use [`AGENTS.md`](../AGENTS.md) and
+> [`mcp-worker-bootstrap.md`](mcp-worker-bootstrap.md) for active worker rules.
+
 This document executes work_item `8f983e32`: define budget tracking and
 force-convergence for cheap-model Aegis goal/loop mode.
 

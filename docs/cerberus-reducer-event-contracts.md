@@ -1,5 +1,9 @@
 # Cerberus Reducer Event Contracts
 
+> Status: experimental Cerberus/Aegis pilot design record. This is not the
+> current general agent bootstrap path; use [`AGENTS.md`](../AGENTS.md) and
+> [`mcp-worker-bootstrap.md`](mcp-worker-bootstrap.md) for active worker rules.
+
 This document executes work_item `21b1f9c3`: define field-minimal event
 contracts for Cerberus/Aegis coordination.
 

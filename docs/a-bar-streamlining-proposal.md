@@ -1,8 +1,9 @@
 # A-Bar Streamlining Proposal
 
-Status: proposal only. The event log and live `work_item`s remain the source of
-truth. This document is a non-destructive cleanup map for
-`09ec78f2-3b6a-5662-b807-bbaf051b0756`.
+Status: approved for constrained, non-destructive cleanup. The event log and
+live `work_item`s remain the source of truth. This document is the cleanup map
+for `09ec78f2-3b6a-5662-b807-bbaf051b0756`; destructive doc archival/deletion
+or backlog cancellation remains split into explicit follow-up changes.
 
 ## A-Bar Review Map
 

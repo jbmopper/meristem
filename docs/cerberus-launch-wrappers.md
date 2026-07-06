@@ -1,5 +1,9 @@
 # Cerberus Launch Wrappers
 
+> Status: experimental Cerberus/Aegis pilot design record. This is not the
+> current general agent bootstrap path; use [`AGENTS.md`](../AGENTS.md) and
+> [`mcp-worker-bootstrap.md`](mcp-worker-bootstrap.md) for active worker rules.
+
 This document executes work_item `9e5190e8`: define and generate MCP launch
 wrappers for Aegis's scoped coordinator identity and the two Cerberus worker
 roles.

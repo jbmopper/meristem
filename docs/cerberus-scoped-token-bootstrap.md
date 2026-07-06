@@ -1,5 +1,9 @@
 # Cerberus Scoped-Token Bootstrap
 
+> Status: experimental Cerberus/Aegis pilot design record. This is not the
+> current general agent bootstrap path; use [`AGENTS.md`](../AGENTS.md) and
+> [`mcp-worker-bootstrap.md`](mcp-worker-bootstrap.md) for active worker rules.
+
 This document executes work_item `81e57433`: define the bootstrap path from the
 legacy unscoped Aegis launcher to a scoped Aegis coordinator token plus scoped
 grower/healer worker tokens.

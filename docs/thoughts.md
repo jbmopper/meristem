@@ -1,3 +1,9 @@
+# Thoughts: Convergence And Storage Substrate
+
+> Status: historical design note. The convergence framing from this note has
+> been promoted into [`spec.md`](spec.md) and [`AGENTS.md`](../AGENTS.md). Treat
+> those files as canonical; use this file only for background rationale.
+
 Good question to ask now, before more code locks the answers in. Let me actually interrogate both, not just defend them.
 
 ## Idempotency: what is it really for?
@@ -118,4 +124,3 @@ Then idempotency becomes a *technique*, listed lower down with the other techniq
 **Where I'd push back on myself:** the convergent/declarative model has a real cost when humans want imperative control ("send this *now*"). And the local-first/document substrate has a real cost when you have multiple agents writing concurrently with ordering requirements. Neither problem is fatal, but they're the places where the humane framing fights the engineering.
 
 Want to pick one of these threads to go deeper on? The most consequential decision is probably **Option 2 (event log as substrate)** vs. status quo, because it's both the cheapest to adopt today (the schema already supports it) and the one that most opens up the humane-interface options later.  
-

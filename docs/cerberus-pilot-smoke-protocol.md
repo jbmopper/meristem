@@ -1,5 +1,9 @@
 # Cerberus Pilot Smoke Protocol
 
+> Status: experimental Cerberus/Aegis pilot design record. This is not the
+> current general agent bootstrap path; use [`AGENTS.md`](../AGENTS.md) and
+> [`mcp-worker-bootstrap.md`](mcp-worker-bootstrap.md) for active worker rules.
+
 This document executes work_item `d618d807`: define the end-to-end smoke
 scenario for the Cerberus grower/healer loop before launch wrappers run.
 

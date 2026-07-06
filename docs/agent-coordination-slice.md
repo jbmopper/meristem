@@ -1,5 +1,10 @@
 # Minimum Viable Agent-to-Agent Coordination
 
+> Status: advisory design record, not the current coordination contract.
+> Coordinate live work through meristem work_items, events, transitions, and the
+> feed. Use [`AGENTS.md`](../AGENTS.md) and
+> [`mcp-worker-bootstrap.md`](mcp-worker-bootstrap.md) for current agent rules.
+
 This document scopes the smallest extension that lets two agents
 coordinate through `meristem` instead of using the owner as a relay.
 It is intentionally narrower than "communication features." The goal is
