@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jbmopper/meristem/internal/access"
+	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
@@ -49,6 +50,7 @@ type Deps struct {
 	Idempotency         *idempotency.Middleware
 	Inbox               *inbox.Service
 	WorkItems           *workitems.Service
+	Approvals           *approvals.Service
 	CheckProposals      *convergence.ChecksProposalService
 	CultivarActivations *cultivaractivation.Service
 	DeterministicErrors *errorreporting.Service

@@ -35,16 +35,18 @@ type HTTPOptions struct {
 
 func ReadOnlyHTTPTools() map[string]bool {
 	return map[string]bool{
-		"backlog.readiness":         true,
-		"feed.read":                 true,
-		"projections.list":          true,
-		"projections.get":           true,
-		"registry.list":             true,
-		"registry.get":              true,
-		"work_items.list":           true,
-		"work_items.get":            true,
-		"deterministic_errors.list": true,
-		"deterministic_errors.get":  true,
+		"backlog.readiness":            true,
+		"feed.read":                    true,
+		"projections.list":             true,
+		"projections.get":              true,
+		"registry.list":                true,
+		"registry.get":                 true,
+		"work_items.list":              true,
+		"work_items.get":               true,
+		"approvals.list_for_work_item": true,
+		"approvals.get":                true,
+		"deterministic_errors.list":    true,
+		"deterministic_errors.get":     true,
 	}
 }
 

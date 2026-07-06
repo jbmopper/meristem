@@ -22,15 +22,24 @@ func TestToolVisible_LegacyAndRootSeeExistingSurface(t *testing.T) {
 			"projections.get",
 			"registry.list",
 			"registry.get",
+			"approvals.list_for_work_item",
+			"approvals.get",
 			"deterministic_errors.list",
 			"convergence.propose_checks",
 			"work_items.create",
+			"approvals.request",
 			"work_items.transition",
 		} {
 			if !ToolVisible(actor, tool) {
 				t.Fatalf("ToolVisible(%+v, %q) = false, want true", actor, tool)
 			}
 		}
+	}
+	if ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true}, "approvals.decide") {
+		t.Fatal("root token must not see approval decision tool")
+	}
+	if !ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceHuman}, "approvals.decide") {
+		t.Fatal("legacy unscoped human token should see approval decision tool until rotated")
 	}
 }
 
@@ -104,8 +113,11 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 		"projections.get",
 		"work_items.list",
 		"work_items.get",
+		"approvals.list_for_work_item",
+		"approvals.get",
 		"work_items.spawn_child",
 		"work_items.append_event",
+		"approvals.request",
 		"convergence.propose_checks",
 		"registry.activate_cultivar",
 		"work_items.update_metadata",
@@ -124,6 +136,7 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 		"registry.define_cultivar",
 		"projections.define",
 		"work_items.create",
+		"approvals.decide",
 	}
 	for _, tool := range hidden {
 		if ToolVisible(actor, tool) {
@@ -254,6 +267,9 @@ func TestFeedItemAnchorsCoverIncludedKinds(t *testing.T) {
 		domain.EventCultivarActivationGranted:   {domain.SubjectCultivarActivation, payloadAnchored},
 		domain.EventCultivarActivationDenied:    {domain.SubjectCultivarActivation, payloadAnchored},
 		domain.EventCultivarActivationEscalated: {domain.SubjectCultivarActivation, payloadAnchored},
+		domain.EventApprovalCreated:             {domain.SubjectApproval, payloadAnchored},
+		domain.EventApprovalDecided:             {domain.SubjectApproval, payloadAnchored},
+		domain.EventApprovalExpired:             {domain.SubjectApproval, payloadAnchored},
 		domain.EventPatienceBreached:            {domain.SubjectWorkItem, subjectAnchored},
 		domain.EventConvergenceVerdictRecorded:  {domain.SubjectConvergence, subjectAnchored},
 		domain.EventConvergenceChecksProposed:   {domain.SubjectWorkItem, subjectAnchored},

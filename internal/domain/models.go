@@ -30,6 +30,9 @@ const (
 	EventCultivarActivationGranted   = "cultivar_activation.granted"
 	EventCultivarActivationDenied    = "cultivar_activation.denied"
 	EventCultivarActivationEscalated = "cultivar_activation.escalated"
+	EventApprovalCreated             = "approval.created"
+	EventApprovalDecided             = "approval.decided"
+	EventApprovalExpired             = "approval.expired"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
 	// that state. Recorded by `meristem worker --once` (see internal/worker).
@@ -109,6 +112,9 @@ var AllEventKinds = []string{
 	EventCultivarActivationGranted,
 	EventCultivarActivationDenied,
 	EventCultivarActivationEscalated,
+	EventApprovalCreated,
+	EventApprovalDecided,
+	EventApprovalExpired,
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
 	EventConvergenceChecksProposed,
@@ -129,6 +135,7 @@ const (
 	SubjectEscalation         = "escalation"
 	SubjectSubactorGrant      = "subactor_grant"
 	SubjectCultivarActivation = "cultivar_activation"
+	SubjectApproval           = "approval"
 	SubjectTropism            = "tropism"
 	SubjectCultivar           = "cultivar"
 	SubjectProjection         = "projection"

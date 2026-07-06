@@ -2,6 +2,7 @@
 package app
 
 import (
+	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/errorreporting"
@@ -23,6 +24,7 @@ import (
 func NewProjectionRegistry() *projections.Registry {
 	reg := projections.NewRegistry()
 	auth.RegisterProjectors(reg)
+	approvals.RegisterProjectors(reg)
 	errorreporting.RegisterProjectors(reg)
 	idempotency.RegisterProjectors(reg)
 	inbox.RegisterProjectors(reg)

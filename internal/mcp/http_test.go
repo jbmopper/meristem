@@ -95,7 +95,7 @@ func TestHandleHTTPMessageWithOptionsFiltersHTTPTools(t *testing.T) {
 	if strings.Contains(body, "work_items.create") || strings.Contains(body, "work_items.transition") || strings.Contains(body, "convergence.propose_checks") {
 		t.Fatalf("HTTP read-only tool list leaked write tools: %s", body)
 	}
-	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "backlog.readiness") || !strings.Contains(body, "work_items.get") {
+	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "backlog.readiness") || !strings.Contains(body, "work_items.get") || !strings.Contains(body, "approvals.get") {
 		t.Fatalf("HTTP read-only tool list omitted expected read tools: %s", body)
 	}
 }

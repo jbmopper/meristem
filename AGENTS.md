@@ -71,6 +71,7 @@ internal/auth/        token store + bearer middleware
 internal/domain/      pure types: Token, Message, WorkItem, Event
 internal/events/      append-only writer with deterministic ids
 internal/errorreporting/ maskable deterministic-layer error reports
+internal/approvals/  default-deny approval lifecycle + projection writers
 internal/projections/ projection writers (events → derived rows)
 internal/idempotency/ middleware + store
 internal/inbox/       message capture

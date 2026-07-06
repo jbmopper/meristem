@@ -31,6 +31,7 @@ const (
 	ScopeInboxCapture        = "inbox.capture"
 	ScopePolicyProfileSwitch = "policy_profile.switch"
 	ScopeRegistryWrite       = "registry.write"
+	ScopeApprovalsDecide     = "approvals.decide"
 
 	scopeWorkItemsTreePrefix = "work_items.tree:"
 )
@@ -70,6 +71,15 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		}
 		return hasScope(actor, ScopeRegistryWrite)
 	}
+	if canonicalTool == "approvals.decide" {
+		if actor.Source != domain.SourceHuman || actor.IsRoot {
+			return false
+		}
+		if legacyUnscoped(actor) {
+			return true
+		}
+		return hasScope(actor, ScopeApprovalsDecide)
+	}
 	if actor.IsRoot || legacyUnscoped(actor) {
 		return true
 	}
@@ -87,9 +97,11 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.list", "work_items.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
+	case "approvals.get", "approvals.list_for_work_item":
+		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.create":
 		return scopes[ScopeWorkItemsCreate] || scopes[ScopeWorkItemsWriteAll]
-	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition", "convergence.propose_checks", "registry.activate_cultivar":
+	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition", "convergence.propose_checks", "registry.activate_cultivar", "approvals.request":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:
 		return false
@@ -210,8 +222,9 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 //   - convergence.verdict_recorded uses subject_kind "convergence" but its
 //     subject_id *is* the judged work_item (see convergence.VerdictEventSpec).
 //   - message.captured, signal.received, escalation.requested, and the
-//     subactor_grant.* family anchor through the work_item_id (and, where
-//     present, human_work_item_id) fields their writers put in the payload.
+//     approval.*, subactor_grant.*, and cultivar_activation.* families
+//     anchor through the work_item_id (and, where present, human_work_item_id)
+//     fields their writers put in the payload.
 //   - policy_profile.switched has no work-item anchor on purpose: profile
 //     switches are system-wide owner posture, not tree content. Tree-scoped
 //     workers learn the active envelope from /readyz (or their launcher);
@@ -240,7 +253,10 @@ func feedItemAnchors(item feed.Item) []uuid.UUID {
 		domain.EventCultivarActivationRequested,
 		domain.EventCultivarActivationGranted,
 		domain.EventCultivarActivationDenied,
-		domain.EventCultivarActivationEscalated:
+		domain.EventCultivarActivationEscalated,
+		domain.EventApprovalCreated,
+		domain.EventApprovalDecided,
+		domain.EventApprovalExpired:
 		return payloadWorkItemIDs(item)
 	case domain.EventTropismDefined,
 		domain.EventCultivarDefined,

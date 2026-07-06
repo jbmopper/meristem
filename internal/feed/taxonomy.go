@@ -96,6 +96,8 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventXylemExhausted,
 		domain.EventSignalReceived,
 		domain.EventEscalationRequested,
+		domain.EventApprovalCreated,
+		domain.EventApprovalExpired,
 		domain.EventPatienceBreached,
 		domain.EventDispatchRequested:
 		return KindClassLifecycle, false, true
@@ -110,6 +112,7 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventCultivarActivationGranted,
 		domain.EventCultivarActivationDenied,
 		domain.EventCultivarActivationEscalated,
+		domain.EventApprovalDecided,
 		domain.EventConvergenceVerdictRecorded,
 		domain.EventConvergenceChecksProposed,
 		domain.EventPolicyProfileSwitched,

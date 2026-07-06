@@ -57,6 +57,7 @@ var projectionTables = []string{
 	"tropisms",
 	"cultivars",
 	"projections",
+	"approvals",
 }
 
 // rebuildScratchTables are event-caused operational tables that projectors

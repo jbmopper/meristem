@@ -19,6 +19,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
@@ -68,6 +69,7 @@ type Server struct {
 	workItems             *workitems.Service
 	access                *access.Service
 	escalations           *escalations.Service
+	approvals             *approvals.Service
 	grants                *grants.IssuanceService
 	deterministicErrors   *errorreporting.Service
 	checkProposals        *convergence.ChecksProposalService
@@ -107,6 +109,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.workItems = workitems.NewService(pool, s.writer)
 		s.access = access.NewService(pool)
 		s.escalations = escalations.NewService(pool, s.writer)
+		s.approvals = approvals.NewService(pool, s.writer)
 		s.grants = grants.NewIssuanceService(pool, s.writer, s.authService, s.escalations)
 		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.checkProposals = convergence.NewChecksProposalService(pool, s.writer)
@@ -121,6 +124,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 			Idempotency:         s.idempotencyMiddleware,
 			Inbox:               s.inbox,
 			WorkItems:           s.workItems,
+			Approvals:           s.approvals,
 			CheckProposals:      s.checkProposals,
 			CultivarActivations: s.cultivarActivations,
 			DeterministicErrors: s.deterministicErrors,
@@ -168,6 +172,10 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /v1/work-items", s.protected(http.HandlerFunc(s.handleListWorkItems)))
 	s.mux.Handle("POST /v1/work-items", s.commandWithAccess(s.canCreateWorkItem, http.HandlerFunc(s.handleCreateWorkItem)))
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))
+	s.mux.Handle("GET /v1/work-items/{id}/approvals", s.protected(http.HandlerFunc(s.handleListApprovalsForWorkItem)))
+	s.mux.Handle("POST /v1/work-items/{id}/approvals", s.commandWithAccess(s.canWriteWorkItemPath("approvals.request"), http.HandlerFunc(s.handleCreateApproval)))
+	s.mux.Handle("GET /v1/approvals/{id}", s.protected(http.HandlerFunc(s.handleGetApproval)))
+	s.mux.Handle("POST /v1/approvals/{id}/decision", s.commandWithAccess(s.canDecideApprovalPath, http.HandlerFunc(s.handleDecideApproval)))
 	s.mux.Handle("POST /v1/work-items/{id}/children", s.commandWithAccess(s.canWriteWorkItemPath("work_items.spawn_child"), http.HandlerFunc(s.handleSpawnChild)))
 	s.mux.Handle("POST /v1/work-items/{id}/events", s.commandWithAccess(s.canWriteWorkItemPath("work_items.append_event"), http.HandlerFunc(s.handleAppendWorkItemEvent)))
 	s.mux.Handle("POST /v1/work-items/{id}/convergence-proposal", s.commandWithAccess(s.canWriteWorkItemPath("convergence.propose_checks"), http.HandlerFunc(s.handleProposeConvergenceChecks)))

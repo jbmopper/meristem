@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/access"
+	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
@@ -60,9 +61,13 @@ func (s *Server) buildTools() []Tool {
 		s.toolDeterministicErrorsGet(),
 		s.toolWorkItemsList(),
 		s.toolWorkItemsGet(),
+		s.toolApprovalsListForWorkItem(),
+		s.toolApprovalsGet(),
 		s.toolWorkItemsCreate(),
 		s.toolWorkItemsSpawnChild(),
 		s.toolWorkItemsAppendEvent(),
+		s.toolApprovalsRequest(),
+		s.toolApprovalsDecide(),
 		s.toolConvergenceProposeChecks(),
 		s.toolWorkItemsUpdateMetadata(),
 		s.toolWorkItemsTransition(),
@@ -828,6 +833,175 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 	}
 }
 
+func (s *Server) toolApprovalsListForWorkItem() Tool {
+	return Tool{
+		Name:        "approvals.list_for_work_item",
+		Description: "List approvals associated with a visible work item.",
+		InputSchema: schemaObject([]string{"work_item_id"}, map[string]any{
+			"work_item_id": schemaString("Work item uuid."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Approvals == nil {
+				return nil, errors.New("approval service not configured")
+			}
+			var args struct {
+				WorkItemID string `json:"work_item_id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			workItemID, err := parseUUID(args.WorkItemID, "work_item_id")
+			if err != nil {
+				return nil, err
+			}
+			if err := s.canReadWorkItem(ctx, actor, workItemID); err != nil {
+				return nil, err
+			}
+			items, err := s.deps.Approvals.ListForWorkItem(ctx, workItemID)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"items": items}, nil
+		},
+	}
+}
+
+func (s *Server) toolApprovalsGet() Tool {
+	return Tool{
+		Name:        "approvals.get",
+		Description: "Fetch one approval if its work item is visible to this token.",
+		InputSchema: schemaObject([]string{"id"}, map[string]any{
+			"id": schemaString("Approval uuid."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Approvals == nil {
+				return nil, errors.New("approval service not configured")
+			}
+			var args struct {
+				ID string `json:"id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			item, err := s.deps.Approvals.Get(ctx, id)
+			if err != nil {
+				return nil, approvalToolErr(err)
+			}
+			if err := s.canReadWorkItem(ctx, actor, item.WorkItemID); err != nil {
+				return nil, err
+			}
+			return map[string]any{"approval": item}, nil
+		},
+	}
+}
+
+func (s *Server) toolApprovalsRequest() Tool {
+	return Tool{
+		Name:        "approvals.request",
+		Description: "Request approval for a side effect and park the work item in awaiting_approval.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"work_item_id", "summary"}, map[string]any{
+			"work_item_id":       schemaString("Work item uuid."),
+			"summary":            schemaString("Short approval summary."),
+			"request":            schemaAny("Structured approval request payload. Defaults to {}."),
+			"expires_in_seconds": schemaInt("Optional expiry duration in seconds. Defaults to 3600."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Approvals == nil {
+				return nil, errors.New("approval service not configured")
+			}
+			var args struct {
+				WorkItemID       string          `json:"work_item_id"`
+				Summary          string          `json:"summary"`
+				Request          json.RawMessage `json:"request"`
+				ExpiresInSeconds int             `json:"expires_in_seconds"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			workItemID, err := parseUUID(args.WorkItemID, "work_item_id")
+			if err != nil {
+				return nil, err
+			}
+			if err := s.canWriteWorkItem(ctx, actor, workItemID); err != nil {
+				return nil, err
+			}
+			var request any
+			if len(args.Request) > 0 {
+				if err := json.Unmarshal(args.Request, &request); err != nil {
+					return nil, replayableToolErr(fmt.Errorf("request: %w", err))
+				}
+			}
+			result, err := s.deps.Approvals.Create(ctx, approvals.CreateInput{
+				WorkItemID: workItemID,
+				Summary:    args.Summary,
+				Request:    request,
+				ExpiresIn:  time.Duration(args.ExpiresInSeconds) * time.Second,
+				Actor:      actor,
+			})
+			if err != nil {
+				return nil, approvalToolErr(err)
+			}
+			return map[string]any{
+				"approval": result.Approval,
+				"created":  result.Fresh,
+				"event_id": result.EventID,
+			}, nil
+		},
+	}
+}
+
+func (s *Server) toolApprovalsDecide() Tool {
+	return Tool{
+		Name:        "approvals.decide",
+		Description: "Approve or deny a pending approval. Requires a human non-root decision token.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"id", "decision"}, map[string]any{
+			"id":       schemaString("Approval uuid."),
+			"decision": schemaString("Decision: approved or denied."),
+			"reason":   schemaString("Optional decision reason."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Approvals == nil {
+				return nil, errors.New("approval service not configured")
+			}
+			var args struct {
+				ID       string `json:"id"`
+				Decision string `json:"decision"`
+				Reason   string `json:"reason"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			if !access.ToolVisible(actor, "approvals.decide") {
+				return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot decide approvals"))
+			}
+			result, err := s.deps.Approvals.Decide(ctx, approvals.DecisionInput{
+				ApprovalID: id,
+				Decision:   approvals.Decision(args.Decision),
+				Reason:     args.Reason,
+				Actor:      actor,
+			})
+			if err != nil {
+				return nil, approvalToolErr(err)
+			}
+			return map[string]any{
+				"approval": result.Approval,
+				"decided":  result.Fresh,
+				"event_id": result.EventID,
+			}, nil
+		},
+	}
+}
+
 func (s *Server) toolWorkItemsAppendEvent() Tool {
 	return Tool{
 		Name:        "work_items.append_event",
@@ -1183,6 +1357,27 @@ func projectionToolErr(err error) error {
 		errors.Is(err, projectiondefs.ErrNotProjectable),
 		errors.Is(err, projectiondefs.ErrVersionConflict),
 		errors.Is(err, projectiondefs.ErrRootstockImmutable):
+		return replayableToolErr(err)
+	default:
+		return err
+	}
+}
+
+func approvalToolErr(err error) error {
+	switch {
+	case errors.Is(err, approvals.ErrNotFound):
+		return replayableToolErr(fmt.Errorf("approval_not_found: approval not found"))
+	case errors.Is(err, approvals.ErrHumanDecisionToken):
+		return replayableToolErr(fmt.Errorf("human_decision_token_required: approval decision requires a human non-root token"))
+	case errors.Is(err, approvals.ErrSeparationOfDuties):
+		return replayableToolErr(fmt.Errorf("separation_of_duties: requesting token cannot decide the same approval"))
+	case errors.Is(err, approvals.ErrAlreadyDecided):
+		return replayableToolErr(err)
+	case errors.Is(err, approvals.ErrInvalidDecision):
+		return replayableToolErr(fmt.Errorf("invalid_decision: decision must be approved or denied"))
+	case strings.Contains(err.Error(), "is required"),
+		strings.Contains(err.Error(), "terminal work item"),
+		strings.Contains(err.Error(), "invalid work item transition"):
 		return replayableToolErr(err)
 	default:
 		return err
