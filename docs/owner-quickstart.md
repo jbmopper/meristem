@@ -28,7 +28,10 @@ done                                   # -> target/worktree/branch/base per targ
 scripts/provision-assistant-access.sh --targets codex,claude-code-gui --print-remote
 # Optional Cursor local MCP:
 # scripts/prepare-agent-worktree.sh --target cursor-mcp
-# scripts/cursor-mcp-command.sh uses .meristem/cursor-mcp.token and ../meristem-cursor-mcp.
+# If .meristem/cursor-mcp.token is missing, mint it with root:
+# MERISTEM_TOKEN="$(tr -d '\n' < .meristem/root.token)" "$BIN" tokens create --name cursor-mcp --source agent
+# Store the printed secret in .meristem/cursor-mcp.token mode 0600.
+# Point Cursor at scripts/cursor-mcp-command.sh; it uses ../meristem-cursor-mcp.
 ```
 Then relaunch each agent so it picks up its wrapper. Rebuild the shared binary
 only from a clean worktree at `v1` (procedure in `agent-worktrees.md`).
@@ -50,6 +53,7 @@ duties). The operator token is your day-to-day human authority.
 Start (or confirm) the API on `:8080`:
 ```bash
 "$BIN" api &                                   # validates safety policy, then listens
+until "$BIN" healthcheck >/dev/null 2>&1; do sleep 0.2; done
 curl -sS localhost:8080/readyz                 # -> {"status":"ok",...,"policy_profile":"steady","safety_policy":"<fp>"}
 ```
 Switch the policy profile to `bring-up` (human, non-root, needs `policy_profile.switch`):
