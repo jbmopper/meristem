@@ -210,10 +210,17 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
 
 - A single root token, held only by the owner, used only to mint and revoke other tokens.
 - Each client gets its own token: iPhone, web UI, CLI, and one per MCP-connected agent (Cursor, Codex, Claude Desktop, custom workers).
-- Every token carries scopes. The two scopes that matter most:
-  - `can_request_writes`: token may submit write actions for approval.
-  - `can_decide_approvals`: token may approve or deny. Held only by iPhone and active web sessions.
-  - A token cannot hold both for the same approval (separation of duties).
+- New client tokens may carry scopes; scope-less legacy tokens retain broad v0
+  access until rotated. The shipped policy scopes include work-item scopes
+  (`work_items.read`, `work_items.write`, `work_items.read_all`,
+  `work_items.write_all`, `work_items.create`, `work_items.tree:<uuid>`), feed
+  scopes (`feed.read`, `feed.read_assigned`), owner posture scopes such as
+  `policy_profile.switch`, registry write scope `registry.write`, log scopes,
+  and `approvals.decide`. Write-request authority comes from the relevant
+  work-item/connector write scope; approval decision authority requires a human
+  non-root token with `approvals.decide`.
+  - A token that requested an approval cannot decide that same approval, even if
+    it also has `approvals.decide` (separation of duties).
 - Scoped agent MCP access is a deterministic reducer over token scopes and
   canonical projections, not a per-agent projection. The first shipped scopes
   are `work_items.tree:<uuid>`, `work_items.read`, `work_items.write`, and
