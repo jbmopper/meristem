@@ -16,6 +16,11 @@ name a concrete test or deterministic check in this repository.
 - Check: `internal/events/events_test.go` pins canonical payload identity, discriminator behavior, subject/kind separation, nil payload handling, and attribution exclusion; `internal/events/canonical_test.go` pins canonical JSON; `internal/api/transition_cycle_integration_test.go` covers repeated transition payloads through the REST idempotency seam; `internal/worker/worker_integration_test.go` covers the patience attention contract where one `patience.breached` event remains the durable breach fact and later `work_item.transitioned` events resolve it by state-epoch correlation rather than by appending redundant resolution events.
 - Evidence: event identity is tested at the pure reducer layer, at the API transition cycle that previously exposed payload-only collisions, and at the bounded-patience read model that distinguishes open from resolved attention after replaying the same event log into `work_items`.
 
+### Payload schema versioning.
+
+- Check: `docs/payload-versioning.md` is the normative convention (absent `payload_version` = 1; bump on breaking shape changes only; projectors dispatch per version and fail closed on unknown versions). Documentation-only until a second payload version ships; the first version-dispatching projector must land with a dispatch regression test and link it here.
+- Evidence: no payload has shipped a version 2 yet, so the whole log is version 1 by definition and every existing projector conforms vacuously; the convention doc plus this entry are the enforcement surface until the first version bump, at which point the dispatching projector's regression test becomes the evidence.
+
 ### `SELECT … FOR UPDATE SKIP LOCKED`
 
 - Check: `internal/worker/job_queue_integration_test.go` appends `dispatch.requested`, verifies one dispatch-derived `job_queue` row per event id, and starts competing claimers that lease disjoint rows through `SELECT ... FOR UPDATE SKIP LOCKED`; `cmd/meristem/seed_test.go` still pins the seeded substrate item named `Worker with job_queue and SELECT … FOR UPDATE SKIP LOCKED`.
