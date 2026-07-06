@@ -395,7 +395,7 @@ v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the 
 - 🚧 `POST /v1/inbox/messages` ✅ (text only); multi-modal parts open. `GET /v1/feed` ✅, with SSE push.
 - 🚧 Worker with `job_queue` and `SELECT … FOR UPDATE SKIP LOCKED` — `worker` daemon, `worker --once` verification tick, package, migration, dispatch enqueue, and lease-claim primitive are in place; job execution semantics remain open.
 - 🚧 Convergence loop that drives every work item to a terminal state without owner babysitting — scribe, dispatch, durable queue enqueue/claim, always-on worker ticks, checklist convergence, breach detection, finite policy profiles, and minimal approval lifecycle are in place; connector retries, re-prompt cadence, and full terminal convergence remain open.
-- ◻︎ Generic HTTP connector with read/write declaration, approval gate on writes, retries, and dead-lettering.
+- 🚧 Generic HTTP connector with read/write declaration, approval gate on writes, retries, and dead-lettering — HTTP proof slice, write approval creation, stdio MCP tool, and approval-to-outbox dispatch are in place; retries/dead-lettering and full connector catalog remain open.
 - ◻︎ Webhook verification.
 - 🚧 Approvals with create/read/decision, expiry, separation of duties, REST, and stdio MCP tools ✅; re-prompt cadence and second-expiry convergence remain open.
 - ◻︎ APNs (or Web Push) for approval requests, with email/SMS fallback.
@@ -403,9 +403,9 @@ v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the 
 - ✅ iPhone Shortcut posting to `/v1/inbox/messages`.
 - 🚧 MCP server with REST parity ✅ for read/triage paths, feed projections,
   registry/projection reads, substrate `work_item` mutations, and approval
-  request/decision tools over stdio; HTTP MCP is read-only until mutation
-  idempotency is specified. Artifact attachment and approval-gated connector
-  write actions remain open.
+  request/decision tools plus approval-gated HTTP connector requests over
+  stdio; HTTP MCP is read-only until mutation idempotency is specified.
+  Artifact attachment remains open.
 - ◻︎ Nightly Postgres dumps to object storage; documented and rehearsed restore.
 - 🚧 Single-VM deploy with TLS, disk encryption, and object overflow.
 

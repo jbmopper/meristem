@@ -98,6 +98,8 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventEscalationRequested,
 		domain.EventApprovalCreated,
 		domain.EventApprovalExpired,
+		domain.EventHTTPConnectorActionRequested,
+		domain.EventHTTPConnectorActionApproved,
 		domain.EventPatienceBreached,
 		domain.EventDispatchRequested:
 		return KindClassLifecycle, false, true
@@ -120,6 +122,8 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventCultivarDefined,
 		domain.EventProjectionDefined:
 		return KindClassDecision, false, true
+	case domain.EventHTTPConnectorActionSent:
+		return KindClassProgress, false, true
 	case domain.EventTokenCreated,
 		domain.EventTokenRevoked,
 		domain.EventIdempotencyRecorded,

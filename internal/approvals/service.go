@@ -84,6 +84,7 @@ func NewServiceWithClock(pool *pgxpool.Pool, writer *events.Writer, clock func()
 }
 
 type CreateInput struct {
+	ApprovalID uuid.UUID
 	WorkItemID uuid.UUID
 	Summary    string
 	Request    any
@@ -111,15 +112,36 @@ type Result struct {
 }
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (Result, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	approvalID, eventID, fresh, err := s.CreateInTx(ctx, tx, in)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Result{}, err
+	}
+	approval, err := s.Get(ctx, approvalID)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Approval: approval, Fresh: fresh, EventID: eventID}, nil
+}
+
+func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, in CreateInput) (approvalID uuid.UUID, eventID uuid.UUID, fresh bool, err error) {
 	if in.Actor.ID == uuid.Nil {
-		return Result{}, ErrActorRequired
+		return uuid.Nil, uuid.Nil, false, ErrActorRequired
 	}
 	if in.WorkItemID == uuid.Nil {
-		return Result{}, fmt.Errorf("approvals: work_item_id is required")
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("approvals: work_item_id is required")
 	}
 	summary := strings.TrimSpace(in.Summary)
 	if summary == "" {
-		return Result{}, fmt.Errorf("approvals: summary is required")
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("approvals: summary is required")
 	}
 	expiresIn := in.ExpiresIn
 	if expiresIn <= 0 {
@@ -130,23 +152,20 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Result, error) {
 	if request == nil {
 		request = map[string]any{}
 	}
-	approvalID := newSubjectID(ctx, "approval")
-
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return Result{}, err
+	approvalID = in.ApprovalID
+	if approvalID == uuid.Nil {
+		approvalID = newSubjectID(ctx, "approval")
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	item, err := scanWorkItem(ctx, tx, in.WorkItemID)
 	if err != nil {
-		return Result{}, err
+		return uuid.Nil, uuid.Nil, false, err
 	}
 	if item.State.Terminal() {
-		return Result{}, fmt.Errorf("approvals: cannot request approval for terminal work item %s", in.WorkItemID)
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("approvals: cannot request approval for terminal work item %s", in.WorkItemID)
 	}
 
-	eventID, fresh, err := s.writer.Append(ctx, tx, events.Spec{
+	eventID, fresh, err = s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectApproval,
 		SubjectID:    approvalID,
 		Kind:         domain.EventApprovalCreated,
@@ -160,7 +179,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Result, error) {
 		},
 	})
 	if err != nil {
-		return Result{}, err
+		return uuid.Nil, uuid.Nil, false, err
 	}
 	if item.State != domain.WorkItemAwaitingApproval {
 		if _, _, err := s.writer.Append(ctx, tx, events.Spec{
@@ -176,17 +195,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Result, error) {
 				"reason": "approval requested: " + summary,
 			},
 		}); err != nil {
-			return Result{}, err
+			return uuid.Nil, uuid.Nil, false, err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Result{}, err
-	}
-	approval, err := s.Get(ctx, approvalID)
-	if err != nil {
-		return Result{}, err
-	}
-	return Result{Approval: approval, Fresh: fresh, EventID: eventID}, nil
+	return approvalID, eventID, fresh, nil
 }
 
 func (s *Service) Decide(ctx context.Context, in DecisionInput) (Result, error) {

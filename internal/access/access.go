@@ -101,7 +101,7 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.create":
 		return scopes[ScopeWorkItemsCreate] || scopes[ScopeWorkItemsWriteAll]
-	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition", "convergence.propose_checks", "registry.activate_cultivar", "approvals.request":
+	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition", "convergence.propose_checks", "registry.activate_cultivar", "approvals.request", "connectors.http_request":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:
 		return false
@@ -256,7 +256,10 @@ func feedItemAnchors(item feed.Item) []uuid.UUID {
 		domain.EventCultivarActivationEscalated,
 		domain.EventApprovalCreated,
 		domain.EventApprovalDecided,
-		domain.EventApprovalExpired:
+		domain.EventApprovalExpired,
+		domain.EventHTTPConnectorActionRequested,
+		domain.EventHTTPConnectorActionApproved,
+		domain.EventHTTPConnectorActionSent:
 		return payloadWorkItemIDs(item)
 	case domain.EventTropismDefined,
 		domain.EventCultivarDefined,

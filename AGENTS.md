@@ -19,7 +19,7 @@ Every change must respect these. Raise a violation before writing code, not afte
 3. **Bounded patience.** No non-terminal state may wait forever. Every state must have either (a) a forward transition the reconciler will take after a bounded delay, or (b) a transition gated on an external signal with a timeout that triggers (a). **New states must arrive with their escalation rule.** This is the invariant that ensures repeated application of the convergence loop reaches a fixed point.
 4. **One backing store; today it is Postgres.** Operational commitment, not a conceptual one. Do not introduce Redis, NATS, Kafka, Cloud Tasks, Pub/Sub, Eventarc, Firestore, SNS, SQS, or any other backing store, even temporarily. Keeping the storage interface clean enough that Postgres can be swapped for SQLite (single-operator mode) or log-in-object-storage (long horizon) is a feature, not a sin.
 5. **Full attribution on every event.** `actor_token_id` and `source` (`human|agent|system`) come from the request context. Never from a request body, header value, or query parameter. The audit answers "who, via what client, when, with what authority."
-6. **Default deny on side effects.** External writes create an `approval` and wait. The system never auto-approves. Approvals are not yet implemented; until they are, **no connector with write actions ships**.
+6. **Default deny on side effects.** External writes create an `approval` and wait. The system never auto-approves. Approval-gated proof/stub write paths may ship only when they can prove no outbound write occurs before an approval decision; no connector may perform a write before approval.
 7. **One owner, many client tokens.** The root token only mints and revokes other tokens. Tokens that *create* an approval cannot *decide* it (separation of duties).
 8. **Editor- and cloud-agnostic.** No managed cloud primitives in core. The substrate is a Go binary, an event log, a backing store, and an object-storage interface. Migration between clouds is a redeploy, not a feature change.
 9. **REST is canonical.** CLI and MCP are translation layers. Every REST operation has an MCP tool and (where useful) a CLI surface. Transports never own business logic.
@@ -72,6 +72,7 @@ internal/domain/      pure types: Token, Message, WorkItem, Event
 internal/events/      append-only writer with deterministic ids
 internal/errorreporting/ maskable deterministic-layer error reports
 internal/approvals/  default-deny approval lifecycle + projection writers
+internal/httpconnector/ approval-gated HTTP connector proof slice + outbox
 internal/projections/ projection writers (events → derived rows)
 internal/idempotency/ middleware + store
 internal/inbox/       message capture

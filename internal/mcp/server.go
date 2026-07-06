@@ -22,6 +22,7 @@ import (
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/policyprofile"
@@ -51,6 +52,7 @@ type Deps struct {
 	Inbox               *inbox.Service
 	WorkItems           *workitems.Service
 	Approvals           *approvals.Service
+	HTTPConnector       *httpconnector.Service
 	CheckProposals      *convergence.ChecksProposalService
 	CultivarActivations *cultivaractivation.Service
 	DeterministicErrors *errorreporting.Service

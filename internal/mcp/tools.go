@@ -19,6 +19,7 @@ import (
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/grants"
+	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
@@ -68,6 +69,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolWorkItemsAppendEvent(),
 		s.toolApprovalsRequest(),
 		s.toolApprovalsDecide(),
+		s.toolHTTPConnectorRequest(),
 		s.toolConvergenceProposeChecks(),
 		s.toolWorkItemsUpdateMetadata(),
 		s.toolWorkItemsTransition(),
@@ -833,6 +835,64 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 	}
 }
 
+func (s *Server) toolHTTPConnectorRequest() Tool {
+	return Tool{
+		Name:        "connectors.http_request",
+		Description: "Request a generic HTTP connector action. Write-mode actions create an approval and do not perform outbound writes.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"work_item_id", "mode", "url"}, map[string]any{
+			"work_item_id": schemaString("Work item uuid."),
+			"mode":         schemaString("Action mode: read or write."),
+			"method":       schemaString("HTTP method. Read defaults to GET; write defaults to POST."),
+			"url":          schemaString("Absolute http or https URL."),
+			"body":         schemaAny("Optional JSON request body. No credentials or secrets."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.HTTPConnector == nil {
+				return nil, errors.New("http connector service not configured")
+			}
+			var args struct {
+				WorkItemID string          `json:"work_item_id"`
+				Mode       string          `json:"mode"`
+				Method     string          `json:"method"`
+				URL        string          `json:"url"`
+				Body       json.RawMessage `json:"body"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			workItemID, err := parseUUID(args.WorkItemID, "work_item_id")
+			if err != nil {
+				return nil, err
+			}
+			if err := s.canWriteWorkItem(ctx, actor, workItemID); err != nil {
+				return nil, err
+			}
+			result, err := s.deps.HTTPConnector.Request(ctx, httpconnector.RequestInput{
+				WorkItemID: workItemID,
+				Mode:       httpconnector.Mode(args.Mode),
+				Method:     args.Method,
+				URL:        args.URL,
+				Body:       args.Body,
+				Actor:      actor,
+			})
+			if err != nil {
+				return nil, httpConnectorToolErr(err)
+			}
+			out := map[string]any{
+				"action":   result.Action,
+				"created":  result.Fresh,
+				"event_id": result.EventID,
+			}
+			if result.Approval != nil {
+				out["approval"] = result.Approval
+				out["approval_event_id"] = result.ApprovalEvent
+			}
+			return out, nil
+		},
+	}
+}
+
 func (s *Server) toolApprovalsListForWorkItem() Tool {
 	return Tool{
 		Name:        "approvals.list_for_work_item",
@@ -1378,6 +1438,22 @@ func approvalToolErr(err error) error {
 	case strings.Contains(err.Error(), "is required"),
 		strings.Contains(err.Error(), "terminal work item"),
 		strings.Contains(err.Error(), "invalid work item transition"):
+		return replayableToolErr(err)
+	default:
+		return err
+	}
+}
+
+func httpConnectorToolErr(err error) error {
+	switch {
+	case errors.Is(err, httpconnector.ErrNotFound):
+		return replayableToolErr(fmt.Errorf("work_item_not_found: work item not found"))
+	case errors.Is(err, httpconnector.ErrInvalidMode):
+		return replayableToolErr(fmt.Errorf("invalid_connector_mode: mode must be read or write"))
+	case errors.Is(err, httpconnector.ErrInvalidMethod),
+		errors.Is(err, httpconnector.ErrInvalidURL),
+		errors.Is(err, httpconnector.ErrUnsupportedRequest),
+		errors.Is(err, httpconnector.ErrApprovalRequired):
 		return replayableToolErr(err)
 	default:
 		return err

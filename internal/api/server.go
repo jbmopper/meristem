@@ -28,6 +28,7 @@ import (
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/grants"
+	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
@@ -70,6 +71,7 @@ type Server struct {
 	access                *access.Service
 	escalations           *escalations.Service
 	approvals             *approvals.Service
+	httpConnector         *httpconnector.Service
 	grants                *grants.IssuanceService
 	deterministicErrors   *errorreporting.Service
 	checkProposals        *convergence.ChecksProposalService
@@ -110,6 +112,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		s.access = access.NewService(pool)
 		s.escalations = escalations.NewService(pool, s.writer)
 		s.approvals = approvals.NewService(pool, s.writer)
+		s.httpConnector = httpconnector.NewService(pool, s.writer, s.approvals, nil)
 		s.grants = grants.NewIssuanceService(pool, s.writer, s.authService, s.escalations)
 		s.deterministicErrors = errorreporting.NewService(pool, s.writer)
 		s.checkProposals = convergence.NewChecksProposalService(pool, s.writer)
@@ -125,6 +128,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 			Inbox:               s.inbox,
 			WorkItems:           s.workItems,
 			Approvals:           s.approvals,
+			HTTPConnector:       s.httpConnector,
 			CheckProposals:      s.checkProposals,
 			CultivarActivations: s.cultivarActivations,
 			DeterministicErrors: s.deterministicErrors,
@@ -174,6 +178,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /v1/work-items/{id}", s.protected(http.HandlerFunc(s.handleGetWorkItem)))
 	s.mux.Handle("GET /v1/work-items/{id}/approvals", s.protected(http.HandlerFunc(s.handleListApprovalsForWorkItem)))
 	s.mux.Handle("POST /v1/work-items/{id}/approvals", s.commandWithAccess(s.canWriteWorkItemPath("approvals.request"), http.HandlerFunc(s.handleCreateApproval)))
+	s.mux.Handle("POST /v1/work-items/{id}/http-connector/actions", s.commandWithAccess(s.canWriteWorkItemPath("connectors.http_request"), http.HandlerFunc(s.handleHTTPConnectorAction)))
 	s.mux.Handle("GET /v1/approvals/{id}", s.protected(http.HandlerFunc(s.handleGetApproval)))
 	s.mux.Handle("POST /v1/approvals/{id}/decision", s.commandWithAccess(s.canDecideApprovalPath, http.HandlerFunc(s.handleDecideApproval)))
 	s.mux.Handle("POST /v1/work-items/{id}/children", s.commandWithAccess(s.canWriteWorkItemPath("work_items.spawn_child"), http.HandlerFunc(s.handleSpawnChild)))

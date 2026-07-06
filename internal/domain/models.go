@@ -7,32 +7,35 @@ import (
 )
 
 const (
-	EventTokenCreated                = "token.created"
-	EventTokenRevoked                = "token.revoked"
-	EventIdempotencyRecorded         = "idempotency.recorded"
-	EventMessageCaptured             = "message.captured"
-	EventWorkItemCreated             = "work_item.created"
-	EventWorkItemTransitioned        = "work_item.transitioned"
-	EventWorkItemEventAppended       = "work_item.event_appended"
-	EventWorkItemRelationAdded       = "work_item.relation_added"
-	EventWorkItemMetadataUpdated     = "work_item.metadata_updated"
-	EventXylemExhausted              = "xylem.exhausted"
-	EventSignalReceived              = "signal.received"
-	EventDeterministicErrorReported  = "deterministic_error.reported"
-	EventDeterministicErrorMasked    = "deterministic_error.masked"
-	EventDeterministicErrorUnmasked  = "deterministic_error.unmasked"
-	EventEscalationRequested         = "escalation.requested"
-	EventSubactorGrantRequested      = "subactor_grant.requested"
-	EventSubactorGrantGranted        = "subactor_grant.granted"
-	EventSubactorGrantDenied         = "subactor_grant.denied"
-	EventSubactorGrantEscalated      = "subactor_grant.escalated"
-	EventCultivarActivationRequested = "cultivar_activation.requested"
-	EventCultivarActivationGranted   = "cultivar_activation.granted"
-	EventCultivarActivationDenied    = "cultivar_activation.denied"
-	EventCultivarActivationEscalated = "cultivar_activation.escalated"
-	EventApprovalCreated             = "approval.created"
-	EventApprovalDecided             = "approval.decided"
-	EventApprovalExpired             = "approval.expired"
+	EventTokenCreated                 = "token.created"
+	EventTokenRevoked                 = "token.revoked"
+	EventIdempotencyRecorded          = "idempotency.recorded"
+	EventMessageCaptured              = "message.captured"
+	EventWorkItemCreated              = "work_item.created"
+	EventWorkItemTransitioned         = "work_item.transitioned"
+	EventWorkItemEventAppended        = "work_item.event_appended"
+	EventWorkItemRelationAdded        = "work_item.relation_added"
+	EventWorkItemMetadataUpdated      = "work_item.metadata_updated"
+	EventXylemExhausted               = "xylem.exhausted"
+	EventSignalReceived               = "signal.received"
+	EventDeterministicErrorReported   = "deterministic_error.reported"
+	EventDeterministicErrorMasked     = "deterministic_error.masked"
+	EventDeterministicErrorUnmasked   = "deterministic_error.unmasked"
+	EventEscalationRequested          = "escalation.requested"
+	EventSubactorGrantRequested       = "subactor_grant.requested"
+	EventSubactorGrantGranted         = "subactor_grant.granted"
+	EventSubactorGrantDenied          = "subactor_grant.denied"
+	EventSubactorGrantEscalated       = "subactor_grant.escalated"
+	EventCultivarActivationRequested  = "cultivar_activation.requested"
+	EventCultivarActivationGranted    = "cultivar_activation.granted"
+	EventCultivarActivationDenied     = "cultivar_activation.denied"
+	EventCultivarActivationEscalated  = "cultivar_activation.escalated"
+	EventApprovalCreated              = "approval.created"
+	EventApprovalDecided              = "approval.decided"
+	EventApprovalExpired              = "approval.expired"
+	EventHTTPConnectorActionRequested = "http_connector.action_requested"
+	EventHTTPConnectorActionApproved  = "http_connector.action_approved"
+	EventHTTPConnectorActionSent      = "http_connector.action_sent"
 	// EventPatienceBreached records that a non-terminal work_item has been
 	// in its current state longer than the configured patience budget for
 	// that state. Recorded by `meristem worker --once` (see internal/worker).
@@ -115,6 +118,9 @@ var AllEventKinds = []string{
 	EventApprovalCreated,
 	EventApprovalDecided,
 	EventApprovalExpired,
+	EventHTTPConnectorActionRequested,
+	EventHTTPConnectorActionApproved,
+	EventHTTPConnectorActionSent,
 	EventPatienceBreached,
 	EventConvergenceVerdictRecorded,
 	EventConvergenceChecksProposed,
@@ -126,19 +132,20 @@ var AllEventKinds = []string{
 }
 
 const (
-	SubjectToken              = "token"
-	SubjectIdempotencyKey     = "idempotency_key"
-	SubjectMessage            = "message"
-	SubjectWorkItem           = "work_item"
-	SubjectSignal             = "signal"
-	SubjectDeterministicError = "deterministic_error"
-	SubjectEscalation         = "escalation"
-	SubjectSubactorGrant      = "subactor_grant"
-	SubjectCultivarActivation = "cultivar_activation"
-	SubjectApproval           = "approval"
-	SubjectTropism            = "tropism"
-	SubjectCultivar           = "cultivar"
-	SubjectProjection         = "projection"
+	SubjectToken               = "token"
+	SubjectIdempotencyKey      = "idempotency_key"
+	SubjectMessage             = "message"
+	SubjectWorkItem            = "work_item"
+	SubjectSignal              = "signal"
+	SubjectDeterministicError  = "deterministic_error"
+	SubjectEscalation          = "escalation"
+	SubjectSubactorGrant       = "subactor_grant"
+	SubjectCultivarActivation  = "cultivar_activation"
+	SubjectApproval            = "approval"
+	SubjectHTTPConnectorAction = "http_connector_action"
+	SubjectTropism             = "tropism"
+	SubjectCultivar            = "cultivar"
+	SubjectProjection          = "projection"
 	// SubjectConvergence is the subject kind for a convergence verdict. The
 	// subject_id is the work_item being reduced; the attempt lives in the event
 	// payload, so (work_item_id, attempt, payload) remains the deterministic

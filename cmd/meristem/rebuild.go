@@ -58,6 +58,7 @@ var projectionTables = []string{
 	"cultivars",
 	"projections",
 	"approvals",
+	"http_connector_actions",
 }
 
 // rebuildScratchTables are event-caused operational tables that projectors
@@ -66,6 +67,7 @@ var projectionTables = []string{
 // are caused by dispatch.requested, while lease state is worker coordination.
 var rebuildScratchTables = []string{
 	"job_queue",
+	"outbox_events",
 }
 
 func runRebuild(ctx context.Context, logger *slog.Logger, args []string) error {
