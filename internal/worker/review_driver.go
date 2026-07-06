@@ -206,6 +206,7 @@ func (w *Worker) reviewEvidence(ctx context.Context, parentID uuid.UUID) (review
 		var payload struct {
 			InnerKind string          `json:"inner_kind"`
 			Inner     json.RawMessage `json:"inner"`
+			Commit    string          `json:"commit"`
 			Commits   json.RawMessage `json:"commits"`
 		}
 		if err := json.Unmarshal(raw, &payload); err != nil {
@@ -220,8 +221,13 @@ func (w *Worker) reviewEvidence(ctx context.Context, parentID uuid.UUID) (review
 				out.Commits = append(out.Commits, commit)
 			}
 		}
+		if commit := strings.TrimSpace(payload.Commit); commit != "" && !seen[commit] {
+			seen[commit] = true
+			out.Commits = append(out.Commits, commit)
+		}
 		if len(payload.Inner) > 0 {
 			var inner struct {
+				Commit  string          `json:"commit"`
 				Commits json.RawMessage `json:"commits"`
 			}
 			if err := json.Unmarshal(payload.Inner, &inner); err == nil {
@@ -230,6 +236,10 @@ func (w *Worker) reviewEvidence(ctx context.Context, parentID uuid.UUID) (review
 						seen[commit] = true
 						out.Commits = append(out.Commits, commit)
 					}
+				}
+				if commit := strings.TrimSpace(inner.Commit); commit != "" && !seen[commit] {
+					seen[commit] = true
+					out.Commits = append(out.Commits, commit)
 				}
 			}
 		}

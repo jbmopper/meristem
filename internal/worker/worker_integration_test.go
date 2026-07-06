@@ -1005,7 +1005,7 @@ func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
 		t.Fatalf("create implementation item: %v", err)
 	}
 	if err := service.AppendEvent(ctx, implementation.ID, "coordination.implementation_ready", map[string]any{
-		"commits": []string{"abc1234"},
+		"commit":  "abc1234",
 		"summary": "implementation landed",
 	}, systemTok.Token); err != nil {
 		t.Fatalf("append implementation marker: %v", err)
