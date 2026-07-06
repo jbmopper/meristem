@@ -9,6 +9,10 @@
 This file is retained only as a migration index for readers who arrive here
 from older links.
 
+The current A-bar parity matrix lives in [`mcp-parity.md`](mcp-parity.md) and
+the active matrix-refresh item is
+`3eb5c8c4-f0f9-5720-8c65-2c949252074c`.
+
 ## Live Work Items
 
 - `403d0ca9-3b1f-47d5-9224-9733ae585b73` — MCP/spec parity: fix v0 MCP tool-count wording.
