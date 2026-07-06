@@ -1,10 +1,5 @@
 # Owner quickstart (Codex draft)
-
-> Non-canonical comparison draft. The maintained owner quickstart is
-> [`owner-quickstart.md`](owner-quickstart.md); keep this file only as review
-> material until the owner chooses to archive or delete it.
-
-Command spine from built checkout to live operation; agents use worktrees.
+> Non-canonical comparison draft; maintained quickstart: [`owner-quickstart.md`](owner-quickstart.md).
 
 ```bash
 export MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable'
@@ -36,7 +31,7 @@ curl -fsS "$API/readyz"
 ```bash
 MERISTEM_TOKEN="$(tr -d '\n' < .meristem/root.token)" \
   "$BIN" tokens create --name owner-operator --source human \
-  --scopes policy_profile.switch,registry.write,work_items.read,work_items.write,feed.read,feed.read_assigned
+  --scopes policy_profile.switch,registry.write,inbox.capture,feed.read,work_items.read_all,work_items.write_all
 # -> id=... source=human secret=mrs_...
 ```
 
