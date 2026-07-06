@@ -5,11 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net/url"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,12 +18,8 @@ import (
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/storage"
+	"github.com/jbmopper/meristem/internal/testutil/pgtest"
 	"github.com/jbmopper/meristem/internal/workitems"
-)
-
-const (
-	envIntegrationEnabled = "MERISTEM_INTEGRATION"
-	envTestDatabaseURL    = "MERISTEM_TEST_DATABASE_URL"
 )
 
 func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
@@ -229,80 +222,7 @@ func lastActorForKind(t *testing.T, pool *pgxpool.Pool, kind string) uuid.UUID {
 
 func newMCPIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-
-	baseURL := os.Getenv(envTestDatabaseURL)
-	if baseURL == "" {
-		if os.Getenv(envIntegrationEnabled) != "1" {
-			t.Skipf("set %s=1 and %s (or %s) to run Postgres integration tests", envIntegrationEnabled, storage.EnvDatabaseURL, envTestDatabaseURL)
-		}
-		baseURL = os.Getenv(storage.EnvDatabaseURL)
-	}
-	if baseURL == "" {
-		t.Skipf("%s is required for integration tests", storage.EnvDatabaseURL)
-	}
-
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse database url: %v", err)
-	}
-	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
-		t.Fatalf("integration tests require postgres URL DSN, got scheme %q", parsed.Scheme)
-	}
-
-	dbName := "meristem_mcp_itest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	adminURL := *parsed
-	adminURL.Path = "/postgres"
-	testURL := *parsed
-	testURL.Path = "/" + dbName
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin database: %v", err)
-	}
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+quoteIdentifier(dbName)); err != nil {
-		admin.Close()
-		t.Fatalf("create temp database %s: %v", dbName, err)
-	}
-	admin.Close()
-
-	pool, err := storage.Open(ctx, storage.Config{
-		DatabaseURL:    testURL.String(),
-		MaxConns:       4,
-		MinConns:       1,
-		ConnectTimeout: 10 * time.Second,
-	})
-	if err != nil {
-		dropIntegrationDatabase(t, adminURL.String(), dbName)
-		t.Fatalf("open temp database: %v", err)
-	}
-
-	t.Cleanup(func() {
-		pool.Close()
-		dropIntegrationDatabase(t, adminURL.String(), dbName)
-	})
-	return pool
-}
-
-func dropIntegrationDatabase(t *testing.T, adminDSN string, dbName string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	admin, err := pgxpool.New(ctx, adminDSN)
-	if err != nil {
-		t.Logf("open admin database for cleanup: %v", err)
-		return
-	}
-	defer admin.Close()
-	if _, err := admin.Exec(ctx, `DROP DATABASE IF EXISTS `+quoteIdentifier(dbName)+` WITH (FORCE)`); err != nil {
-		t.Logf("drop temp database %s: %v", dbName, err)
-	}
-}
-
-func quoteIdentifier(identifier string) string {
-	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+	return pgtest.NewPool(t, "meristem_mcp_itest")
 }
 
 func discardLogger() *slog.Logger {

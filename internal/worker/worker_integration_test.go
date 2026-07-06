@@ -3,9 +3,6 @@ package worker
 import (
 	"context"
 	"encoding/json"
-	"net/url"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,12 +18,8 @@ import (
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/storage"
+	"github.com/jbmopper/meristem/internal/testutil/pgtest"
 	"github.com/jbmopper/meristem/internal/workitems"
-)
-
-const (
-	envIntegrationEnabled = "MERISTEM_INTEGRATION"
-	envTestDatabaseURL    = "MERISTEM_TEST_DATABASE_URL"
 )
 
 // TestScanOnceEmitsBreachAndEscalates is the end-to-end pin: stand up a
@@ -1634,83 +1627,7 @@ func dispatchPayloadForSubject(t *testing.T, ctx context.Context, pool *pgxpool.
 	return payload
 }
 
-// newIntegrationPool mirrors the helper in internal/api/signals_integration_test.go;
-// duplicated rather than promoted to a shared package so the test layout
-// stays self-contained per package. If a third caller needs it, factor.
 func newIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-
-	baseURL := os.Getenv(envTestDatabaseURL)
-	if baseURL == "" {
-		if os.Getenv(envIntegrationEnabled) != "1" {
-			t.Skipf("set %s=1 and %s (or %s) to run Postgres integration tests", envIntegrationEnabled, storage.EnvDatabaseURL, envTestDatabaseURL)
-		}
-		baseURL = os.Getenv(storage.EnvDatabaseURL)
-	}
-	if baseURL == "" {
-		t.Skipf("%s is required for integration tests", storage.EnvDatabaseURL)
-	}
-
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse database url: %v", err)
-	}
-	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
-		t.Fatalf("integration tests require postgres URL DSN, got scheme %q", parsed.Scheme)
-	}
-
-	dbName := "meristem_itest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	adminURL := *parsed
-	adminURL.Path = "/postgres"
-	testURL := *parsed
-	testURL.Path = "/" + dbName
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin database: %v", err)
-	}
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+quoteIdentifier(dbName)); err != nil {
-		admin.Close()
-		t.Fatalf("create temp database %s: %v", dbName, err)
-	}
-	admin.Close()
-
-	pool, err := storage.Open(ctx, storage.Config{
-		DatabaseURL:    testURL.String(),
-		MaxConns:       4,
-		MinConns:       1,
-		ConnectTimeout: 10 * time.Second,
-	})
-	if err != nil {
-		dropIntegrationDatabase(t, adminURL.String(), dbName)
-		t.Fatalf("open temp database: %v", err)
-	}
-
-	t.Cleanup(func() {
-		pool.Close()
-		dropIntegrationDatabase(t, adminURL.String(), dbName)
-	})
-	return pool
-}
-
-func dropIntegrationDatabase(t *testing.T, adminDSN string, dbName string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	admin, err := pgxpool.New(ctx, adminDSN)
-	if err != nil {
-		t.Logf("open admin database for cleanup: %v", err)
-		return
-	}
-	defer admin.Close()
-	if _, err := admin.Exec(ctx, `DROP DATABASE IF EXISTS `+quoteIdentifier(dbName)+` WITH (FORCE)`); err != nil {
-		t.Logf("drop temp database %s: %v", dbName, err)
-	}
-}
-
-func quoteIdentifier(identifier string) string {
-	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+	return pgtest.NewPool(t, "meristem_worker_itest")
 }

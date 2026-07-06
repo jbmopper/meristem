@@ -4,13 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/url"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/app"
@@ -18,11 +14,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/storage"
-)
-
-const (
-	envIntegrationEnabled = "MERISTEM_INTEGRATION"
-	envTestDatabaseURL    = "MERISTEM_TEST_DATABASE_URL"
+	"github.com/jbmopper/meristem/internal/testutil/pgtest"
 )
 
 // TestExportScrubsAndFiltersSeededDatabase is the R8 slice's convergence
@@ -117,64 +109,5 @@ func eventCount(t *testing.T, pool *pgxpool.Pool) int {
 
 func newIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	baseURL := os.Getenv(envTestDatabaseURL)
-	if baseURL == "" {
-		if os.Getenv(envIntegrationEnabled) != "1" {
-			t.Skipf("set %s=1 and %s to run Postgres integration tests", envIntegrationEnabled, envTestDatabaseURL)
-		}
-		baseURL = os.Getenv(storage.EnvDatabaseURL)
-	}
-	if baseURL == "" {
-		t.Skipf("%s is required for integration tests", envTestDatabaseURL)
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse database url: %v", err)
-	}
-	dbName := "meristem_export_itest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	adminURL := *parsed
-	adminURL.Path = "/postgres"
-	testURL := *parsed
-	testURL.Path = "/" + dbName
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin database: %v", err)
-	}
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+quoteIdentifier(dbName)); err != nil {
-		admin.Close()
-		t.Fatalf("create temp database: %v", err)
-	}
-	admin.Close()
-	pool, err := storage.Open(ctx, storage.Config{DatabaseURL: testURL.String(), MaxConns: 4, MinConns: 1, ConnectTimeout: 10 * time.Second})
-	if err != nil {
-		dropTempDatabase(t, adminURL.String(), dbName)
-		t.Fatalf("open temp database: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		dropTempDatabase(t, adminURL.String(), dbName)
-	})
-	return pool
-}
-
-func dropTempDatabase(t *testing.T, adminURL string, dbName string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	admin, err := pgxpool.New(ctx, adminURL)
-	if err != nil {
-		t.Logf("open admin database for cleanup: %v", err)
-		return
-	}
-	defer admin.Close()
-	if _, err := admin.Exec(ctx, `DROP DATABASE IF EXISTS `+quoteIdentifier(dbName)+` WITH (FORCE)`); err != nil {
-		t.Logf("drop temp database %s: %v", dbName, err)
-	}
-}
-
-func quoteIdentifier(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	return pgtest.NewPool(t, "meristem_export_itest")
 }

@@ -4,13 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/url"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/auth"
@@ -18,11 +14,7 @@ import (
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/storage"
-)
-
-const (
-	envIntegrationEnabled = "MERISTEM_INTEGRATION"
-	envTestDatabaseURL    = "MERISTEM_TEST_DATABASE_URL"
+	"github.com/jbmopper/meristem/internal/testutil/pgtest"
 )
 
 func TestRegistryServiceIntegration(t *testing.T) {
@@ -129,60 +121,7 @@ func TestRegistryServiceIntegration(t *testing.T) {
 
 func newIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-
-	baseURL := os.Getenv(envTestDatabaseURL)
-	if baseURL == "" {
-		if os.Getenv(envIntegrationEnabled) != "1" {
-			t.Skipf("set %s=1 and %s (or %s) to run Postgres integration tests", envIntegrationEnabled, storage.EnvDatabaseURL, envTestDatabaseURL)
-		}
-		baseURL = os.Getenv(storage.EnvDatabaseURL)
-	}
-	if baseURL == "" {
-		t.Skipf("%s is required for integration tests", storage.EnvDatabaseURL)
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse database url: %v", err)
-	}
-	dbName := "meristem_registry_itest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	adminURL := *parsed
-	adminURL.Path = "/postgres"
-	testURL := *parsed
-	testURL.Path = "/" + dbName
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin database: %v", err)
-	}
-	if _, err := admin.Exec(ctx, `CREATE DATABASE `+quoteIdentifier(dbName)); err != nil {
-		admin.Close()
-		t.Fatalf("create test database: %v", err)
-	}
-	admin.Close()
-
-	pool, err := storage.Open(ctx, storage.Config{DatabaseURL: testURL.String()})
-	if err != nil {
-		t.Fatalf("open test database: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		dropCtx, dropCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer dropCancel()
-		admin, err := pgxpool.New(dropCtx, adminURL.String())
-		if err != nil {
-			t.Logf("open admin for cleanup: %v", err)
-			return
-		}
-		defer admin.Close()
-		_, _ = admin.Exec(dropCtx, `DROP DATABASE IF EXISTS `+quoteIdentifier(dbName)+` WITH (FORCE)`)
-	})
-	return pool
-}
-
-func quoteIdentifier(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	return pgtest.NewPool(t, "meristem_registry_itest")
 }
 
 func mustRaw(raw string) []byte {
