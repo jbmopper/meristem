@@ -239,6 +239,9 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		if strings.Contains(tool.Name, ".") {
 			t.Errorf("Cursor-compatible tool name still contains dot: %q", tool.Name)
 		}
+		if _, ok := tool.InputSchema["properties"].(map[string]any); !ok {
+			t.Fatalf("tool %s has non-object properties schema: %#v", tool.Name, tool.InputSchema["properties"])
+		}
 	}
 	for _, name := range expected {
 		if !got[name] {
