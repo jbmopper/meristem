@@ -130,3 +130,42 @@ func matchesPattern(path, entry string) bool {
 	}
 	return path == entry || strings.HasPrefix(path, entry+"/")
 }
+
+// matchesDenyPattern applies deny-side semantics: everything matchesPattern
+// covers, plus subtree matching at any depth — a directory entry like
+// ".meristem/" matches any path containing that segment, and a slash-free
+// entry like ".env" matches any basename or segment. Deny widening is the
+// fail-closed direction; allow entries keep the stricter root-relative
+// semantics (review finding F2 on ca006d7: nested secrets must not slip
+// past root-anchored deny entries).
+func matchesDenyPattern(p, entry string) bool {
+	if matchesPattern(p, entry) {
+		return true
+	}
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return false
+	}
+	if strings.HasSuffix(entry, "/") {
+		seg := strings.TrimSuffix(entry, "/")
+		for _, part := range strings.Split(p, "/") {
+			if part == seg {
+				return true
+			}
+		}
+		return false
+	}
+	if !strings.Contains(entry, "/") {
+		for _, part := range strings.Split(p, "/") {
+			if part == entry {
+				return true
+			}
+			if strings.ContainsAny(entry, "*?") {
+				if ok, err := filepathMatch(entry, part); err == nil && ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}

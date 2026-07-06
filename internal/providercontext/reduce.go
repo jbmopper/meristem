@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/safety"
 )
 
 // Generated is the structural payload of provider_context.generated, as
@@ -94,9 +96,11 @@ func Reduce(req Request) Decision {
 	}
 	passed = append(passed, "deny_superset_ok")
 
-	// 4. every manifest path inside allow, outside deny.
+	// 4. every manifest path inside allow, outside deny. Deny matching uses
+	// the widened deny semantics so nested secrets cannot slip past
+	// root-anchored entries.
 	for _, entry := range req.Manifest {
-		if matchesAny(entry.Path, req.Policy.DeniedPaths) {
+		if matchesAnyDeny(entry.Path, req.Policy.DeniedPaths) {
 			return reject(fmt.Sprintf("manifest path %q matches denied_paths", entry.Path))
 		}
 		if !matchesAny(entry.Path, req.Policy.AllowedPaths) {
@@ -134,13 +138,15 @@ func Reduce(req Request) Decision {
 	}
 	passed = append(passed, "mcp_allowlist_grantable")
 
-	// 7. launch mode valid; direct requires approved review, else escalate
-	// rather than verify.
+	// 7. launch mode valid; direct requires the anchor work_item's
+	// caller-resolved review status to be approved — never the
+	// requester-authored Policy.RequiredReview, which would let a request
+	// self-declare its own approval (review finding F1 on ca006d7).
 	if !req.Policy.LaunchMode.Valid() {
 		return reject(fmt.Sprintf("unknown launch_mode %q", req.Policy.LaunchMode))
 	}
-	if req.Policy.LaunchMode == LaunchDirect && domain.HumanReviewStatus(req.Policy.RequiredReview) != domain.HumanReviewApproved {
-		return escalate("direct launch requires required_review=approved")
+	if req.Policy.LaunchMode == LaunchDirect && req.HumanReviewStatus != domain.HumanReviewApproved {
+		return escalate("direct launch requires the anchor work_item to be human-review approved")
 	}
 	passed = append(passed, "launch_mode_gated")
 
@@ -150,6 +156,9 @@ func Reduce(req Request) Decision {
 	}
 	if req.Policy.PatienceSeconds <= 0 {
 		return reject("patience_seconds must be positive (bounded patience)")
+	}
+	if req.Policy.PatienceSeconds > int(safety.MaxPatienceBudget/time.Second) {
+		return reject(fmt.Sprintf("patience_seconds %d exceeds MaxPatienceBudget", req.Policy.PatienceSeconds))
 	}
 	if req.Policy.WorkItemID == uuid.Nil {
 		return reject("work_item_id is required")
@@ -180,6 +189,15 @@ func denyCovers(denied []string, builtin string) bool {
 func matchesAny(p string, entries []string) bool {
 	for _, entry := range entries {
 		if matchesPattern(p, entry) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAnyDeny(p string, entries []string) bool {
+	for _, entry := range entries {
+		if matchesDenyPattern(p, entry) {
 			return true
 		}
 	}

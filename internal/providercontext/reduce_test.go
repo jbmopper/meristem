@@ -98,7 +98,24 @@ func TestReduceRefusals(t *testing.T) {
 			r.Policy.MCPToolAllowlist = []string{"tokens.create"}
 		}, domain.VerdictReject, "not grantable"},
 		{"invalid launch mode", func(r *Request) { r.Policy.LaunchMode = LaunchMode("yolo") }, domain.VerdictReject, "launch_mode"},
-		{"direct without approval", func(r *Request) { r.Policy.LaunchMode = LaunchDirect }, domain.VerdictEscalate, "required_review=approved"},
+		{"direct without approval", func(r *Request) { r.Policy.LaunchMode = LaunchDirect }, domain.VerdictEscalate, "human-review approved"},
+		{"direct with self-declared approval", func(r *Request) {
+			r.Policy.LaunchMode = LaunchDirect
+			r.Policy.RequiredReview = string(domain.HumanReviewApproved) // requester-authored; must not count
+		}, domain.VerdictEscalate, "human-review approved"},
+		{"nested env file hits deny", func(r *Request) {
+			r.Policy.AllowedPaths = append(r.Policy.AllowedPaths, "services/")
+			r.Manifest = append(r.Manifest, ManifestEntry{Path: "services/api/.env", RedactionPassed: true})
+		}, domain.VerdictReject, "denied_paths"},
+		{"nested meristem dir hits deny", func(r *Request) {
+			r.Policy.AllowedPaths = append(r.Policy.AllowedPaths, "vendor/")
+			r.Manifest = append(r.Manifest, ManifestEntry{Path: "vendor/x/.meristem/root.token", RedactionPassed: true})
+		}, domain.VerdictReject, "denied_paths"},
+		{"nested token file hits deny", func(r *Request) {
+			r.Policy.AllowedPaths = append(r.Policy.AllowedPaths, "services/")
+			r.Manifest = append(r.Manifest, ManifestEntry{Path: "services/keys/prod.token", RedactionPassed: true})
+		}, domain.VerdictReject, "denied_paths"},
+		{"patience above ceiling", func(r *Request) { r.Policy.PatienceSeconds = 31 * 24 * 3600 }, domain.VerdictReject, "MaxPatienceBudget"},
 		{"wrong reducer id", func(r *Request) { r.Policy.ReducerID = "provider_context_boundary@2" }, domain.VerdictReject, "this reducer"},
 		{"zero patience", func(r *Request) { r.Policy.PatienceSeconds = 0 }, domain.VerdictReject, "patience"},
 		{"nil work item id", func(r *Request) { r.Policy.WorkItemID = uuid.Nil }, domain.VerdictReject, "work_item_id"},
@@ -124,7 +141,7 @@ func TestReduceRefusals(t *testing.T) {
 func TestReduceDirectWithApprovalAccepts(t *testing.T) {
 	req := validRequest()
 	req.Policy.LaunchMode = LaunchDirect
-	req.Policy.RequiredReview = string(domain.HumanReviewApproved)
+	req.HumanReviewStatus = domain.HumanReviewApproved
 	got := Reduce(req)
 	if got.Disposition != domain.VerdictAccept {
 		t.Fatalf("disposition = %s (%s), want accept", got.Disposition, got.Reason)
