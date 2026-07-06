@@ -28,6 +28,9 @@ func TestCreate_RejectsBlankTitle(t *testing.T) {
 		if !strings.Contains(err.Error(), "title is required") {
 			t.Errorf("expected title-required error, got %v", err)
 		}
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("expected ErrInvalidRequest, got %v", err)
+		}
 	}
 }
 
@@ -40,6 +43,9 @@ func TestCreate_RejectsInvalidState(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid state") {
 		t.Errorf("expected invalid-state error, got %v", err)
+	}
+	if !errors.Is(err, ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState, got %v", err)
 	}
 }
 
@@ -103,6 +109,9 @@ func TestCreate_RejectsInvalidMetadata(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("expected %q error, got %v", tc.want, err)
 			}
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("expected ErrInvalidRequest, got %v", err)
+			}
 		})
 	}
 }
@@ -112,6 +121,9 @@ func TestSpawnChild_RejectsBlankTitle(t *testing.T) {
 	_, err := s.SpawnChild(context.Background(), uuid.New(), CreateInput{Actor: testActor()})
 	if err == nil || !strings.Contains(err.Error(), "title is required") {
 		t.Errorf("expected title-required error, got %v", err)
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("expected ErrInvalidRequest, got %v", err)
 	}
 }
 
@@ -124,6 +136,9 @@ func TestSpawnChild_RejectsInvalidState(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid state") {
 		t.Errorf("expected invalid-state error, got %v", err)
+	}
+	if !errors.Is(err, ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState, got %v", err)
 	}
 }
 
@@ -147,6 +162,9 @@ func TestTransition_RejectsInvalidTo(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid state") {
 		t.Errorf("expected invalid-state error, got %v", err)
 	}
+	if !errors.Is(err, ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState, got %v", err)
+	}
 }
 
 func TestAppendEvent_RejectsBlankKind(t *testing.T) {
@@ -155,6 +173,9 @@ func TestAppendEvent_RejectsBlankKind(t *testing.T) {
 		err := s.AppendEvent(context.Background(), uuid.New(), k, nil, testActor())
 		if err == nil || !strings.Contains(err.Error(), "event kind is required") {
 			t.Errorf("kind=%q: expected kind-required error, got %v", k, err)
+		}
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("kind=%q: expected ErrInvalidRequest, got %v", k, err)
 		}
 	}
 }
@@ -189,6 +210,9 @@ func TestUpdateMetadata_RejectsInvalidMetadata(t *testing.T) {
 			_, err := s.UpdateMetadata(context.Background(), uuid.New(), tc.in)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("expected ErrInvalidRequest, got %v", err)
 			}
 		})
 	}
@@ -255,6 +279,25 @@ func TestErrNotFound_IsSentinel(t *testing.T) {
 	wrapped := errors.Join(ErrNotFound, errors.New("decoration"))
 	if !errors.Is(wrapped, ErrNotFound) {
 		t.Error("wrapped ErrNotFound must still match errors.Is")
+	}
+}
+
+func TestExportedErrorSentinels_AreStable(t *testing.T) {
+	for _, sentinel := range []error{
+		ErrNotFound,
+		ErrInvalidRequest,
+		ErrInvalidState,
+		ErrInvalidTransition,
+		ErrRelationCycle,
+		ErrConvergenceChecksRequired,
+		ErrXylemBudgetExhausted,
+	} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			wrapped := errors.Join(sentinel, errors.New("decoration"))
+			if !errors.Is(wrapped, sentinel) {
+				t.Fatalf("wrapped sentinel must match errors.Is: %v", sentinel)
+			}
+		})
 	}
 }
 

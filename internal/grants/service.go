@@ -22,7 +22,10 @@ import (
 	"github.com/jbmopper/meristem/internal/safety"
 )
 
-var ErrWorkItemNotFound = errors.New("grants: work_item not found")
+var (
+	ErrWorkItemNotFound = errors.New("grants: work_item not found")
+	ErrInvalidRequest   = errors.New("grants: invalid request")
+)
 
 type IssuanceService struct {
 	pool        *pgxpool.Pool
@@ -93,10 +96,10 @@ type IssueResult struct {
 
 func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult, error) {
 	if in.Parent.ID == uuid.Nil {
-		return IssueResult{}, fmt.Errorf("grants: parent token is required")
+		return IssueResult{}, fmt.Errorf("%w: parent token is required", ErrInvalidRequest)
 	}
 	if in.WorkItemID == uuid.Nil {
-		return IssueResult{}, fmt.Errorf("grants: work_item_id is required")
+		return IssueResult{}, fmt.Errorf("%w: work_item_id is required", ErrInvalidRequest)
 	}
 	tokenName := strings.TrimSpace(in.Name)
 	if tokenName == "" {
@@ -265,10 +268,10 @@ func (s *IssuanceService) Issue(ctx context.Context, in IssueInput) (IssueResult
 
 func (s *IssuanceService) Evaluate(ctx context.Context, in EvaluationInput) (EvaluationResult, error) {
 	if in.Parent.ID == uuid.Nil {
-		return EvaluationResult{}, fmt.Errorf("grants: parent token is required")
+		return EvaluationResult{}, fmt.Errorf("%w: parent token is required", ErrInvalidRequest)
 	}
 	if in.WorkItemID == uuid.Nil {
-		return EvaluationResult{}, fmt.Errorf("grants: work_item_id is required")
+		return EvaluationResult{}, fmt.Errorf("%w: work_item_id is required", ErrInvalidRequest)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -287,10 +290,10 @@ func (s *IssuanceService) Evaluate(ctx context.Context, in EvaluationInput) (Eva
 
 func (s *IssuanceService) EvaluateInTx(ctx context.Context, tx pgx.Tx, in EvaluationInput) (EvaluationResult, error) {
 	if in.Parent.ID == uuid.Nil {
-		return EvaluationResult{}, fmt.Errorf("grants: parent token is required")
+		return EvaluationResult{}, fmt.Errorf("%w: parent token is required", ErrInvalidRequest)
 	}
 	if in.WorkItemID == uuid.Nil {
-		return EvaluationResult{}, fmt.Errorf("grants: work_item_id is required")
+		return EvaluationResult{}, fmt.Errorf("%w: work_item_id is required", ErrInvalidRequest)
 	}
 	requestedScopes, err := normalizeRequestedScopes(in.RequestedScopes)
 	if err != nil {
@@ -364,7 +367,7 @@ func scanGrantWorkItem(ctx context.Context, tx pgx.Tx, id uuid.UUID) (grantWorkI
 	}
 	item.HumanReviewStatus = domain.HumanReviewStatus(humanReview)
 	if !item.HumanReviewStatus.Valid() {
-		return grantWorkItem{}, fmt.Errorf("grants: invalid human_review_status %q", humanReview)
+		return grantWorkItem{}, fmt.Errorf("%w: invalid human_review_status %q", ErrInvalidRequest, humanReview)
 	}
 	return item, nil
 }
@@ -579,7 +582,7 @@ func normalizeRequestedScopes(scopes []string) ([]string, error) {
 	for i, scope := range scopes {
 		trimmed := strings.TrimSpace(scope)
 		if trimmed == "" {
-			return nil, fmt.Errorf("grants: requested_scopes[%d] is blank", i)
+			return nil, fmt.Errorf("%w: requested_scopes[%d] is blank", ErrInvalidRequest, i)
 		}
 		seen[trimmed] = true
 	}

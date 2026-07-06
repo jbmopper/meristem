@@ -736,7 +736,7 @@ func (s *Server) toolWorkItemsCreate() Tool {
 				Actor:                      actor,
 			})
 			if err != nil {
-				return nil, err
+				return nil, workItemToolErr(err, nil)
 			}
 			return map[string]any{
 				"work_item_id": item.ID,
@@ -815,16 +815,7 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 				Actor:                      actor,
 			})
 			if err != nil {
-				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, replayableToolErr(fmt.Errorf("parent work item %s not found", parent))
-				}
-				if errors.Is(err, workitems.ErrRelationCycle) {
-					return nil, replayableToolErr(fmt.Errorf("relation cycle: parent %s descends from child", parent))
-				}
-				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
-					return nil, replayableToolErr(err)
-				}
-				return nil, err
+				return nil, workItemToolErr(err, fmt.Errorf("parent work item %s not found", parent))
 			}
 			return map[string]any{
 				"parent_id":    parent,
@@ -1101,13 +1092,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 				}
 			}
 			if err := s.deps.WorkItems.AppendEvent(ctx, id, args.Kind, payload, actor); err != nil {
-				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
-				}
-				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
-					return nil, replayableToolErr(err)
-				}
-				return nil, err
+				return nil, workItemToolErr(err, fmt.Errorf("work item %s not found", id))
 			}
 			return map[string]any{"work_item_id": id, "appended": true}, nil
 		},
@@ -1215,13 +1200,7 @@ func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 				Actor:                      actor,
 			})
 			if err != nil {
-				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
-				}
-				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
-					return nil, replayableToolErr(err)
-				}
-				return nil, err
+				return nil, workItemToolErr(err, fmt.Errorf("work item %s not found", id))
 			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
@@ -1263,19 +1242,7 @@ func (s *Server) toolWorkItemsTransition() Tool {
 			}
 			item, err := s.deps.WorkItems.Transition(ctx, id, to, args.Reason, actor)
 			if err != nil {
-				if errors.Is(err, workitems.ErrNotFound) {
-					return nil, replayableToolErr(fmt.Errorf("work item %s not found", id))
-				}
-				if errors.Is(err, workitems.ErrConvergenceChecksRequired) {
-					return nil, replayableToolErr(err)
-				}
-				if errors.Is(err, workitems.ErrXylemBudgetExhausted) {
-					return nil, replayableToolErr(err)
-				}
-				if strings.Contains(err.Error(), "invalid transition") {
-					return nil, replayableToolErr(err)
-				}
-				return nil, err
+				return nil, workItemToolErr(err, fmt.Errorf("work item %s not found", id))
 			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
@@ -1372,6 +1339,31 @@ func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uu
 	return nil
 }
 
+func workItemToolErr(err error, notFound error) error {
+	if err == nil {
+		return nil
+	}
+	if mapped := registryToolErr(err); isReplayableToolError(mapped) {
+		return mapped
+	}
+	switch {
+	case errors.Is(err, workitems.ErrNotFound):
+		if notFound != nil {
+			return replayableToolErr(notFound)
+		}
+		return replayableToolErr(fmt.Errorf("work_item_not_found: work item not found"))
+	case errors.Is(err, workitems.ErrInvalidRequest),
+		errors.Is(err, workitems.ErrInvalidState),
+		errors.Is(err, workitems.ErrInvalidTransition),
+		errors.Is(err, workitems.ErrRelationCycle),
+		errors.Is(err, workitems.ErrConvergenceChecksRequired),
+		errors.Is(err, workitems.ErrXylemBudgetExhausted):
+		return replayableToolErr(err)
+	default:
+		return err
+	}
+}
+
 func registryToolErr(err error) error {
 	switch {
 	case errors.Is(err, registry.ErrInvalidName),
@@ -1435,9 +1427,7 @@ func approvalToolErr(err error) error {
 		return replayableToolErr(err)
 	case errors.Is(err, approvals.ErrInvalidDecision):
 		return replayableToolErr(fmt.Errorf("invalid_decision: decision must be approved or denied"))
-	case strings.Contains(err.Error(), "is required"),
-		strings.Contains(err.Error(), "terminal work item"),
-		strings.Contains(err.Error(), "invalid work item transition"):
+	case errors.Is(err, approvals.ErrInvalidRequest):
 		return replayableToolErr(err)
 	default:
 		return err

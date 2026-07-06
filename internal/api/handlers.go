@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -567,7 +566,7 @@ func (s *Server) handleTransitionWorkItem(w http.ResponseWriter, r *http.Request
 			writeAPIError(w, http.StatusConflict, "convergence_checks_required", err.Error())
 			return
 		}
-		if strings.Contains(err.Error(), "invalid transition") {
+		if errors.Is(err, workitems.ErrInvalidTransition) {
 			writeAPIError(w, http.StatusConflict, "invalid_transition", err.Error())
 			return
 		}
@@ -869,7 +868,7 @@ func writeGrantError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusNotFound, "work_item_not_found", "work item not found")
 		return
 	}
-	if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "blank") || strings.Contains(err.Error(), "invalid human_review_status") {
+	if errors.Is(err, grants.ErrInvalidRequest) {
 		writeAPIError(w, http.StatusBadRequest, "subactor_grant_request_failed", err.Error())
 		return
 	}
@@ -893,7 +892,11 @@ func writeWorkItemError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "xylem_budget_exhausted", err.Error())
 		return
 	}
-	if strings.Contains(err.Error(), "invalid state") {
+	if errors.Is(err, workitems.ErrInvalidTransition) {
+		writeAPIError(w, http.StatusConflict, "invalid_transition", err.Error())
+		return
+	}
+	if errors.Is(err, workitems.ErrInvalidState) {
 		writeAPIError(w, http.StatusBadRequest, "invalid_state", err.Error())
 		return
 	}

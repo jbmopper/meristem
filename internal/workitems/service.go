@@ -22,6 +22,15 @@ import (
 
 var (
 	ErrNotFound = errors.New("workitems: not found")
+	// ErrInvalidRequest is returned for malformed work_item declarations that
+	// are deterministically rejected before any event is appended.
+	ErrInvalidRequest = errors.New("workitems: invalid request")
+	// ErrInvalidState is returned when a caller names a state outside the
+	// lifecycle enum.
+	ErrInvalidState = errors.New("workitems: invalid state")
+	// ErrInvalidTransition is returned when a valid state is not reachable
+	// from the work item's current lifecycle state.
+	ErrInvalidTransition = errors.New("workitems: invalid transition")
 	// ErrRelationCycle is returned when adding the parent->child edge
 	// would close a cycle in the work_item DAG. The migration's CHECK
 	// constraint blocks the self-loop case at the row level; everything
@@ -67,14 +76,14 @@ type UpdateMetadataInput struct {
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (domain.WorkItem, error) {
 	if strings.TrimSpace(in.Title) == "" {
-		return domain.WorkItem{}, fmt.Errorf("workitems: title is required")
+		return domain.WorkItem{}, fmt.Errorf("%w: title is required", ErrInvalidRequest)
 	}
 	state := in.State
 	if state == "" {
 		state = domain.WorkItemCaptured
 	}
 	if !state.Valid() {
-		return domain.WorkItem{}, fmt.Errorf("workitems: invalid state %q", state)
+		return domain.WorkItem{}, fmt.Errorf("%w: %q", ErrInvalidState, state)
 	}
 	checks, err := normalizeSuggestedConvergenceChecks(in.SuggestedConvergenceChecks)
 	if err != nil {
@@ -121,14 +130,14 @@ func (s *Service) SpawnChild(ctx context.Context, parentID uuid.UUID, in CreateI
 // an identity property instead of a race against process memory.
 func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.UUID, in CreateInput) (domain.WorkItem, bool, error) {
 	if strings.TrimSpace(in.Title) == "" {
-		return domain.WorkItem{}, false, fmt.Errorf("workitems: title is required")
+		return domain.WorkItem{}, false, fmt.Errorf("%w: title is required", ErrInvalidRequest)
 	}
 	state := in.State
 	if state == "" {
 		state = domain.WorkItemCaptured
 	}
 	if !state.Valid() {
-		return domain.WorkItem{}, false, fmt.Errorf("workitems: invalid state %q", state)
+		return domain.WorkItem{}, false, fmt.Errorf("%w: %q", ErrInvalidState, state)
 	}
 	checks, err := normalizeSuggestedConvergenceChecks(in.SuggestedConvergenceChecks)
 	if err != nil {
@@ -143,7 +152,7 @@ func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.U
 		return domain.WorkItem{}, false, err
 	}
 	if childID == uuid.Nil {
-		return domain.WorkItem{}, false, fmt.Errorf("workitems: child id is required")
+		return domain.WorkItem{}, false, fmt.Errorf("%w: child id is required", ErrInvalidRequest)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -269,7 +278,7 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, in UpdateMet
 
 func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkItemState, reason string, actor domain.Token) (domain.WorkItem, error) {
 	if !to.Valid() {
-		return domain.WorkItem{}, fmt.Errorf("workitems: invalid state %q", to)
+		return domain.WorkItem{}, fmt.Errorf("%w: %q", ErrInvalidState, to)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -281,7 +290,7 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 		return domain.WorkItem{}, err
 	}
 	if !domain.CanTransition(current.State, to) {
-		return domain.WorkItem{}, fmt.Errorf("workitems: invalid transition from %s to %s", current.State, to)
+		return domain.WorkItem{}, fmt.Errorf("%w: from %s to %s", ErrInvalidTransition, current.State, to)
 	}
 	if convergenceChecksRequired(current, to) {
 		return domain.WorkItem{}, fmt.Errorf("%w: item %s in %s needs a convergence-scribe child to define suggested_convergence_checks before moving to %s", ErrConvergenceChecksRequired, id, current.State, to)
@@ -346,7 +355,7 @@ func convergenceChecksRequired(current domain.WorkItem, to domain.WorkItemState)
 
 func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind string, payload any, actor domain.Token) error {
 	if strings.TrimSpace(innerKind) == "" {
-		return fmt.Errorf("workitems: event kind is required")
+		return fmt.Errorf("%w: event kind is required", ErrInvalidRequest)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -507,7 +516,7 @@ func (s *Service) resolveChildCountBudget(ctx context.Context, tx pgx.Tx, parent
 		rule = domain.EscalationRuleHandToHuman
 	}
 	if !rule.Valid() {
-		return childCountBudget{}, fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+		return childCountBudget{}, fmt.Errorf("%w: invalid escalation_rule %q", ErrInvalidRequest, rule)
 	}
 	budget := childCountBudget{
 		Max:            safety.DefaultPolicy().MaxChildrenPerItem,
@@ -590,7 +599,7 @@ func (s *Service) resolveConcurrentRunningBudget(ctx context.Context, tx pgx.Tx,
 		rule = domain.EscalationRuleHandToHuman
 	}
 	if !rule.Valid() {
-		return concurrentRunningBudget{}, fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+		return concurrentRunningBudget{}, fmt.Errorf("%w: invalid escalation_rule %q", ErrInvalidRequest, rule)
 	}
 	budget := concurrentRunningBudget{
 		Max:            safety.DefaultPolicy().MaxConcurrentRunningPerToken,
@@ -703,7 +712,7 @@ func (s *Service) resolveEventRateBudget(ctx context.Context, tx pgx.Tx, workIte
 		rule = domain.EscalationRuleHandToHuman
 	}
 	if !rule.Valid() {
-		return eventRateBudget{}, fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+		return eventRateBudget{}, fmt.Errorf("%w: invalid escalation_rule %q", ErrInvalidRequest, rule)
 	}
 	defaults := safety.DefaultPolicy().MaxEventsPerItemPerHourByClass
 	max := defaults[class]
@@ -1064,11 +1073,11 @@ func buildCreatedPayload(ctx context.Context, pool *pgxpool.Pool, in CreateInput
 		payload["cultivar"] = fmt.Sprintf("%s@%d", item.Name, item.Version)
 	}
 	if in.PatienceBudgetSeconds < 0 {
-		return nil, fmt.Errorf("workitems: patience_budget_seconds must be >= 0")
+		return nil, fmt.Errorf("%w: patience_budget_seconds must be >= 0", ErrInvalidRequest)
 	}
 	if in.PatienceBudgetSeconds > 0 {
 		if int64(in.PatienceBudgetSeconds) > int64(safety.MaxPatienceBudget/time.Second) {
-			return nil, fmt.Errorf("workitems: patience_budget_seconds exceeds the %s finite cap; bounded patience admits no effectively-infinite budget", safety.MaxPatienceBudget)
+			return nil, fmt.Errorf("%w: patience_budget_seconds exceeds the %s finite cap; bounded patience admits no effectively-infinite budget", ErrInvalidRequest, safety.MaxPatienceBudget)
 		}
 		payload["patience_budget_seconds"] = in.PatienceBudgetSeconds
 	}
@@ -1087,7 +1096,7 @@ func normalizeSuggestedConvergenceChecks(in []string) ([]string, error) {
 	for i, check := range in {
 		trimmed := strings.TrimSpace(check)
 		if trimmed == "" {
-			return nil, fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i)
+			return nil, fmt.Errorf("%w: suggested_convergence_checks[%d] is blank", ErrInvalidRequest, i)
 		}
 		out = append(out, trimmed)
 	}
@@ -1110,7 +1119,7 @@ func normalizeHumanReviewStatus(status domain.HumanReviewStatus) (domain.HumanRe
 		return domain.HumanReviewWavedThrough, nil
 	}
 	if !status.Valid() {
-		return "", fmt.Errorf("workitems: invalid human_review_status %q", status)
+		return "", fmt.Errorf("%w: invalid human_review_status %q", ErrInvalidRequest, status)
 	}
 	return status, nil
 }
@@ -1120,7 +1129,7 @@ func normalizeEscalationRule(rule domain.EscalationRule) (domain.EscalationRule,
 		return "", nil
 	}
 	if !rule.Valid() {
-		return "", fmt.Errorf("workitems: invalid escalation_rule %q", rule)
+		return "", fmt.Errorf("%w: invalid escalation_rule %q", ErrInvalidRequest, rule)
 	}
 	return rule, nil
 }

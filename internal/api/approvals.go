@@ -157,6 +157,8 @@ func writeApprovalError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "approval_already_decided", err.Error())
 	case errors.Is(err, approvals.ErrInvalidDecision):
 		writeAPIError(w, http.StatusBadRequest, "invalid_decision", "decision must be approved or denied")
+	case errors.Is(err, approvals.ErrInvalidRequest):
+		writeAPIError(w, http.StatusBadRequest, "approval_request_failed", err.Error())
 	default:
 		writeAPIError(w, http.StatusBadRequest, "approval_failed", err.Error())
 	}

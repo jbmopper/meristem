@@ -25,6 +25,7 @@ import (
 var (
 	ErrNotFound           = errors.New("approvals: not found")
 	ErrActorRequired      = errors.New("approvals: actor token is required")
+	ErrInvalidRequest     = errors.New("approvals: invalid request")
 	ErrHumanDecisionToken = errors.New("approvals: decision requires a human non-root token")
 	ErrSeparationOfDuties = errors.New("approvals: requesting token cannot decide the same approval")
 	ErrAlreadyDecided     = errors.New("approvals: approval already decided")
@@ -137,11 +138,11 @@ func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, in CreateInput) (ap
 		return uuid.Nil, uuid.Nil, false, ErrActorRequired
 	}
 	if in.WorkItemID == uuid.Nil {
-		return uuid.Nil, uuid.Nil, false, fmt.Errorf("approvals: work_item_id is required")
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("%w: work_item_id is required", ErrInvalidRequest)
 	}
 	summary := strings.TrimSpace(in.Summary)
 	if summary == "" {
-		return uuid.Nil, uuid.Nil, false, fmt.Errorf("approvals: summary is required")
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("%w: summary is required", ErrInvalidRequest)
 	}
 	expiresIn := in.ExpiresIn
 	if expiresIn <= 0 {
@@ -162,7 +163,7 @@ func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, in CreateInput) (ap
 		return uuid.Nil, uuid.Nil, false, err
 	}
 	if item.State.Terminal() {
-		return uuid.Nil, uuid.Nil, false, fmt.Errorf("approvals: cannot request approval for terminal work item %s", in.WorkItemID)
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("%w: cannot request approval for terminal work item %s", ErrInvalidRequest, in.WorkItemID)
 	}
 
 	eventID, fresh, err = s.writer.Append(ctx, tx, events.Spec{
