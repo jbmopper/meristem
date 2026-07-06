@@ -112,6 +112,28 @@ var registrySeedCultivars = []registry.DefineCultivarInput{
 		Phloem:      "projection:work-item-brief",
 		Description: "Rootstock worker for ordinary declared-check execution.",
 	},
+	{
+		Name:      "reviewer",
+		Version:   1,
+		Rootstock: true,
+		Tropism:   registry.TropismRef{Name: "checklist-all", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/reviewer.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem: registry.Xylem{
+			MaxAttempts:    2,
+			MaxWallSeconds: 3600,
+			MaxDepth:       1,
+		},
+		Phloem:      "projection:work-item-brief",
+		Description: "Rootstock worker that independently reviews implementation-marked work.",
+	},
 }
 
 func seedRegistryFixtures(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) (created, replayed int, err error) {

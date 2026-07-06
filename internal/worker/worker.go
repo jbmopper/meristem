@@ -209,6 +209,20 @@ type Result struct {
 	// convergence enforcement must not die of a missing registry row.
 	ScribePassSkippedMissingCultivar int
 
+	// ReviewCandidatesScanned is the count of done implementation work_items
+	// that carried a review marker and therefore need an independent review
+	// child.
+	ReviewCandidatesScanned int
+	// ReviewChildrenSpawned is the number of fresh reviewer children created
+	// for implementation-marked done items.
+	ReviewChildrenSpawned int
+	// ReviewChildrenAlreadyPresent is the count of implementation-marked done
+	// items that already had their deterministic reviewer child.
+	ReviewChildrenAlreadyPresent int
+	// ReviewPassSkippedMissingCultivar is 1 when the review pass stood down
+	// because the reviewer rootstock cultivar is not in the registry.
+	ReviewPassSkippedMissingCultivar int
+
 	// DispatchCandidatesScanned is the count of checkful captured/triaged/
 	// planned work_items eligible for launcher attention.
 	DispatchCandidatesScanned int
@@ -310,6 +324,18 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 			out.ScribePassSkippedMissingCultivar = 1
 		} else {
 			return out, fmt.Errorf("worker: scribe pass: %w", err)
+		}
+	}
+
+	reviewResult, err := w.scanReviews(ctx)
+	out.ReviewCandidatesScanned = reviewResult.ReviewCandidatesScanned
+	out.ReviewChildrenSpawned = reviewResult.ReviewChildrenSpawned
+	out.ReviewChildrenAlreadyPresent = reviewResult.ReviewChildrenAlreadyPresent
+	if err != nil {
+		if errors.Is(err, registry.ErrUnknownCultivar) {
+			out.ReviewPassSkippedMissingCultivar = 1
+		} else {
+			return out, fmt.Errorf("worker: review pass: %w", err)
 		}
 	}
 

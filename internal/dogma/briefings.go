@@ -75,6 +75,19 @@ var rootstockBriefings = []rootstockBriefing{
 			"Never transition the item to done yourself on judgment — the verdict machinery does that.",
 		},
 	},
+	{
+		Cultivar: "reviewer@1",
+		Role:     "You independently review an implementation another actor landed.",
+		Tropism:  "checklist-all@1 (all declared checks must pass)",
+		Budget:   "2 attempts, 60 minutes wall, depth 1; exhaustion escalates to the owner",
+		Task: []string{
+			"Run the full suite at the exact commit under review; refuse stale or dirty trees.",
+			"Review against the parent item's checks and cited spec, not against taste.",
+			"Never review your own work; if the implementation attribution matches your token, stand down.",
+			"File severity-labeled finding children for defects with cmd:/event:/query:/human-ack: checks.",
+			"Append review.verdict_recorded and checklist.item:event:review.verdict_recorded with pass:true.",
+		},
+	},
 }
 
 // sharedRules are the imperative floor every briefing carries, distilled

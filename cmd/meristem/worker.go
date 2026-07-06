@@ -231,6 +231,10 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 		slog.Int("scribe_candidates", result.ScribeCandidatesScanned),
 		slog.Int("scribe_children_spawned", result.ScribeChildrenSpawned),
 		slog.Int("scribe_children_already_present", result.ScribeChildrenAlreadyPresent),
+		slog.Int("review_candidates", result.ReviewCandidatesScanned),
+		slog.Int("review_children_spawned", result.ReviewChildrenSpawned),
+		slog.Int("review_children_already_present", result.ReviewChildrenAlreadyPresent),
+		slog.Int("review_skipped_missing_cultivar", result.ReviewPassSkippedMissingCultivar),
 		slog.Int("dispatch_candidates", result.DispatchCandidatesScanned),
 		slog.Int("dispatch_requested", result.DispatchesRequested),
 		slog.Int("dispatch_already_requested", result.DispatchesAlreadyRequested),
@@ -246,7 +250,7 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 }
 
 func formatWorkerOnceResult(result worker.Result) string {
-	return fmt.Sprintf("worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
+	return fmt.Sprintf("worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d review_candidates=%d review_children_spawned=%d review_children_already_present=%d review_skipped_missing_cultivar=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
 		result.Scanned,
 		result.BreachesEmitted,
 		result.BreachesAlreadyRecorded,
@@ -258,6 +262,10 @@ func formatWorkerOnceResult(result worker.Result) string {
 		result.ScribeCandidatesScanned,
 		result.ScribeChildrenSpawned,
 		result.ScribeChildrenAlreadyPresent,
+		result.ReviewCandidatesScanned,
+		result.ReviewChildrenSpawned,
+		result.ReviewChildrenAlreadyPresent,
+		result.ReviewPassSkippedMissingCultivar,
 		result.DispatchCandidatesScanned,
 		result.DispatchesRequested,
 		result.DispatchesAlreadyRequested,

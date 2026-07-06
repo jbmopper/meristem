@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -978,6 +979,169 @@ func TestScanDispatchRequestsEligibleItems(t *testing.T) {
 	}
 }
 
+func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-review-spawn")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	seedReviewerCultivar(t, ctx, pool, writer, systemTok.Token)
+	service := workitems.NewService(pool, writer)
+	implementation, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "implemented review target",
+		Body:                       "Implements docs/review-dispatch-spec.md.",
+		State:                      domain.WorkItemDone,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create implementation item: %v", err)
+	}
+	if err := service.AppendEvent(ctx, implementation.ID, "coordination.implementation_ready", map[string]any{
+		"commits": []string{"abc1234"},
+		"summary": "implementation landed",
+	}, systemTok.Token); err != nil {
+		t.Fatalf("append implementation marker: %v", err)
+	}
+	docsOnly, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "docs-only close",
+		State:                      domain.WorkItemDone,
+		SuggestedConvergenceChecks: []string{"human-ack:owner accepted docs"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create docs-only item: %v", err)
+	}
+	blocked, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "blocked implementation",
+		State:                      domain.WorkItemDone,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewBlocked,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create blocked item: %v", err)
+	}
+	if err := service.AppendEvent(ctx, blocked.ID, "coordination.implementation_ready", map[string]any{
+		"commits": []string{"def5678"},
+	}, systemTok.Token); err != nil {
+		t.Fatalf("append blocked marker: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	first, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce first: %v", err)
+	}
+	if first.ReviewCandidatesScanned != 1 || first.ReviewChildrenSpawned != 1 || first.ReviewChildrenAlreadyPresent != 0 {
+		t.Fatalf("review first = candidates %d spawned %d already %d, want 1/1/0",
+			first.ReviewCandidatesScanned, first.ReviewChildrenSpawned, first.ReviewChildrenAlreadyPresent)
+	}
+	if first.DispatchCandidatesScanned != 1 || first.DispatchesRequested != 1 {
+		t.Fatalf("dispatch after review = candidates %d requested %d, want 1/1", first.DispatchCandidatesScanned, first.DispatchesRequested)
+	}
+	childID := singleChildForParent(t, ctx, pool, implementation.ID)
+	if want := reviewChildID(implementation.ID); childID != want {
+		t.Fatalf("review child id = %s, want deterministic %s", childID, want)
+	}
+	child, err := service.Get(ctx, childID)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if child.State != domain.WorkItemTriaged {
+		t.Fatalf("child state = %s, want triaged", child.State)
+	}
+	if len(child.SuggestedConvergenceChecks) != 1 || child.SuggestedConvergenceChecks[0] != reviewChildCheck {
+		t.Fatalf("child checks = %v, want [%s]", child.SuggestedConvergenceChecks, reviewChildCheck)
+	}
+	if !strings.Contains(child.Body, "abc1234") {
+		t.Fatalf("child body missing commit ref:\n%s", child.Body)
+	}
+	payload := dispatchPayloadForSubject(t, ctx, pool, childID)
+	if payload.WorkItemID != childID || payload.Cultivar != "reviewer@1" || payload.State != string(domain.WorkItemTriaged) {
+		t.Fatalf("review dispatch payload = %+v", payload)
+	}
+
+	second, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce second: %v", err)
+	}
+	if second.ReviewCandidatesScanned != 1 || second.ReviewChildrenSpawned != 0 || second.ReviewChildrenAlreadyPresent != 1 {
+		t.Fatalf("review second = candidates %d spawned %d already %d, want 1/0/1",
+			second.ReviewCandidatesScanned, second.ReviewChildrenSpawned, second.ReviewChildrenAlreadyPresent)
+	}
+	if second.DispatchesRequested != 0 || second.DispatchesAlreadyRequested != 1 {
+		t.Fatalf("dispatch second = requested %d already %d, want 0/1", second.DispatchesRequested, second.DispatchesAlreadyRequested)
+	}
+	if got := countRelationsForParent(t, ctx, pool, implementation.ID); got != 1 {
+		t.Fatalf("implementation child count after repeat = %d, want 1", got)
+	}
+	for _, skipped := range []uuid.UUID{docsOnly.ID, blocked.ID, childID} {
+		if got := countRelationsForParent(t, ctx, pool, skipped); got != 0 {
+			t.Fatalf("skipped item %s child count = %d, want 0", skipped, got)
+		}
+	}
+}
+
+func TestScanOnceRefusesMissingReviewerCultivar(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-review-missing-cultivar")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	implementation, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "implemented review target",
+		State:                      domain.WorkItemDone,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create implementation item: %v", err)
+	}
+	if err := service.AppendEvent(ctx, implementation.ID, "coordination.implementation_ready", map[string]any{
+		"commits": []string{"abc1234"},
+	}, systemTok.Token); err != nil {
+		t.Fatalf("append implementation marker: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce must not abort on a missing reviewer cultivar: %v", err)
+	}
+	if result.ReviewPassSkippedMissingCultivar != 1 {
+		t.Fatalf("review pass skip not recorded: %+v", result)
+	}
+	if result.ReviewCandidatesScanned != 1 || result.ReviewChildrenSpawned != 0 {
+		t.Fatalf("review result = candidates %d spawned %d, want 1/0", result.ReviewCandidatesScanned, result.ReviewChildrenSpawned)
+	}
+	if got := countRelationsForParent(t, ctx, pool, implementation.ID); got != 0 {
+		t.Fatalf("missing cultivar should not spawn child; got %d relations", got)
+	}
+}
+
 func TestScanOnceDoesNotSpawnScribeForHumanReviewBlockedItem(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -1645,6 +1809,45 @@ func seedChecklistWorkerCultivar(t *testing.T, ctx context.Context, pool *pgxpoo
 	})
 	if err != nil {
 		t.Fatalf("define checklist worker cultivar: %v", err)
+	}
+}
+
+func seedReviewerCultivar(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token) {
+	t.Helper()
+	svc := registry.NewService(pool, writer)
+	_, _, err := svc.DefineTropism(ctx, actor, registry.DefineTropismInput{
+		Name:    "checklist-all",
+		Version: 1,
+		Reducer: registry.ReducerRef{
+			Identity: "all_pass_checklist",
+			Version:  1,
+		},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "all checklist items pass",
+	})
+	if err != nil {
+		t.Fatalf("define reviewer tropism: %v", err)
+	}
+	_, _, err = svc.DefineCultivar(ctx, actor, registry.DefineCultivarInput{
+		Name:      "reviewer",
+		Version:   1,
+		Rootstock: true,
+		Tropism:   registry.TropismRef{Name: "checklist-all", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/reviewer.md",
+			ScopesTemplate: []string{
+				"work_items.tree:{root}",
+				"work_items.read",
+				"work_items.write",
+				"feed.read_assigned",
+			},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 2, MaxWallSeconds: 3600, MaxDepth: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "reviewer rootstock",
+	})
+	if err != nil {
+		t.Fatalf("define reviewer cultivar: %v", err)
 	}
 }
 

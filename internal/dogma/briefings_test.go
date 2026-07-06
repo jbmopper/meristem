@@ -19,6 +19,7 @@ var briefingArtifacts = map[string]string{
 	"convergence-scribe": "docs/briefings/convergence-scribe.md",
 	"human-attention":    "docs/briefings/human-attention.md",
 	"checklist-worker":   "docs/briefings/checklist-worker.md",
+	"reviewer":           "docs/briefings/reviewer.md",
 }
 
 // TestRootstockBriefingsAreFreshProjections regenerates every briefing and
