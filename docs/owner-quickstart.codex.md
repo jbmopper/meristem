@@ -1,5 +1,9 @@
 # Owner quickstart (Codex draft)
 
+> Non-canonical comparison draft. The maintained owner quickstart is
+> [`owner-quickstart.md`](owner-quickstart.md); keep this file only as review
+> material until the owner chooses to archive or delete it.
+
 Command spine from built checkout to live operation; agents use worktrees.
 
 ```bash

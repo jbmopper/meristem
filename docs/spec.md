@@ -387,24 +387,25 @@ Roughly five to seven focused working days. v0 is small enough to land inside a 
 v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the open-ended backlog after that. v1 is complete when every item below is ✅. Nothing in v1 is GCP-specific; the host happens to be GCP.
 
 - ✅ Go repo, Docker-based local dev, Postgres migrations.
-- 🚧 Token model: root token ✅, client tokens ✅; scoped client tokens, separation of duties, and panic-revoke still open.
+- 🚧 Token model: root token ✅, client/scoped tokens ✅, root-only mint/revoke ✅, panic-revoke ✅; approval-specific separation of duties remains open with approvals.
 - 🚧 Security primitives listed above (basic bearer + SHA-256 + append-only triggers in place; KMS-wrapped envelope encryption open).
 - 🚧 `work_item`, `message`, `event`, `token` tables and projections ✅; `artifact` and `approval` tables open.
 - ✅ Append-only `events` with full attribution.
 - ✅ Idempotency at every POST per the **Idempotency** section.
 - 🚧 `POST /v1/inbox/messages` ✅ (text only); multi-modal parts open. `GET /v1/feed` ✅, with SSE push.
-- 🚧 Worker with `job_queue` and `SELECT … FOR UPDATE SKIP LOCKED` — package and migration in place; reconciler rules open.
-- ◻︎ Convergence loop that drives every work item to a terminal state without owner babysitting.
+- 🚧 Worker with `job_queue` and `SELECT … FOR UPDATE SKIP LOCKED` — `worker --once` bounded-patience kernel, package, and migration are in place; daemon loop plus enqueue/claim semantics remain open.
+- 🚧 Convergence loop that drives every work item to a terminal state without owner babysitting — scribe, dispatch, checklist convergence, breach detection, and finite policy profiles are in place; always-on operation, approvals, connector retries, and full terminal convergence remain open.
 - ◻︎ Generic HTTP connector with read/write declaration, approval gate on writes, retries, and dead-lettering.
 - ◻︎ Webhook verification.
 - ◻︎ Approvals with expiry, re-prompt cadence, and the convergence semantics above.
 - ◻︎ APNs (or Web Push) for approval requests, with email/SMS fallback.
 - ◻︎ Minimal web UI: feed, work-item detail, approve/deny, dead-letter view.
 - ✅ iPhone Shortcut posting to `/v1/inbox/messages`.
-- 🚧 MCP server with REST parity ✅ for read/triage paths and substrate
-  `work_item` mutations over stdio; artifact attachment, approval
-  request/decision tools, and approval-gated connector write actions remain
-  open.
+- 🚧 MCP server with REST parity ✅ for read/triage paths, feed projections,
+  registry/projection reads, and substrate `work_item` mutations over stdio;
+  HTTP MCP is read-only until mutation idempotency is specified. Artifact
+  attachment, approval request/decision tools, and approval-gated connector
+  write actions remain open.
 - ◻︎ Nightly Postgres dumps to object storage; documented and rehearsed restore.
 - 🚧 Single-VM deploy with TLS, disk encryption, and object overflow.
 

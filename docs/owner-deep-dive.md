@@ -393,17 +393,16 @@ semantics. Defining one is a `registry.write`; redefining a name requires
 case is an owner-approved migration, not a token write, so no amount of scope
 lets an agent (or you, casually) mutate the seed the whole system grafts onto.
 
-**Cultivar activation gating (R5 — landing).** The self-extension flow is *in
-flight*, not shipped: a worker that discovers a possible new worker files a
-scoped subtask proposing a cultivar, which must pass the subactor-grant reducer
-*and* a `human_review_status` gate before any token or profile is minted — the
-proposer cannot approve its own proposal, same separation of duties as the token
-layer. On `v1` today the registry write path and a cultivar replay guard exist;
-the grant-gated *proposal-to-activation* flow is landing. Treat any claim that a
-worker can self-activate a cultivar as not-yet-shipped, and mint new cultivars
-yourself through `registry.write` in the meantime. See
-[`registry-spec.md`](registry-spec.md) ("R5 self-extension ... flow out of
-scope here") and [`refresh-requirements.md`](refresh-requirements.md) R5.
+**Cultivar activation gating (R5).** The self-extension flow is now gated in
+the substrate. A worker that discovers a possible new worker files a scoped
+subtask proposing a cultivar; activation then goes through
+`registry.activate_cultivar` or
+`POST /v1/work-items/{id}/cultivar-activations`. The gate resolves the
+cultivar's `profile.scopes_template`, evaluates the subactor-grant reducer as a
+same-tree worker check, and requires `human_review_status=approved` from a token
+other than the proposer. Rootstock self-modification is refused before any
+`cultivar.defined` event, and the granted path still does not mint a token.
+That keeps profile creation, token issuance, and approval authority separated.
 
 **Panic revoke.** `POST /v1/tokens/revoke-all` with the **root** token
 invalidates every non-root token at once (`{"revoked_count":N}`). This is the one

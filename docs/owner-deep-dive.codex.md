@@ -1,5 +1,9 @@
 # Owner deep dive (Codex draft)
 
+> Non-canonical comparison draft. The maintained owner deep dive is
+> [`owner-deep-dive.md`](owner-deep-dive.md); keep this file only as review
+> material until the owner chooses to archive or delete it.
+
 This is the machinery behind [`owner-quickstart.codex.md`](owner-quickstart.codex.md).
 The quickstart is command-shaped; this document explains what each command is
 touching and where the current substrate still needs owner judgment.
