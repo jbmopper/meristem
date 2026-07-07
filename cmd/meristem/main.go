@@ -67,12 +67,16 @@ func main() {
 		err = runHealthcheck(ctx, logger, args)
 	case "seed":
 		err = runSeed(ctx, logger, args)
+	case "node":
+		err = runNode(ctx, logger, args)
 	case "rebuild":
 		err = runRebuild(ctx, logger, args)
 	case "export":
 		err = runExport(ctx, logger, args)
 	case "worker":
 		err = runWorker(ctx, logger, args)
+	case "spoke":
+		err = runSpoke(ctx, logger, args)
 	case "feed":
 		err = runFeed(ctx, logger, args)
 	case "safety":
@@ -145,9 +149,11 @@ usage:
   meristem tokens ...        create, list, or revoke bearer tokens
   meristem mcp               run the MCP stdio server (reads MERISTEM_TOKEN)
   meristem seed v1           seed the v1 substrate backlog (reads MERISTEM_TOKEN, must be source=system)
+  meristem node ...          register fleet nodes, update routes, list the registry (writes read MERISTEM_TOKEN, source=system)
   meristem rebuild           fold events through projectors into a sandbox schema and diff vs live
   meristem worker            run the deterministic reconciler daemon (reads MERISTEM_TOKEN, must be source=system)
   meristem worker --once     run one deterministic reconciler tick
+  meristem spoke             run the pull-only outbound poll loop (drains the hub command queue; reads MERISTEM_HUB_URL/NODE_ID/HUB_TOKEN/TOKEN)
   meristem feed [--watch]    human-readable terminal view of the activity log
   meristem safety check      validate deterministic resource-safety controls
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)

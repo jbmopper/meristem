@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,7 @@ import (
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
+	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/escalations"
@@ -43,6 +45,13 @@ import (
 // EnvHTTPAddr is the listen address. Defaults to :8080 when unset.
 const EnvHTTPAddr = "MERISTEM_HTTP_ADDR"
 
+// EnvNodeID is this node's stable, DNS-safe node_id (docs/network-layer-spec.md
+// §2 "Naming"). It lets the cross-node command route tell a command bound for
+// this node (execute locally) from one to be durably queued for a peer. When
+// unset a bare command is still treated as local and any X-Meristem-Queue-For
+// naming a peer is still queued, so a single-node deploy needs no config.
+const EnvNodeID = "MERISTEM_NODE_ID"
+
 // Defaults chosen to be reasonable behind a reverse proxy (Caddy/nginx). The
 // spec calls for TLS termination at that layer, not in-process.
 const (
@@ -60,6 +69,7 @@ type Server struct {
 	pool                  *pgxpool.Pool
 	logger                *slog.Logger
 	addr                  string
+	nodeID                string
 	mux                   *http.ServeMux
 	writer                *events.Writer
 	authService           *auth.Service
@@ -81,6 +91,7 @@ type Server struct {
 	policyProfiles        *policyprofile.Service
 	projections           *projectiondefs.Service
 	registry              *registry.Service
+	crossnode             *crossnode.QueueService
 	policy                safety.Policy
 }
 
@@ -104,6 +115,7 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		pool:   pool,
 		logger: logger,
 		addr:   addr,
+		nodeID: strings.TrimSpace(os.Getenv(EnvNodeID)),
 		mux:    http.NewServeMux(),
 		policy: policy,
 	}
@@ -127,6 +139,7 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		s.policyProfiles = policyprofile.NewService(pool, s.writer)
 		s.projections = projectiondefs.NewService(pool, s.writer)
 		s.registry = registry.NewService(pool, s.writer)
+		s.crossnode = crossnode.NewQueueService(pool, s.writer)
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
@@ -163,6 +176,9 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
+	s.mux.Handle("POST /v1/crossnode/commands", s.command(http.HandlerFunc(s.handleCrossnodeCommand)))
+	s.mux.Handle("GET /v1/crossnode/commands", s.protected(http.HandlerFunc(s.handleCrossnodeCommandsList)))
+	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/ack", s.command(http.HandlerFunc(s.handleCrossnodeCommandAck)))
 	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
 	s.mux.Handle("POST /v1/policy-profile", s.commandWithAccess(s.canSwitchPolicyProfile, http.HandlerFunc(s.handleSwitchPolicyProfile)))
 	s.mux.Handle("POST /v1/tokens/revoke-all", s.commandWithAccess(s.canPanicRevokeTokens, http.HandlerFunc(s.handlePanicRevokeTokens)))

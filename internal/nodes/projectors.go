@@ -134,10 +134,8 @@ func normalizeRelayVia(relay []string) ([]byte, error) {
 	if relay == nil {
 		relay = []string{}
 	}
-	for i, hop := range relay {
-		if !domain.ValidNodeID(hop) {
-			return nil, fmt.Errorf("relay_via[%d] %q is not a DNS-safe node_id", i, hop)
-		}
+	if err := validateRelayVia(relay); err != nil {
+		return nil, err
 	}
 	b, err := json.Marshal(relay)
 	if err != nil {

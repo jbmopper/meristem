@@ -1,0 +1,321 @@
+// `meristem node` is the operator's surface for the fleet node registry
+// (docs/network-layer-spec.md §6, stage 1). It appends the node.registered and
+// node.route_updated events that internal/nodes folds into the `nodes`
+// projection, and prints that projection back for verification.
+//
+// Like `seed` and `tokens`, it connects straight to Postgres via
+// MERISTEM_DATABASE_URL and the shared event writer — it never calls the live
+// HTTP API. Writes are attributed to a dedicated system-source token supplied
+// in MERISTEM_TOKEN (fleet configuration is a system-internal flow, not a root
+// action), matching how `seed v1` resolves its actor.
+//
+//	meristem node register --node-id m4 --base-url URL [--direct-url URL]
+//	                       [--relay-via ID ...] [--status active]
+//	meristem node update-route --node-id m4 [--direct-url URL]
+//	                           [--relay-via ID ...] [--status active]
+//	meristem node list
+//
+// register appends a node.registered event whose payload carries the full
+// declared state; an identical re-run collapses onto the same event (the
+// payload is the idempotency key, as in seed.go) while any changed field
+// appends a fresh event. update-route appends a node.route_updated event that
+// fully replaces the reachability route state (direct_url, relay_via, status);
+// fields the operator omits are cleared, per the projector's replacement
+// contract. list is read-only.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/nodes"
+	"github.com/jbmopper/meristem/internal/storage"
+)
+
+func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
+	if len(args) == 0 {
+		nodeUsage(os.Stderr)
+		return fmt.Errorf("node: missing subcommand")
+	}
+
+	cfg, err := storage.LoadConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	pool, err := storage.Open(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	writer := app.NewEventWriter()
+
+	switch args[0] {
+	case "register", "update-route":
+		actor, err := resolveNodeSystemActor(ctx, auth.NewService(pool, writer))
+		if err != nil {
+			return err
+		}
+		if args[0] == "register" {
+			return registerNode(ctx, pool, writer, actor, args[1:])
+		}
+		return updateNodeRoute(ctx, pool, writer, actor, args[1:])
+	case "list":
+		return listNodes(ctx, pool, os.Stdout, args[1:])
+	default:
+		logger.Error("unknown node subcommand", slog.String("subcommand", args[0]))
+		nodeUsage(os.Stderr)
+		return fmt.Errorf("node: unknown subcommand %q", args[0])
+	}
+}
+
+// registerNode parses register flags, builds the node.registered payload, and
+// appends it. Split from runNode (which owns env + pool wiring) so an
+// integration test can drive it against a pgtest pool with an injected actor,
+// mirroring seed.go's runSeedV1/seedV1Items split.
+func registerNode(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, args []string) error {
+	fs := flag.NewFlagSet("node register", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	nodeID := fs.String("node-id", "", "DNS-safe fleet node id (required)")
+	statusFlag := fs.String("status", string(domain.NodeStatusActive), "reachability status")
+	var baseURL, directURL optionalStringFlag
+	var relayVia stringSliceFlag
+	fs.Var(&baseURL, "base-url", "registered ingress base URL (optional)")
+	fs.Var(&directURL, "direct-url", "direct peer route URL (optional)")
+	fs.Var(&relayVia, "relay-via", "node id to relay through; repeatable")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *nodeID == "" {
+		return fmt.Errorf("node register: --node-id is required")
+	}
+	base, err := baseURL.nonEmptyPtr("base-url")
+	if err != nil {
+		return fmt.Errorf("node register: %w", err)
+	}
+	direct, err := directURL.nonEmptyPtr("direct-url")
+	if err != nil {
+		return fmt.Errorf("node register: %w", err)
+	}
+
+	payload, err := nodes.BuildRegisteredPayload(nodes.RegisterParams{
+		NodeID:    *nodeID,
+		BaseURL:   base,
+		DirectURL: direct,
+		RelayVia:  relayVia,
+		Status:    *statusFlag,
+	})
+	if err != nil {
+		return fmt.Errorf("node register: %w", err)
+	}
+
+	fresh, err := appendNodeEvent(ctx, pool, writer, actor, nodes.NodeSubjectID(*nodeID), domain.EventNodeRegistered, payload)
+	if err != nil {
+		return fmt.Errorf("node register: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "node register: node_id=%s %s\n", *nodeID, freshLabel(fresh, "registered"))
+	return nil
+}
+
+// updateNodeRoute parses update-route flags and appends a node.route_updated
+// event carrying the full replacement route state. Omitted --direct-url and
+// --relay-via clear those columns; that is the projector's contract, not a bug.
+func updateNodeRoute(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, args []string) error {
+	fs := flag.NewFlagSet("node update-route", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	nodeID := fs.String("node-id", "", "DNS-safe fleet node id (required)")
+	statusFlag := fs.String("status", string(domain.NodeStatusActive), "reachability status")
+	var directURL optionalStringFlag
+	var relayVia stringSliceFlag
+	fs.Var(&directURL, "direct-url", "direct peer route URL (optional; omitted clears it)")
+	fs.Var(&relayVia, "relay-via", "node id to relay through; repeatable (omitted clears the chain)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *nodeID == "" {
+		return fmt.Errorf("node update-route: --node-id is required")
+	}
+	direct, err := directURL.nonEmptyPtr("direct-url")
+	if err != nil {
+		return fmt.Errorf("node update-route: %w", err)
+	}
+
+	payload, err := nodes.BuildRouteUpdatedPayload(nodes.RouteParams{
+		NodeID:    *nodeID,
+		DirectURL: direct,
+		RelayVia:  relayVia,
+		Status:    *statusFlag,
+	})
+	if err != nil {
+		return fmt.Errorf("node update-route: %w", err)
+	}
+
+	fresh, err := appendNodeEvent(ctx, pool, writer, actor, nodes.NodeSubjectID(*nodeID), domain.EventNodeRouteUpdated, payload)
+	if err != nil {
+		return fmt.Errorf("node update-route: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "node update-route: node_id=%s %s\n", *nodeID, freshLabel(fresh, "updated"))
+	return nil
+}
+
+// listNodes prints the nodes projection: one tab-separated row per node with
+// node_id, base_url, direct_url, relay_via, status, updated_at. Absent URLs
+// and an empty relay chain render as "-".
+func listNodes(ctx context.Context, pool *pgxpool.Pool, w io.Writer, args []string) error {
+	fs := flag.NewFlagSet("node list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rows, err := nodes.List(ctx, pool)
+	if err != nil {
+		return err
+	}
+	for _, n := range rows {
+		relay := "-"
+		if len(n.RelayVia) > 0 {
+			relay = strings.Join(n.RelayVia, ",")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			n.NodeID,
+			valueOrDash(n.BaseURL),
+			valueOrDash(n.DirectURL),
+			relay,
+			n.Status,
+			n.UpdatedAt.Format(time.RFC3339),
+		)
+	}
+	return nil
+}
+
+// appendNodeEvent appends one node event in its own transaction and reports
+// whether it was fresh (a new row) or a collapsed replay. The discriminator is
+// intentionally empty: the full-state payload is the idempotency key, exactly
+// as in seed.go — an identical re-run collapses, a changed field appends.
+func appendNodeEvent(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, subjectID uuid.UUID, kind string, payload any) (bool, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, fresh, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectNode,
+		SubjectID:    subjectID,
+		Kind:         kind,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &actor.ID,
+		Payload:      payload,
+	})
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return fresh, nil
+}
+
+// resolveNodeSystemActor loads the bearer in MERISTEM_TOKEN and requires a
+// dedicated, non-root system token. Fleet-node writes are a system-internal
+// flow; like `seed v1`, they refuse root and refuse a non-system source so the
+// audit attributes them cleanly.
+func resolveNodeSystemActor(ctx context.Context, service tokenAuthenticator) (domain.Token, error) {
+	secret := os.Getenv("MERISTEM_TOKEN")
+	if secret == "" {
+		return domain.Token{}, fmt.Errorf("node: MERISTEM_TOKEN with a system-source bearer is required (mint one with `meristem tokens create --source system --name node-admin`)")
+	}
+	tok, err := service.Authenticate(ctx, secret)
+	if err != nil {
+		return domain.Token{}, err
+	}
+	if tok.Source != domain.SourceSystem {
+		return domain.Token{}, fmt.Errorf("node: MERISTEM_TOKEN must be source=system, got %q (root is deliberately not accepted)", tok.Source)
+	}
+	if tok.IsRoot {
+		return domain.Token{}, fmt.Errorf("node: MERISTEM_TOKEN must be a dedicated system token, not root")
+	}
+	return tok, nil
+}
+
+func freshLabel(fresh bool, appended string) string {
+	if fresh {
+		return appended
+	}
+	return "unchanged"
+}
+
+func valueOrDash(p *string) string {
+	if p == nil || *p == "" {
+		return "-"
+	}
+	return *p
+}
+
+// optionalStringFlag distinguishes "flag not provided" (nil pointer, field
+// omitted from the payload) from "flag provided". flag.String cannot express
+// that because an unset string flag is indistinguishable from --flag="".
+type optionalStringFlag struct {
+	set   bool
+	value string
+}
+
+func (o *optionalStringFlag) String() string { return o.value }
+
+func (o *optionalStringFlag) Set(v string) error {
+	o.value = v
+	o.set = true
+	return nil
+}
+
+// nonEmptyPtr returns nil when the flag was never set, the value when it was
+// set to a non-empty string, and an error when it was set to an empty/blank
+// string (an explicit empty URL is a mistake, not "omit it").
+func (o *optionalStringFlag) nonEmptyPtr(name string) (*string, error) {
+	if !o.set {
+		return nil, nil
+	}
+	if strings.TrimSpace(o.value) == "" {
+		return nil, fmt.Errorf("--%s was provided but empty", name)
+	}
+	v := o.value
+	return &v, nil
+}
+
+// stringSliceFlag collects a repeatable flag into a slice, preserving order.
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringSliceFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+func nodeUsage(w io.Writer) {
+	fmt.Fprint(w, `usage:
+  MERISTEM_TOKEN=mrs_<system> meristem node register --node-id ID [--base-url URL] [--direct-url URL] [--relay-via ID ...] [--status active]
+  MERISTEM_TOKEN=mrs_<system> meristem node update-route --node-id ID [--direct-url URL] [--relay-via ID ...] [--status active]
+  meristem node list
+
+Appends node.registered / node.route_updated events to the fleet node registry
+and prints the resulting projection. Connects directly via MERISTEM_DATABASE_URL;
+writes require a system-source MERISTEM_TOKEN. Re-running an identical
+registration is a no-op; a changed field appends a new event. update-route fully
+replaces the route state (direct_url, relay_via, status) — omitted fields clear.
+`)
+}

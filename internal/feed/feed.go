@@ -82,6 +82,13 @@ var ExcludedKinds = []string{
 	// activity narrative; it belongs to the log, not /v1/feed.
 	domain.EventNodeRegistered,
 	domain.EventNodeRouteUpdated,
+	// A queued cross-node command is transport plumbing: the durable parking
+	// slot the target drains by outbound poll. The human activity narrative
+	// surfaces the command's effect on its home node, not this hop.
+	domain.EventCommandQueued,
+	// A command ack is the matching drain-side plumbing: it records the
+	// transport outcome onto the queue row, not human activity.
+	domain.EventCommandAcked,
 }
 
 type Item struct {
