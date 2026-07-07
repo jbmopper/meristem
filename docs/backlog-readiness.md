@@ -43,10 +43,14 @@ captured/triaged/planned non-substrate: > 30 days in state
 
 ## Drift
 
-`spec_seed_drift` currently checks that visible work items include refresh
-items `R1` through `R9`. A missing entry is reported as
-`missing_refresh_item:Rn`. This is intentionally conservative: it surfaces
-possible spec/seed drift without mutating the backlog or hiding audit history.
+`spec_seed_drift` checks for a *partial* refresh backlog: if visible work
+items include at least one of the refresh items `R1` through `R9`, every
+missing sibling is reported as `missing_refresh_item:Rn`. A fresh bring-up
+seed carrying **zero** refresh items raises no drift — the R1–R9 refresh is a
+completed one-time initiative (parent `c6ba707b`), so a new node is not
+expected to carry it. This surfaces genuine spec/seed drift (a half-seeded or
+corrupted refresh) without nine false positives on every clean seed, and
+without mutating the backlog or hiding audit history.
 
 ## Surfaces
 

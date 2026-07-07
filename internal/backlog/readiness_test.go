@@ -60,6 +60,26 @@ func workItem(title string, state domain.WorkItemState, stateEnteredAt time.Time
 	}
 }
 
+// TestSummarizeFreshSeedNoRefreshDrift: a fresh bring-up seed carrying zero
+// R1-R9 items is not a refresh-tracking DB, so it must raise no spec_seed_drift
+// rather than nine missing_refresh_item false positives. Partial refresh
+// backlogs still drift (covered by TestSummarizeGroupsVisibleBacklog, which
+// has R1 present and expects R2-R9 missing).
+func TestSummarizeFreshSeedNoRefreshDrift(t *testing.T) {
+	asOf := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	items := []domain.WorkItem{
+		workItem("Token model and per-agent authentication", domain.WorkItemPlanned, asOf.Add(-time.Hour)),
+		workItem("Inbox capture and feed projection", domain.WorkItemRunning, asOf.Add(-time.Hour)),
+		workItem("Seed/bring-up profile for 16GB Apple Silicon M4 Mac", domain.WorkItemDone, asOf.Add(-time.Hour)),
+	}
+
+	summary := Summarize(items, Options{Limit: 200, AsOf: asOf})
+
+	if len(summary.SpecSeedDrift) != 0 {
+		t.Fatalf("fresh seed with no refresh items: spec drift = %v, want none", summary.SpecSeedDrift)
+	}
+}
+
 func assertTitles(t *testing.T, name string, got []Item, want ...string) {
 	t.Helper()
 	if len(got) != len(want) {
