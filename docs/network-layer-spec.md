@@ -61,7 +61,7 @@ parallel contract).
   idempotency-keyed, carried by the currently available route.
 - *Reads* — read-through GETs against the home node (feed, work_item get,
   projections).
-- *Remote-ref projections (optional, stage 1b)* — a spoke may pull
+- *Remote-ref projections (backlogged per owner decision 3; stage 1 is pure read-through)* — a spoke may pull
   `feed`/`events` incrementally from the hub using the existing seq cursor
   and materialize a clearly-marked `remote_refs` cache: derived, rebuildable,
   never truth, never input to local projection writers as if local.
@@ -72,7 +72,9 @@ parallel contract).
 registry (base URL, public key/fingerprint, status). Cross-node references
 use the qualified form `<node_id>:<uuid>` (canonical URI
 `mrs://<node_id>/work-items/<uuid>`) in event payloads and relations.
-Unqualified UUIDs always mean "this node." Payloads carrying qualified refs
+Unqualified UUIDs always mean "this node." Re-homing is in scope
+(owner decision 4): `work_item.migrated` is a reserved event kind — see §7
+follow-ups for the recommended pointer-moves/history-stays semantics. Payloads carrying qualified refs
 use payload versioning per `docs/payload-versioning.md`.
 
 **What never crosses:** bearer token material and token hashes;
@@ -113,6 +115,48 @@ trail.
 work_items on the issuing node under bounded patience: a stalled cross-node
 call gets a patience budget and an escalation rule like any non-terminal
 state. No new infrastructure; the convergence loop already models this.
+
+## 2b. Route table and selection: making the mesh boring
+
+The mesh's only genuinely new hazard is route management — discovery,
+flapping, and relay loops. This section removes all three by making topology
+**registry data with a deterministic selection rule**, no routing protocol.
+
+**Routes are data.** The `nodes` registry row for each node carries, beyond
+`node_id` and status: an optional `direct_url` (set only for nodes with a
+registered inbound surface — today, the ingress box) and an optional ordered
+list of `relay_via` node ids (nodes willing to queue for it). Route changes
+are `node.route_updated` events on the registry's home node: auditable,
+replayable, never ambient config. There is no probing, no gossip, no
+liveness consensus — a node's registry row is intent, not observed health.
+
+**Deterministic selection.** To deliver a command to node X, the sender
+tries, in this fixed order, advancing only on timeout or refusal:
+
+1. **Direct:** X's `direct_url`, if registered.
+2. **One relay hop:** the first node R in X's `relay_via` list that has its
+   own `direct_url`. Relayed requests carry `relayed: true`; **a node never
+   forwards an already-relayed request** — loops are impossible
+   structurally, not by TTL.
+3. **Durable queue:** `command.queued` on the best reachable node in X's
+   `relay_via` list (or the ingress box); X drains it by outbound poll (§2).
+
+First success wins. Selection is a pure function of the registry snapshot
+plus a local, non-gossiped cooldown list (a failed route is skipped for a
+fixed 60s by the sender that observed the failure — each node's view of
+route health is local opinion, never shared state to reconcile).
+
+**Hub-and-spoke is the degenerate mode, and the guaranteed fallback.** When
+exactly one node registers a `direct_url`, the selection rule above
+*collapses to hub-and-spoke by itself* — every delivery becomes relay or
+queue through that node. This is not a separate mode: it is the same rule
+on a minimal registry, which yields the fallback guarantee this fleet is
+built on — **the system must remain fully functional (at queue/poll
+latency) with all peer routes absent.** Direct mesh routes are a latency
+optimization, never a correctness requirement; anything that works only
+when a direct route exists is a spec violation. Stage exit criteria must
+each be demonstrated twice: once with routes registered, once in the
+degenerate mode.
 
 ## 3. Ingress: registered box for provider MCP
 
@@ -207,17 +251,38 @@ single-writer homes.
   provider) reads the feed and work_items through the registered gateway,
   each client on its own token; zero secrets in any shared client config.
 
-## 7. Open questions for the owner
+## 7. Owner decisions (2026-07-07, recorded from chat)
 
-1. **Ingress candidate.** Which physical box gets the registered DNS/MCP
-   ingress first, knowing it is allowed to be unstable and replaceable?
-2. **Perimeter on `/mcp`.** Require Cloudflare Access service tokens in
-   front of the gateway route, or bearer-only? Provider connector clients
-   may not support Access headers — bearer-only for `/mcp` with Access on
-   everything else is the likely compromise; confirm.
-3. **Stage 1 caching.** Start pure read-through (simpler, chattier) and add
-   the `remote_refs` projection only when latency data demands it —
-   acceptable?
-4. **Object re-homing.** Moving a work_item's home node: permanently out of
-   scope, or reserve a `work_item.migrated` event kind now so the door stays
-   open?
+1. **Ingress candidate: decide at stage 2; presumptively the home server.**
+   Ingress is a stage-2 concern, so no commitment now. If the home server is
+   still a mess when stage 2 arrives, the M4 mini is the fallback candidate.
+   Nothing in stages 0-1 may assume which box wins.
+2. **Perimeter on `/mcp` — confirmed verbatim:** "Confirmed: bearer/OAuth-only
+   for provider-facing /mcp; Cloudflare Access on non-provider routes.
+   Cloudflare may terminate TLS and apply WAF/rate limits, but /mcp must not
+   require Cloudflare Access headers unless a specific provider client is
+   proven to support them." Driving requirement: the web-facing MCP surface
+   speaks standard MCP auth so it can register with providers' cloud
+   connector registries.
+3. **Stage 1 caching: pure read-through.** The `remote_refs` projection is
+   backlogged until latency data demands it; stage 1b is deferred, not
+   planned.
+4. **Object re-homing: in scope — passing work around is a feature.**
+   `work_item.migrated` is a reserved event kind as of this revision, and a
+   re-homing design slice should follow (see follow-ups).
+
+### Open follow-ups (narrow, assigned)
+
+- **Auth mechanism for provider registries** (belongs to thread `4c00df15`,
+  not this spec): decision 2 plus cloud connector registries effectively
+  forces the OAuth option forward for provider-facing `/mcp` (registries
+  generally require OAuth-style client registration, not static bearers).
+  Needs explicit confirmation on that thread; local stdio/PAT auth is
+  unaffected.
+- **Re-homing semantics** (new design slice): recommended shape — the home
+  *pointer* moves, history stays put. `work_item.migrated` is appended on
+  the old home (structural: `new_home_node_id`, last local `events.seq`);
+  future events append on the new home; old events remain on the origin
+  node's append-only log, reachable via qualified refs. Copying history
+  between logs would break per-node replay determinism. Owner sanity-check
+  wanted before implementation.
