@@ -84,6 +84,24 @@ var BuiltinSecretDenyList = []string{
 	"*.token",
 }
 
+// MatchesPattern reports whether a path is covered by an allow-side policy
+// entry (root-relative semantics). Exported so the exporter and the reducer
+// share one matcher — divergent matchers would let an exporter include a
+// path the reducer rejects, or vice versa.
+func MatchesPattern(p, entry string) bool { return matchesPattern(p, entry) }
+
+// MatchesAnyDeny reports whether a path is covered by any deny-side entry
+// (widened segment/basename semantics at any depth).
+func MatchesAnyDeny(p string, entries []string) bool { return matchesAnyDeny(p, entries) }
+
+// MatchesAny reports whether a path is covered by any allow-side entry.
+func MatchesAny(p string, entries []string) bool { return matchesAny(p, entries) }
+
+// PathEntryClean reports whether a policy path entry is free of root,
+// absolute, and traversal forms. Exported for the exporter's pre-flight
+// hygiene check (design accd39bb step 1).
+func PathEntryClean(entry string) bool { return pathEntryClean(entry) }
+
 // pathEntryClean rejects entries that would let a policy escape its own
 // declared boundary: absolute paths, parent traversal, or the repo root.
 func pathEntryClean(entry string) bool {
