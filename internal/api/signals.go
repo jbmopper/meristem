@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/signals"
 )
 
@@ -23,7 +24,7 @@ const (
 	workSpecSchemaVersionLegacyMaristem = "maristem.work_spec.v1"
 	// workSpecSchemaVersionLegacyWire: fixed wire literal retained for older clients; remove after cutover.
 	workSpecSchemaVersionLegacyWire = "legacy.work_spec.v1"
-	workSpecPriorityPattern            = `^P[0-3]$`
+	workSpecPriorityPattern         = `^P[0-3]$`
 )
 
 var priorityPattern = regexp.MustCompile(workSpecPriorityPattern)
@@ -177,10 +178,16 @@ func (s *Server) handleReceiveSignal(w http.ResponseWriter, r *http.Request) {
 
 func decodeReceiveSignalRequest(w http.ResponseWriter, r *http.Request) (receiveSignalRequest, bool) {
 	defer func() { _ = r.Body.Close() }()
+	r.Body = http.MaxBytesReader(w, r.Body, safety.DefaultPolicy().MaxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var req receiveSignalRequest
 	if err := dec.Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds resource safety limit")
+			return receiveSignalRequest{}, false
+		}
 		writeAPIError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
 		return receiveSignalRequest{}, false
 	}

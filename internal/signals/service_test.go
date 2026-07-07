@@ -170,6 +170,18 @@ func TestComputeFingerprintRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestDedupeLockKeyFor(t *testing.T) {
+	key := "repo:jay:repair:worker-retry-budget"
+	first := dedupeLockKeyFor(key)
+	second := dedupeLockKeyFor(key)
+	if first != second {
+		t.Fatalf("dedupeLockKeyFor not stable: %d != %d", first, second)
+	}
+	if other := dedupeLockKeyFor(key + ":other"); other == first {
+		t.Fatalf("different dedupe keys should not intentionally share lock key: %d", first)
+	}
+}
+
 func TestDecodeWorkSpecHeaderExtractsFields(t *testing.T) {
 	h, err := decodeWorkSpecHeader(validWorkSpec())
 	if err != nil {

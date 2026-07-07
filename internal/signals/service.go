@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -145,6 +146,10 @@ func (s *Service) Receive(ctx context.Context, actor domain.Token, in ReceiveInp
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockDedupeKey(ctx, tx, in.DedupeKey); err != nil {
+		return ReceiveResult{}, err
+	}
+
 	workItemID, linked, err := s.lookupLiveWorkItem(ctx, tx, in.DedupeKey)
 	if err != nil {
 		return ReceiveResult{}, err
@@ -226,10 +231,11 @@ func (s *Service) Receive(ctx context.Context, actor domain.Token, in ReceiveInp
 // nothing matches OR when dedupeKey is empty (every signal without a
 // dedupe_key is treated as fresh).
 //
-// Concurrency note: two concurrent receivers with the same dedupe_key but
-// different idempotency keys can both observe "no live work_item" and
-// create one each. The next reception will dedupe to the most recent. Full
-// reservation/locking is on Agent B's substrate to-do list (see coord doc).
+// Concurrent receivers with the same dedupe_key are serialized by
+// lockDedupeKey before this lookup runs. That keeps the "one live work_item
+// per dedupe_key" contract true even when callers use distinct idempotency
+// keys, while preserving recurrence semantics once the prior item is
+// terminal.
 func (s *Service) lookupLiveWorkItem(ctx context.Context, tx pgx.Tx, dedupeKey string) (uuid.UUID, bool, error) {
 	if dedupeKey == "" {
 		return uuid.Nil, false, nil
@@ -251,6 +257,21 @@ func (s *Service) lookupLiveWorkItem(ctx context.Context, tx pgx.Tx, dedupeKey s
 		return uuid.Nil, false, fmt.Errorf("signals: dedupe lookup: %w", err)
 	}
 	return workItemID, true, nil
+}
+
+func lockDedupeKey(ctx context.Context, tx pgx.Tx, dedupeKey string) error {
+	if dedupeKey == "" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, dedupeLockKeyFor(dedupeKey)); err != nil {
+		return fmt.Errorf("signals: dedupe lock: %w", err)
+	}
+	return nil
+}
+
+func dedupeLockKeyFor(dedupeKey string) int64 {
+	sum := sha256.Sum256([]byte("signals.dedupe|" + dedupeKey))
+	return int64(binary.BigEndian.Uint64(sum[:8]))
 }
 
 // workSpecHeader is the small slice of work_spec the service reads to

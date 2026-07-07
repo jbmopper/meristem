@@ -87,10 +87,11 @@ func (s *Service) CreateToken(ctx context.Context, in CreateTokenInput) (CreateT
 			return CreateTokenResult{}, err
 		}
 		if err == nil && in.Replace {
-			actorID := (*uuid.UUID)(nil)
-			if in.Actor != nil {
-				actorID = &in.Actor.ID
+			if in.Actor == nil || !in.Actor.IsRoot || in.Actor.RevokedAt != nil {
+				return CreateTokenResult{}, ErrRootRequired
 			}
+			actorID := (*uuid.UUID)(nil)
+			actorID = &in.Actor.ID
 			if _, _, err := s.writer.Append(ctx, tx, events.Spec{
 				SubjectKind:  domain.SubjectToken,
 				SubjectID:    existing,

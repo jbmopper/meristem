@@ -11,9 +11,9 @@
 // (default `meristem_rebuild`) lives only for the duration of the
 // transaction; nothing is left behind.
 //
-// The fold is deterministic: events are streamed in (occurred_at, id)
-// order, and projectors must be pure with respect to event payload
-// (see internal/projections/projections.go). A successful rebuild means
+// The fold is deterministic: events are streamed in events.seq order, and
+// projectors must be pure with respect to event payload (see
+// internal/projections/projections.go). A successful rebuild means
 // every projection row in `public.*` has a corresponding event in
 // `public.events` that produces it.
 package main
@@ -242,13 +242,14 @@ func foldEvents(ctx context.Context, tx pgx.Tx, registry *projections.Registry, 
 	//     read connection in autocommit mode; tracked in the v1
 	//     substrate as part of "Worker process and job queue".
 	//
-	// (occurred_at, id) order is the sequencing the rest of the system
-	// reads as canonical. The deterministic id derivation in
-	// internal/events makes the tiebreak stable across runs.
+	// events.seq is the sequencing primitive the live feed and SSE paths use.
+	// Rebuild must follow the same monotonic insert order; occurred_at is a
+	// timestamp, and deterministic event ids are content-addressed rather than
+	// chronological.
 	rows, err := tx.Query(ctx, `
 		SELECT id, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload
 		FROM public.events
-		ORDER BY occurred_at ASC, id ASC
+		ORDER BY seq ASC
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("rebuild: scan events: %w", err)

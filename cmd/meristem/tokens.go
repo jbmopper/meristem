@@ -74,23 +74,26 @@ func runTokensCreate(ctx context.Context, service *auth.Service, args []string) 
 		return fmt.Errorf("tokens create: --source must be one of human, agent, system")
 	}
 
-	// Root bootstrap intentionally has no actor. Non-root creation requires a
-	// valid root bearer in MERISTEM_TOKEN so the token.created event is
-	// attributed to the root token.
+	// Initial root bootstrap intentionally has no actor. Non-root creation
+	// requires a valid root bearer in MERISTEM_TOKEN. Root replacement also
+	// requires an existing root actor once there is a live root to replace;
+	// the auth service enforces that edge because it observes the database.
 	var actorPtr *domain.Token
-	if !*root {
+	if !*root || *replace {
 		secret := os.Getenv("MERISTEM_TOKEN")
-		if secret == "" {
+		if secret == "" && !*root {
 			return fmt.Errorf("tokens create: MERISTEM_TOKEN with a root bearer is required")
 		}
-		tok, err := service.Authenticate(ctx, secret)
-		if err != nil {
-			return err
+		if secret != "" {
+			tok, err := service.Authenticate(ctx, secret)
+			if err != nil {
+				return err
+			}
+			if !tok.IsRoot {
+				return auth.ErrRootRequired
+			}
+			actorPtr = &tok
 		}
-		if !tok.IsRoot {
-			return auth.ErrRootRequired
-		}
-		actorPtr = &tok
 	}
 
 	result, err := service.CreateToken(ctx, auth.CreateTokenInput{

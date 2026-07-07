@@ -19,6 +19,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/testutil/pgtest"
 )
@@ -112,6 +113,36 @@ func TestSignalsEndpointIntegration(t *testing.T) {
 	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 2)
 	assertTableCount(t, pool, "signals", 2)
 	assertTableCount(t, pool, "work_items", 1)
+}
+
+func TestSignalsEndpointRejectsOversizedBody(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	tokenResult, err := auth.NewService(pool, app.NewEventWriter()).CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "integration-large-body-human",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	server := New(pool, nil)
+	body := []byte(`{"padding":"` + strings.Repeat("x", int(safety.DefaultPolicy().MaxRequestBodyBytes)+1) + `"}`)
+	rec := postSignal(t, server.Handler(), tokenResult.Secret, "signal-too-large", body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized signal: want 413, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "request_too_large") {
+		t.Fatalf("expected request_too_large body, got %s", rec.Body.String())
+	}
+	assertEventCount(t, pool, domain.EventSignalReceived, 0)
+	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 0)
 }
 
 func newIntegrationPool(t *testing.T) *pgxpool.Pool {
