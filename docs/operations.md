@@ -128,3 +128,6 @@ docker compose down
 
 - [`docs/safety.md`](safety.md) — resource limits and `meristem safety check`
 - [`README.md`](../README.md) — topologies, compose profiles, integration smoke tests
+- [`docs/m4-seed.md`](m4-seed.md) — resource-conscious bring-up variant for a
+  16GB Apple Silicon M4 Mac (Colima sizing, Postgres resource limits, worker
+  cadence); layers on top of this document rather than replacing it

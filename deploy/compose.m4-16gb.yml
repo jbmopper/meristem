@@ -1,0 +1,35 @@
+# Resource-conscious override for a 16GB Apple Silicon M4 Mac.
+#
+# Layers on top of the base docker-compose.yml; it does not replace it and
+# changes nothing about topology, images, or ports. See docs/m4-seed.md for
+# the full bring-up walkthrough this file is part of.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f deploy/compose.m4-16gb.yml up -d postgres
+#
+# Rationale for the numbers below: a 16GB M4 Mac running Colima's Linux VM
+# plus the meristem API/worker processes plus an editor/agent (Cursor, VS
+# Code, a CLI assistant) plus normal host overhead leaves a modest slice
+# reasonable for Postgres before contention shows up as swap or throttling.
+# These are starting points, not tuned benchmarks — adjust after watching
+# `docker stats` under real load.
+services:
+  postgres:
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+    # docker compose (v2, non-swarm) honors deploy.resources.limits directly
+    # on `up`; mem_limit/cpus (the legacy top-level fields) are equivalent
+    # and kept here as a fallback for older compose CLI versions.
+    mem_limit: 1536m
+    cpus: 2.0
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "max_connections=40"
+      - "-c"
+      - "effective_cache_size=768MB"
