@@ -8,13 +8,19 @@ import (
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/convergence"
+	"github.com/jbmopper/meristem/internal/cultivaractivation"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/policyprofile"
+	"github.com/jbmopper/meristem/internal/projectiondefs"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -38,15 +44,27 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 	defer pool.Close()
 
 	writer := app.NewEventWriter()
+	approvalSvc := approvals.NewService(pool, writer)
+	// Wire every service the shared mcp.Deps advertises tools for, matching
+	// internal/api/server.go. Historically this stdio launcher drifted behind
+	// the HTTP path as services were added, so registry/approval/activation/
+	// proposal/connector/projection tools were advertised but answered
+	// "…not configured" over stdio.
 	deps := mcp.Deps{
 		Auth:                auth.NewService(pool, writer),
 		Access:              access.NewService(pool),
 		Idempotency:         idempotency.NewMiddleware(pool, writer),
 		Inbox:               inbox.NewService(pool, writer),
 		WorkItems:           workitems.NewService(pool, writer),
+		Approvals:           approvalSvc,
+		HTTPConnector:       httpconnector.NewService(pool, writer, approvalSvc, nil),
+		CheckProposals:      convergence.NewChecksProposalService(pool, writer),
+		CultivarActivations: cultivaractivation.NewService(pool, writer),
 		DeterministicErrors: errorreporting.NewService(pool, writer),
 		Feed:                feed.NewService(pool),
 		PolicyProfiles:      policyprofile.NewService(pool, writer),
+		Projections:         projectiondefs.NewService(pool, writer),
+		Registry:            registry.NewService(pool, writer),
 		MaxFeedWait:         active.Policy.MaxFeedWait,
 	}
 
