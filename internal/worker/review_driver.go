@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -296,13 +297,27 @@ func reviewChildTitle(parentTitle string) string {
 	if len(title) <= maxTitle {
 		return title
 	}
-	return strings.TrimSpace(title[:maxTitle-3]) + "..."
+	return strings.TrimSpace(truncateRuneSafe(title, maxTitle-3)) + "..."
+}
+
+// truncateRuneSafe cuts s to at most max bytes without splitting a UTF-8
+// rune: a raw byte slice can leave an invalid-UTF-8 tail when a multibyte
+// rune straddles the boundary.
+func truncateRuneSafe(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func reviewChildBody(candidate reviewCandidate, evidence reviewEvidence, cultivar string) string {
 	body := strings.TrimSpace(candidate.Body)
 	if len(body) > 1200 {
-		body = strings.TrimSpace(body[:1200]) + "..."
+		body = strings.TrimSpace(truncateRuneSafe(body, 1200)) + "..."
 	}
 	commits := evidence.Commits
 	if len(commits) == 0 {
