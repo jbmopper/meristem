@@ -116,6 +116,40 @@ func TestRunWorkerLoopRejectsNonPositiveInterval(t *testing.T) {
 	}
 }
 
+func TestResolveWorkerInterval(t *testing.T) {
+	t.Run("uses profile default when unset", func(t *testing.T) {
+		got, overridden, err := resolveWorkerInterval(45*time.Second, "")
+		if err != nil {
+			t.Fatalf("resolveWorkerInterval: %v", err)
+		}
+		if got != 45*time.Second || overridden {
+			t.Fatalf("got (%s, %v), want (45s, false)", got, overridden)
+		}
+	})
+
+	t.Run("accepts explicit override", func(t *testing.T) {
+		got, overridden, err := resolveWorkerInterval(45*time.Second, "90s")
+		if err != nil {
+			t.Fatalf("resolveWorkerInterval: %v", err)
+		}
+		if got != 90*time.Second || !overridden {
+			t.Fatalf("got (%s, %v), want (90s, true)", got, overridden)
+		}
+	})
+
+	t.Run("rejects invalid override", func(t *testing.T) {
+		if _, _, err := resolveWorkerInterval(45*time.Second, "nope"); err == nil {
+			t.Fatal("expected invalid override to fail")
+		}
+	})
+
+	t.Run("rejects non-positive override", func(t *testing.T) {
+		if _, _, err := resolveWorkerInterval(45*time.Second, "0s"); err == nil {
+			t.Fatal("expected non-positive override to fail")
+		}
+	})
+}
+
 func TestWorkerUsageMentionsDaemonAndOnce(t *testing.T) {
 	var b strings.Builder
 	workerUsage(&b)
@@ -123,6 +157,7 @@ func TestWorkerUsageMentionsDaemonAndOnce(t *testing.T) {
 	for _, want := range []string{
 		"meristem worker [--interval=DURATION]",
 		"meristem worker --once",
+		"steady=30s, bring-up=60s",
 		"always-on daemon",
 		"SIGINT",
 		"SIGTERM",

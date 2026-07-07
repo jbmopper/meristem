@@ -1,8 +1,8 @@
 # Resource safety
 
-Meristem enforces **deterministic, code-owned limits** on resource use before the API, worker, MCP server, or non–dry-run seed are allowed to run. The goal is to avoid restarting into an unbounded configuration: oversized HTTP bodies, unbounded feed long-polls, or missing patience budgets for non-terminal `work_item` states.
+Meristem enforces **deterministic, code-owned limits** on resource use before the API, worker, MCP server, or non–dry-run seed are allowed to run. The goal is to avoid restarting into an unbounded configuration: oversized HTTP bodies, unbounded feed long-polls, unbounded pool fan-out, runaway worker polling, or missing patience budgets for non-terminal `work_item` states.
 
-This slice is **not** operator-tunable via environment variables. Policy lives in `internal/safety`. Later work may project policy from the event log; even then, startup should fail closed if the effective policy is absent or invalid.
+This slice is **not** operator-tunable via environment variables. Policy lives in `internal/safety`, with the active named profile selected through the event-sourced `policy_profile` switch. Later work may project additional policy from the event log; even then, startup should fail closed if the effective policy is absent or invalid.
 
 ## Policy contents
 
@@ -10,13 +10,15 @@ This slice is **not** operator-tunable via environment variables. Policy lives i
 |--------|------|
 | `MaxRequestBodyBytes` | Upper bound on JSON request bodies for handlers that use the shared JSON decoder (e.g. inbox, signals, work-item commands). Requests over the limit receive **413** with `request_too_large`. |
 | `MaxFeedWait` | Maximum `wait` query duration on **`GET /v1/feed`** watcher mode. Larger values receive **400** with `wait_too_large`. |
+| `PoolMaxConns` / `PoolMinConns` | Profile-governed pgx pool bounds for long-lived processes. Startup resolves the active profile first, then re-opens the real pool with these bounds. Validation rejects non-positive values, `min > max`, and any `max` above the code-owned ceiling. |
+| `WorkerTickInterval` | Default cadence for `meristem worker` daemon mode. Operators may still pass `--interval` explicitly for incident tuning, but the active profile owns the unattended default. |
 | `PatienceBudgets` | Positive duration per **non-terminal** `work_item` state. Used by `internal/worker` default budgets and validated at startup so the bounded-patience invariant has explicit numbers. |
 | `MaxChildrenPerItem` | Fallback maximum counted child work items under one parent when a parent has no cultivar-specific `xylem.max_children_per_item`. Over-budget spawn attempts append `xylem.exhausted`, block/escalate the parent, and do not create the requested child. |
 | `MaxConcurrentRunningPerToken` | Fallback maximum work items one token may hold in `running` at once when the target item has no cultivar-specific `xylem.max_concurrent_running_items_per_token`. Over-budget running transitions append `xylem.exhausted`, block/escalate the target item, and do not enter `running`. |
 | `MaxEventsPerItemPerHourByClass` | Fallback maximum metered work-item events one work item may receive per hour, keyed by R6 taxonomy class (`decision`, `progress`, `lifecycle`). Public work-item event, metadata, and transition writes are metered; internal xylem/escalation recovery events bypass the meter so exhaustion can always reach a fixed point. Cultivars may override individual classes with `xylem.max_events_per_item_per_hour_by_class`; zero or absent class entries use the safety fallback. |
 | `MaxDelegationDepth` | Fallback maximum subactor delegation depth when a target work item has no cultivar-specific `xylem.max_depth`. Over-budget grant requests escalate and mint no token. |
 
-Default values are defined in `internal/safety/policy.go` (currently 1 MiB bodies, 60s max feed wait, max children per item 32, max concurrent running items per token 8, max event rates per item per hour of lifecycle 120 / decision 120 / progress 240, max delegation depth 5, and the same per-state patience defaults the worker used historically). `MaxPatienceBudget` is the shared finite ceiling: policy profiles, explicit work-item `patience_budget_seconds`, and cultivar-derived xylem wall-clock budgets for running items must not create an effectively infinite wait. Pre-claim waits use explicit item patience when declared, otherwise the active profile's per-state patience budget.
+Default values are defined in `internal/safety/policy.go`. `steady` keeps the historic operational posture: 1 MiB bodies, 60s max feed wait, pool `10/1`, worker cadence `30s`, max children per item 32, max concurrent running items per token 8, max event rates per item per hour of lifecycle 120 / decision 120 / progress 240, max delegation depth 5, and the original per-state patience defaults. `bring-up` keeps the relaxed patience budgets introduced for first-live operation and also lowers the pool to `4/1` with a `60s` worker default for resource-constrained hosts. `MaxPatienceBudget` is the shared finite ceiling: policy profiles, explicit work-item `patience_budget_seconds`, and cultivar-derived xylem wall-clock budgets for running items must not create an effectively infinite wait. `MaxPoolMaxConns` is the code-owned ceiling for profile-declared pool fan-out. Pre-claim waits use explicit item patience when declared, otherwise the active profile's per-state patience budget.
 
 ## Fingerprint
 
@@ -45,7 +47,7 @@ The following **re-validate** policy on startup (after `safety check` in bootstr
 ## Changing the policy
 
 1. Edit `internal/safety/policy.go` (and tests).
-2. Run `go test ./internal/safety/... ./internal/api/... ./cmd/meristem/...`.
+2. Run `go test ./internal/safety/... ./internal/storage/... ./cmd/meristem/...`.
 3. Note the new fingerprint from `meristem safety check` in release notes or coordination docs if operators compare fingerprints across deploys.
 
 ## Related documents

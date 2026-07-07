@@ -87,6 +87,12 @@ type Server struct {
 // New constructs a Server. The pool must already be open; the API does not
 // own its lifecycle.
 func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
+	return NewWithPolicy(pool, logger, safety.DefaultPolicy())
+}
+
+// NewWithPolicy constructs a Server with the already-resolved startup safety
+// policy so readiness/logging reflect the active profile in force.
+func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -99,7 +105,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
 		logger: logger,
 		addr:   addr,
 		mux:    http.NewServeMux(),
-		policy: safety.DefaultPolicy(),
+		policy: policy,
 	}
 	if pool != nil {
 		s.writer = app.NewEventWriter()

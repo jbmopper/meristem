@@ -22,6 +22,9 @@ import (
 type Policy struct {
 	MaxRequestBodyBytes            int64                                  `json:"max_request_body_bytes"`
 	MaxFeedWait                    time.Duration                          `json:"max_feed_wait"`
+	PoolMaxConns                   int32                                  `json:"pool_max_conns"`
+	PoolMinConns                   int32                                  `json:"pool_min_conns"`
+	WorkerTickInterval             time.Duration                          `json:"worker_tick_interval"`
 	PatienceBudgets                map[domain.WorkItemState]time.Duration `json:"patience_budgets"`
 	MaxDelegationDepth             int                                    `json:"max_delegation_depth"`
 	MaxChildrenPerItem             int                                    `json:"max_children_per_item"`
@@ -35,6 +38,9 @@ const (
 	// the future object-storage interface, not in Postgres request bodies.
 	defaultMaxRequestBodyBytes              int64 = 1 << 20 // 1 MiB
 	defaultMaxFeedWait                            = 60 * time.Second
+	defaultPoolMaxConns                           = 10
+	defaultPoolMinConns                           = 1
+	defaultWorkerTickInterval                     = 30 * time.Second
 	defaultMaxDelegationDepth                     = 5
 	defaultMaxChildrenPerItem                     = 32
 	defaultMaxConcurrentRunningPerToken           = 8
@@ -48,6 +54,9 @@ const (
 	// cap is treated as an attempt to encode "wait forever" and fails
 	// validation.
 	MaxPatienceBudget = 30 * 24 * time.Hour
+
+	// MaxPoolMaxConns is the hard ceiling on profile-declared pool sizes.
+	MaxPoolMaxConns = 64
 )
 
 // Profile names. The profile set is code-owned like the policy itself:
@@ -70,6 +79,9 @@ func DefaultPolicy() Policy {
 	return Policy{
 		MaxRequestBodyBytes:            defaultMaxRequestBodyBytes,
 		MaxFeedWait:                    defaultMaxFeedWait,
+		PoolMaxConns:                   defaultPoolMaxConns,
+		PoolMinConns:                   defaultPoolMinConns,
+		WorkerTickInterval:             defaultWorkerTickInterval,
 		MaxDelegationDepth:             defaultMaxDelegationDepth,
 		MaxChildrenPerItem:             defaultMaxChildrenPerItem,
 		MaxConcurrentRunningPerToken:   defaultMaxConcurrentRunningPerToken,
@@ -86,14 +98,17 @@ func DefaultPolicy() Policy {
 }
 
 // Profiles returns every named policy profile. Every profile shares the
-// request-body and feed-wait limits; profiles vary patience only. (R7 adds
-// xylem budgets as a later dimension.)
+// request-body and feed-wait limits; profiles vary operational posture such
+// as patience, pool fan-out, and worker cadence.
 func Profiles() map[string]Policy {
 	return map[string]Policy{
 		ProfileSteady: DefaultPolicy(),
 		ProfileBringUp: {
 			MaxRequestBodyBytes:            defaultMaxRequestBodyBytes,
 			MaxFeedWait:                    defaultMaxFeedWait,
+			PoolMaxConns:                   4,
+			PoolMinConns:                   1,
+			WorkerTickInterval:             60 * time.Second,
 			MaxDelegationDepth:             defaultMaxDelegationDepth,
 			MaxChildrenPerItem:             defaultMaxChildrenPerItem,
 			MaxConcurrentRunningPerToken:   defaultMaxConcurrentRunningPerToken,
@@ -135,6 +150,21 @@ func (p Policy) Validate() error {
 	}
 	if p.MaxFeedWait <= 0 {
 		return fmt.Errorf("safety: max_feed_wait must be positive")
+	}
+	if p.PoolMaxConns <= 0 {
+		return fmt.Errorf("safety: pool_max_conns must be positive")
+	}
+	if p.PoolMaxConns > MaxPoolMaxConns {
+		return fmt.Errorf("safety: pool_max_conns must be <= %d", MaxPoolMaxConns)
+	}
+	if p.PoolMinConns <= 0 {
+		return fmt.Errorf("safety: pool_min_conns must be positive")
+	}
+	if p.PoolMinConns > p.PoolMaxConns {
+		return fmt.Errorf("safety: pool_min_conns must be <= pool_max_conns")
+	}
+	if p.WorkerTickInterval <= 0 {
+		return fmt.Errorf("safety: worker_tick_interval must be positive")
 	}
 	if p.MaxDelegationDepth < 0 {
 		return fmt.Errorf("safety: max_delegation_depth must be >= 0")
@@ -195,6 +225,9 @@ func (p Policy) Fingerprint() (string, error) {
 	canonical := struct {
 		MaxRequestBodyBytes            int64            `json:"max_request_body_bytes"`
 		MaxFeedWaitSeconds             int64            `json:"max_feed_wait_seconds"`
+		PoolMaxConns                   int32            `json:"pool_max_conns"`
+		PoolMinConns                   int32            `json:"pool_min_conns"`
+		WorkerTickSeconds              int64            `json:"worker_tick_seconds"`
 		MaxDelegationDepth             int              `json:"max_delegation_depth"`
 		MaxChildrenPerItem             int              `json:"max_children_per_item"`
 		MaxConcurrentRunningPerToken   int              `json:"max_concurrent_running_items_per_token"`
@@ -203,6 +236,9 @@ func (p Policy) Fingerprint() (string, error) {
 	}{
 		MaxRequestBodyBytes:            p.MaxRequestBodyBytes,
 		MaxFeedWaitSeconds:             int64(p.MaxFeedWait.Seconds()),
+		PoolMaxConns:                   p.PoolMaxConns,
+		PoolMinConns:                   p.PoolMinConns,
+		WorkerTickSeconds:              int64(p.WorkerTickInterval.Seconds()),
 		MaxDelegationDepth:             p.MaxDelegationDepth,
 		MaxChildrenPerItem:             p.MaxChildrenPerItem,
 		MaxConcurrentRunningPerToken:   p.MaxConcurrentRunningPerToken,

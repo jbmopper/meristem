@@ -51,6 +51,14 @@ func LoadConfigFromEnv() (Config, error) {
 	}, nil
 }
 
+// WithPoolBounds returns cfg with the caller-selected pool sizing applied.
+// Startup policy owns the chosen bounds; storage carries them through to pgx.
+func (cfg Config) WithPoolBounds(maxConns, minConns int32) Config {
+	cfg.MaxConns = maxConns
+	cfg.MinConns = minConns
+	return cfg
+}
+
 // Open returns a ready-to-use connection pool. It performs an initial Ping
 // so callers fail fast on bad credentials instead of at first query.
 func Open(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {

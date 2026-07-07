@@ -27,6 +27,9 @@ func runSafety(_ context.Context, logger *slog.Logger, args []string) error {
 		SafetyPolicy                   string           `json:"safety_policy"`
 		MaxRequestBodyBytes            int64            `json:"max_request_body_bytes"`
 		MaxFeedWaitSeconds             int64            `json:"max_feed_wait_seconds"`
+		PoolMaxConns                   int32            `json:"pool_max_conns"`
+		PoolMinConns                   int32            `json:"pool_min_conns"`
+		WorkerTickSeconds              int64            `json:"worker_tick_seconds"`
 		MaxDelegationDepth             int              `json:"max_delegation_depth"`
 		MaxChildrenPerItem             int              `json:"max_children_per_item"`
 		MaxConcurrentRunningPerToken   int              `json:"max_concurrent_running_items_per_token"`
@@ -37,6 +40,9 @@ func runSafety(_ context.Context, logger *slog.Logger, args []string) error {
 		SafetyPolicy:                   policyID,
 		MaxRequestBodyBytes:            policy.MaxRequestBodyBytes,
 		MaxFeedWaitSeconds:             int64(policy.MaxFeedWait.Seconds()),
+		PoolMaxConns:                   policy.PoolMaxConns,
+		PoolMinConns:                   policy.PoolMinConns,
+		WorkerTickSeconds:              int64(policy.WorkerTickInterval.Seconds()),
 		MaxDelegationDepth:             policy.MaxDelegationDepth,
 		MaxChildrenPerItem:             policy.MaxChildrenPerItem,
 		MaxConcurrentRunningPerToken:   policy.MaxConcurrentRunningPerToken,

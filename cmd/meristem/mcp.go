@@ -15,7 +15,6 @@ import (
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/policyprofile"
-	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -27,21 +26,12 @@ import (
 // Stdout is reserved for JSON-RPC traffic; structured logs go to stderr
 // so launching clients can pipe stdio cleanly.
 func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
-	policy, _, err := validateStartupSafety(logger)
-	if err != nil {
-		return err
-	}
-
 	secret := os.Getenv("MERISTEM_TOKEN")
 	if secret == "" {
 		return fmt.Errorf("mcp: MERISTEM_TOKEN is required (mint one with `meristem tokens create --source agent`)")
 	}
 
-	cfg, err := storage.LoadConfigFromEnv()
-	if err != nil {
-		return err
-	}
-	pool, err := storage.Open(ctx, cfg)
+	pool, active, err := openProfileAwarePool(ctx, logger)
 	if err != nil {
 		return err
 	}
@@ -57,7 +47,7 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 		DeterministicErrors: errorreporting.NewService(pool, writer),
 		Feed:                feed.NewService(pool),
 		PolicyProfiles:      policyprofile.NewService(pool, writer),
-		MaxFeedWait:         policy.MaxFeedWait,
+		MaxFeedWait:         active.Policy.MaxFeedWait,
 	}
 
 	server := mcp.New(deps, mcp.ServerInfo{Name: "meristem", Version: version}, logger)

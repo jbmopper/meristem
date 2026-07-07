@@ -86,48 +86,44 @@ docker inspect meristem-postgres --format '{{.HostConfig.NanoCpus}}' # -> 200000
 
 ## 4. Worker cadence
 
-`meristem worker` defaults to `--interval=30s`. On a resource-constrained
-box, a longer interval trades reconciliation latency for less steady-state
-CPU/DB polling overhead. This is an ordinary CLI flag, not a policy-profile
-change — bounded patience is unaffected (patience budgets, not tick
-cadence, own the "how long may a state wait" invariant per
-[`docs/safety.md`](safety.md)):
+The `bring-up` policy profile now carries a slower default worker cadence
+(`60s`) for this sort of constrained host. If you switch the system into
+`bring-up`, plain `meristem worker` picks that default up automatically.
+You can still override it explicitly when needed; the flag remains a direct
+operator control for incident tuning:
 
 ```bash
 MERISTEM_TOKEN="$(cat .meristem/seed.token)" \
   go run ./cmd/meristem worker --interval=60s
 ```
 
-60s is a reasonable starting point for a single-operator M4 instance;
-tighten it back toward the 30s default if you need snappier convergence and
-have headroom to spare.
+60s remains a reasonable starting point for a single-operator M4 instance;
+tighten it back toward the steady default (`30s`) if you need snappier
+convergence and have headroom to spare.
 
 ## 5. Policy profile
 
 No new policy profile is introduced for this target. Use the existing
 profiles as-is (see [`docs/owner-quickstart.md`](owner-quickstart.md) step
 3): switch to `bring-up` while the backlog and reconcilers are first
-standing up, then back to `steady` once things settle. Profile choice is
-about patience budgets, not host resources, so it is orthogonal to
-everything else in this document.
+standing up, then back to `steady` once things settle. Profile choice now
+also carries operational defaults relevant to this host class: `bring-up`
+relaxes patience, lowers long-lived pool fan-out, and slows the unattended
+worker cadence, while `steady` restores the normal posture.
 
-## 6. Known gap: Postgres client pool size is not tunable here
+## 6. Postgres client pool size is now profile-governed
 
-`internal/storage.LoadConfigFromEnv` hardcodes the pgx pool to
-`MaxConns: 10, MinConns: 1` for every meristem process (API, worker, MCP,
-CLI) — see [`docs/safety.md`](safety.md): resource-safety controls are
-code-owned, not environment-tunable, in this slice. On a 16GB box running
-several meristem processes at once, that is up to 10 connections *per
-process*, which the `max_connections=40` set in the compose override above
-accounts for, but it cannot be lowered per-process without a code change.
+Long-lived meristem processes now resolve the active policy profile first
+and then reopen Postgres with that profile's pool bounds. In practice:
 
-This is deliberately **out of scope** for this document: making pool size
-(and worker cadence) a real profile-governed dimension of
-`internal/safety.Policy` was considered and explicitly deferred to keep
-this seed item tight (coordination recorded on work_item `575414ca`). The
-follow-up is tracked as a separate child work_item; do not re-derive this
-decision independently — check that item's state before proposing the
-`internal/safety` change again.
+- `steady` uses `PoolMaxConns=10`, `PoolMinConns=1`
+- `bring-up` uses `PoolMaxConns=4`, `PoolMinConns=1`
+
+This keeps the control code-owned and fingerprinted while avoiding the old
+"10 connections per process regardless of host class" behavior that made
+the M4 path noisy. The compose override's `max_connections=40` remains a
+reasonable ceiling, but normal unattended bring-up should now consume far
+fewer client slots by default.
 
 ## 7. Verification
 

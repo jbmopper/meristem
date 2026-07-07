@@ -26,7 +26,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/jbmopper/meristem/internal/api"
+	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/storage"
 )
 
@@ -97,21 +100,13 @@ func main() {
 }
 
 func runAPI(ctx context.Context, logger *slog.Logger, _ []string) error {
-	if _, _, err := validateStartupSafety(logger); err != nil {
-		return err
-	}
-
-	cfg, err := storage.LoadConfigFromEnv()
-	if err != nil {
-		return err
-	}
-	pool, err := storage.Open(ctx, cfg)
+	pool, active, err := openProfileAwarePool(ctx, logger)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	srv := api.New(pool, logger)
+	srv := api.NewWithPolicy(pool, logger, active.Policy)
 	return srv.Run(ctx)
 }
 
@@ -164,4 +159,31 @@ environment:
   MERISTEM_HTTP_ADDR     listen address for the api (default :8080)
   MERISTEM_TOKEN         bearer secret for mcp (any token), tokens (root), seed/worker (system)
 `, version)
+}
+
+func openProfileAwarePool(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, policyprofile.Active, error) {
+	if _, _, err := validateStartupSafety(logger); err != nil {
+		return nil, policyprofile.Active{}, err
+	}
+
+	cfg, err := storage.LoadConfigFromEnv()
+	if err != nil {
+		return nil, policyprofile.Active{}, err
+	}
+
+	bootstrapPool, err := storage.Open(ctx, cfg)
+	if err != nil {
+		return nil, policyprofile.Active{}, err
+	}
+	active, err := policyprofile.NewService(bootstrapPool, nil).Active(ctx)
+	bootstrapPool.Close()
+	if err != nil {
+		return nil, policyprofile.Active{}, err
+	}
+
+	pool, err := storage.Open(ctx, cfg.WithPoolBounds(active.Policy.PoolMaxConns, active.Policy.PoolMinConns))
+	if err != nil {
+		return nil, policyprofile.Active{}, err
+	}
+	return pool, active, nil
 }

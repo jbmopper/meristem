@@ -31,7 +31,6 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/policyprofile"
-	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/worker"
 )
 
@@ -52,18 +51,11 @@ type workerRuntime struct {
 	writer        *events.Writer
 	systemTok     domain.Token
 	uniformBudget time.Duration
+	activeProfile policyprofile.Active
 }
 
 func newWorkerRuntime(ctx context.Context, logger *slog.Logger, uniformBudget time.Duration) (*workerRuntime, error) {
-	if _, _, err := validateStartupSafety(logger); err != nil {
-		return nil, err
-	}
-
-	cfg, err := storage.LoadConfigFromEnv()
-	if err != nil {
-		return nil, err
-	}
-	pool, err := storage.Open(ctx, cfg)
+	pool, active, err := openProfileAwarePool(ctx, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +73,7 @@ func newWorkerRuntime(ctx context.Context, logger *slog.Logger, uniformBudget ti
 		writer:        writer,
 		systemTok:     systemTok,
 		uniformBudget: uniformBudget,
+		activeProfile: active,
 	}, nil
 }
 
@@ -143,7 +136,8 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 func runWorkerDaemon(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	interval := fs.Duration("interval", 30*time.Second, "duration between daemon worker ticks")
+	var intervalText string
+	fs.StringVar(&intervalText, "interval", "", "duration between daemon worker ticks (defaults to active profile)")
 	uniformBudget := fs.Duration("budget", 0, "uniform budget applied to every non-terminal state (overrides active profile; for verification)")
 	if err := fs.Parse(args); err != nil {
 		workerUsage(os.Stderr)
@@ -153,25 +147,44 @@ func runWorkerDaemon(ctx context.Context, logger *slog.Logger, args []string) er
 		workerUsage(os.Stderr)
 		return fmt.Errorf("worker: unknown mode or argument %q", fs.Arg(0))
 	}
-	if *interval <= 0 {
-		return fmt.Errorf("worker: --interval must be positive, got %s", interval.String())
-	}
-
 	runtime, err := newWorkerRuntime(ctx, logger, *uniformBudget)
 	if err != nil {
 		return err
 	}
 	defer runtime.Close()
 
+	interval, overridden, err := resolveWorkerInterval(runtime.activeProfile.Policy.WorkerTickInterval, intervalText)
+	if err != nil {
+		return err
+	}
 	logger.Info("worker daemon starting",
 		slog.String("interval", interval.String()),
+		slog.Bool("interval_overridden", overridden),
+		slog.String("policy_profile", runtime.activeProfile.Name),
 		slog.String("token_id", runtime.systemTok.ID.String()),
 		slog.String("token_source", string(runtime.systemTok.Source)),
 	)
-	return runWorkerLoop(ctx, logger, *interval, func(ctx context.Context) (worker.Result, domain.Token, error) {
+	return runWorkerLoop(ctx, logger, interval, func(ctx context.Context) (worker.Result, domain.Token, error) {
 		result, err := runtime.ScanOnce(ctx)
 		return result, runtime.systemTok, err
 	})
+}
+
+func resolveWorkerInterval(defaultInterval time.Duration, override string) (time.Duration, bool, error) {
+	if defaultInterval <= 0 {
+		return 0, false, fmt.Errorf("worker: default interval must be positive, got %s", defaultInterval.String())
+	}
+	if override == "" {
+		return defaultInterval, false, nil
+	}
+	interval, err := time.ParseDuration(override)
+	if err != nil {
+		return 0, false, fmt.Errorf("worker: invalid --interval %q: %w", override, err)
+	}
+	if interval <= 0 {
+		return 0, false, fmt.Errorf("worker: --interval must be positive, got %s", interval.String())
+	}
+	return interval, true, nil
 }
 
 type workerScanFunc func(context.Context) (worker.Result, domain.Token, error)
@@ -329,7 +342,8 @@ event per observed breach, and routes breached state epochs to dispatch or
 human attention unless they are already waiting on human review. Re-running
 with the same convergence signals does not consume a new convergence attempt.
 
-  --interval=DURATION interval between daemon ticks. Default: 30s.
+  --interval=DURATION interval between daemon ticks. Default: active policy
+                      profile's WorkerTickInterval (steady=30s, bring-up=60s).
   --budget=DURATION   override the per-state defaults with one uniform
                       budget applied to every non-terminal state. Intended
                       for operator/CI verification, not production policy.

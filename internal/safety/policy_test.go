@@ -19,6 +19,12 @@ func TestDefaultPolicyValidates(t *testing.T) {
 	if p.MaxFeedWait <= 0 {
 		t.Fatal("default policy must bound feed waits")
 	}
+	if p.PoolMaxConns <= 0 || p.PoolMinConns <= 0 {
+		t.Fatal("default policy must bound pool sizes")
+	}
+	if p.WorkerTickInterval <= 0 {
+		t.Fatal("default policy must bound worker tick interval")
+	}
 	if p.MaxDelegationDepth <= 0 {
 		t.Fatal("default policy must bound delegation depth")
 	}
@@ -83,6 +89,40 @@ func TestValidateRejectsNegativeDelegationDepth(t *testing.T) {
 
 	if err := p.Validate(); err == nil {
 		t.Fatal("expected negative delegation depth to fail validation")
+	}
+}
+
+func TestValidateRejectsInvalidPoolSizing(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(*Policy)
+		want string
+	}{
+		{name: "non-positive max", edit: func(p *Policy) { p.PoolMaxConns = 0 }, want: "pool_max_conns"},
+		{name: "non-positive min", edit: func(p *Policy) { p.PoolMinConns = 0 }, want: "pool_min_conns"},
+		{name: "min exceeds max", edit: func(p *Policy) { p.PoolMinConns = p.PoolMaxConns + 1 }, want: "pool_min_conns"},
+		{name: "max exceeds ceiling", edit: func(p *Policy) { p.PoolMaxConns = MaxPoolMaxConns + 1 }, want: "pool_max_conns"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := DefaultPolicy()
+			tc.edit(&p)
+			err := p.Validate()
+			if err == nil {
+				t.Fatal("expected invalid pool sizing to fail validation")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error to contain %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsNonPositiveWorkerTickInterval(t *testing.T) {
+	p := DefaultPolicy()
+	p.WorkerTickInterval = 0
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected non-positive worker tick interval to fail validation")
 	}
 }
 
