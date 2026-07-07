@@ -94,6 +94,14 @@ const (
 	// re-registering it. §2b of the network spec models route changes as
 	// node.route_updated events folded into the same `nodes` row.
 	EventNodeRouteUpdated = "node.route_updated"
+	// EventCommandQueued records a cross-node command durably parked for a
+	// target node that has no inbound route reachable from the sender. The
+	// subject is the target node (SubjectNode); the projection is the
+	// per-target command_queue table. The target drains it by outbound poll
+	// and executes it under its own agent token with the original idempotency
+	// key so replays collapse (docs/network-layer-spec.md §2 "Commands to
+	// nodes without inbound reachability" and §2b step 3 "Durable queue").
+	EventCommandQueued = "command.queued"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -143,6 +151,7 @@ var AllEventKinds = []string{
 	EventProjectionDefined,
 	EventNodeRegistered,
 	EventNodeRouteUpdated,
+	EventCommandQueued,
 }
 
 const (

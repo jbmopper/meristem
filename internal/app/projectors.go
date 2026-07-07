@@ -5,6 +5,7 @@ import (
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
+	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/httpconnector"
@@ -39,6 +40,7 @@ func NewProjectionRegistry() *projections.Registry {
 	registry.RegisterProjectors(reg)
 	projectiondefs.RegisterProjectors(reg)
 	nodes.RegisterProjectors(reg)
+	crossnode.RegisterProjectors(reg)
 	return reg
 }
 
