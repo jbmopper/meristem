@@ -82,6 +82,18 @@ const (
 	EventTropismDefined    = "tropism.defined"
 	EventCultivarDefined   = "cultivar.defined"
 	EventProjectionDefined = "projection.defined"
+
+	// EventNodeRegistered records a fleet node joining the registry with its
+	// stable, DNS-safe node_id and reachability descriptors (ingress base_url,
+	// optional direct peer route, relay chain, status). The subject is the
+	// node aggregate; the projection is the `nodes` table. See
+	// docs/network-layer-spec.md §2 "Naming" and §6 stage 0.
+	EventNodeRegistered = "node.registered"
+	// EventNodeRouteUpdated records a change to how a registered node is
+	// reached — its direct_url, relay_via chain, and/or status — without
+	// re-registering it. §2b of the network spec models route changes as
+	// node.route_updated events folded into the same `nodes` row.
+	EventNodeRouteUpdated = "node.route_updated"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -129,6 +141,8 @@ var AllEventKinds = []string{
 	EventTropismDefined,
 	EventCultivarDefined,
 	EventProjectionDefined,
+	EventNodeRegistered,
+	EventNodeRouteUpdated,
 }
 
 const (
@@ -155,6 +169,11 @@ const (
 	// policy profile; every switch event shares one well-known subject id
 	// (see internal/policyprofile.SubjectID).
 	SubjectPolicyProfile = "policy_profile"
+	// SubjectNode is the subject kind for a fleet node in the registry. The
+	// subject_id is a deterministic UUID derived from the node_id (see
+	// internal/nodes.NodeSubjectID) so every event about one node shares a
+	// subject while the projection keys on the DNS-safe node_id text.
+	SubjectNode = "node"
 )
 
 // Verdict is the disposition produced by a deterministic convergence
@@ -346,6 +365,34 @@ func (s DeterministicErrorSeverity) Valid() bool {
 		return true
 	}
 	return false
+}
+
+// NodeStatus is the reachability disposition projected for a fleet node.
+// Status is free-form on the write path (the projector only requires it to be
+// non-empty) so future statuses do not need a code change to be folded; these
+// constants name the values stage 0 uses.
+type NodeStatus string
+
+const (
+	// NodeStatusActive marks a node that is registered and expected to be
+	// reachable over at least one approved route.
+	NodeStatusActive NodeStatus = "active"
+	// NodeStatusUnreachable marks a node with no currently reachable route
+	// (e.g. ingress down during interim bring-up). It stays in the registry.
+	NodeStatusUnreachable NodeStatus = "unreachable"
+)
+
+// Node is the current-state projection for one fleet node in the registry.
+// Truth is the node.registered / node.route_updated event stream; this is the
+// read-side type after the projector has folded them into the `nodes` table.
+type Node struct {
+	NodeID    string
+	BaseURL   *string
+	DirectURL *string
+	RelayVia  []string
+	Status    NodeStatus
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // DeterministicError is the current-state projection for deterministic-layer
