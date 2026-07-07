@@ -243,7 +243,11 @@ func TestFeedNoSkipUnderSameMicrosecondContention(t *testing.T) {
 		key := "noskip-" + itoa(i)
 		dedupe := "integration:noskip:" + itoa(i)
 		rec := postSignal(t, server.Handler(), tokenResult.Secret, key, signalRequestBody(t, dedupe))
-		if rec.Code != http.StatusCreated {
+		// The burst exceeds the per-token signal admission budget
+		// (MaxSignalItemsPerTokenPerHour). Over-budget POSTs return 409 but
+		// still record a signal.received event for audit, so the feed no-skip
+		// property this test guards holds for both created and refused signals.
+		if rec.Code != http.StatusCreated && rec.Code != http.StatusConflict {
 			t.Fatalf("burst signal %d: %d %s", i, rec.Code, rec.Body.String())
 		}
 	}

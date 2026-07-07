@@ -280,6 +280,45 @@ func TestSourceMetadataPayloadOmitsEmptyFields(t *testing.T) {
 	}
 }
 
+func TestAdmitItemCreation(t *testing.T) {
+	cases := []struct {
+		name    string
+		current int
+		max     int
+		want    bool
+	}{
+		{"empty budget under max", 0, 30, true},
+		{"one below max", 29, 30, true},
+		{"at max is refused", 30, 30, false},
+		{"over max is refused", 31, 30, false},
+		{"bring-up under tighter max", 9, 10, true},
+		{"bring-up at tighter max", 10, 10, false},
+		{"degenerate zero max refuses all", 0, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := admitItemCreation(tc.current, tc.max); got != tc.want {
+				t.Fatalf("admitItemCreation(%d, %d) = %v, want %v", tc.current, tc.max, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSignalBudgetEscalationIDStablePerTokenHourBucket(t *testing.T) {
+	tok := uuid.New()
+	a := signalBudgetEscalationID(tok, "2026-07-07T15:00:00Z")
+	b := signalBudgetEscalationID(tok, "2026-07-07T15:00:00Z")
+	if a != b {
+		t.Fatalf("escalation id not stable within the same token+bucket: %s vs %s", a, b)
+	}
+	if next := signalBudgetEscalationID(tok, "2026-07-07T16:00:00Z"); next == a {
+		t.Fatalf("escalation id must differ across hour buckets, both %s", a)
+	}
+	if other := signalBudgetEscalationID(uuid.New(), "2026-07-07T15:00:00Z"); other == a {
+		t.Fatalf("escalation id must differ across tokens, both %s", a)
+	}
+}
+
 func TestSourceForActorDefaultsToHuman(t *testing.T) {
 	if got := sourceForActor(domain.Token{}); got != domain.SourceHuman {
 		t.Errorf("expected SourceHuman fallback, got %q", got)

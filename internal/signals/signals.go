@@ -45,6 +45,16 @@ func (receivedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Even
 		dedupeKey = &payload.DedupeKey
 	}
 
+	// A budget-refused signal carries no work_item (item_creation_admitted =
+	// false); its projection row records a NULL work_item_id. Every admitted
+	// signal — whether it created a fresh item or dedupe-linked to a live one —
+	// carries a resolved id.
+	var workItemID *uuid.UUID
+	if payload.WorkItemID != uuid.Nil {
+		id := payload.WorkItemID
+		workItemID = &id
+	}
+
 	_, err = tx.Exec(ctx, `
 		INSERT INTO signals (
 			id, received_at, actor_token_id, source,
@@ -65,7 +75,7 @@ func (receivedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Even
 	`,
 		event.SubjectID, event.OccurredAt, event.ActorTokenID, string(event.Source),
 		payload.SignalKind, dedupeKey, payload.fingerprintBytes, []byte(payload.WorkSpec),
-		payload.WorkItemID, payload.CreatedWorkItem,
+		workItemID, payload.CreatedWorkItem,
 	)
 	if err != nil {
 		return fmt.Errorf("signal.received: insert projection: %w", err)
@@ -84,8 +94,18 @@ type signalPayload struct {
 	WorkSpec        json.RawMessage `json:"work_spec"`
 	WorkItemID      uuid.UUID       `json:"work_item_id"`
 	CreatedWorkItem bool            `json:"created_work_item"`
+	// ItemCreationAdmitted is absent (nil => true) on every ordinary signal.
+	// It is present and false only when the per-token admission budget refused
+	// the work_item creation, in which case work_item_id is legitimately absent.
+	ItemCreationAdmitted *bool `json:"item_creation_admitted,omitempty"`
 
 	fingerprintBytes []byte // populated by decodeSignalPayload after hex decode
+}
+
+// admitted reports whether this signal created or linked a work_item (the
+// historical default) versus being refused by the admission budget.
+func (p signalPayload) admitted() bool {
+	return p.ItemCreationAdmitted == nil || *p.ItemCreationAdmitted
 }
 
 // decodeSignalPayload JSON-roundtrips raw into a signalPayload and validates
@@ -115,8 +135,12 @@ func decodeSignalPayload(raw any) (signalPayload, error) {
 	if len(p.WorkSpec) == 0 || !json.Valid(p.WorkSpec) {
 		return signalPayload{}, fmt.Errorf("signal.received: work_spec must be valid JSON")
 	}
-	if p.WorkItemID == uuid.Nil {
-		return signalPayload{}, fmt.Errorf("signal.received: work_item_id is required (service must resolve before append)")
+	if p.admitted() {
+		if p.WorkItemID == uuid.Nil {
+			return signalPayload{}, fmt.Errorf("signal.received: work_item_id is required (service must resolve before append)")
+		}
+	} else if p.WorkItemID != uuid.Nil {
+		return signalPayload{}, fmt.Errorf("signal.received: budget-refused signal must not carry a work_item_id")
 	}
 	return p, nil
 }

@@ -148,6 +148,31 @@ func TestValidateRejectsNonPositiveConcurrentRunningPerToken(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNonPositiveSignalItemsPerTokenPerHour(t *testing.T) {
+	for _, value := range []int{0, -1} {
+		p := DefaultPolicy()
+		p.MaxSignalItemsPerTokenPerHour = value
+
+		if err := p.Validate(); err == nil {
+			t.Fatalf("expected max_signal_items_per_token_per_hour=%d to fail validation", value)
+		}
+	}
+}
+
+func TestDefaultAndBringUpSignalBudgetsDiffer(t *testing.T) {
+	steady := DefaultPolicy().MaxSignalItemsPerTokenPerHour
+	bringUp := Profiles()[ProfileBringUp].MaxSignalItemsPerTokenPerHour
+	if steady != defaultMaxSignalItemsPerTokenPerHour {
+		t.Fatalf("steady signal budget = %d, want %d", steady, defaultMaxSignalItemsPerTokenPerHour)
+	}
+	if bringUp != bringUpMaxSignalItemsPerTokenPerHour {
+		t.Fatalf("bring-up signal budget = %d, want %d", bringUp, bringUpMaxSignalItemsPerTokenPerHour)
+	}
+	if bringUp >= steady {
+		t.Fatalf("bring-up budget %d should be tighter than steady %d", bringUp, steady)
+	}
+}
+
 func TestValidateRejectsInvalidEventRateBudgets(t *testing.T) {
 	cases := []struct {
 		name string

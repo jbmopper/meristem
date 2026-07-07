@@ -238,6 +238,11 @@ func writeSignalError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusBadRequest, "invalid_work_spec", err.Error())
 	case errors.Is(err, signals.ErrWorkSpecMissingTitle):
 		writeAPIError(w, http.StatusBadRequest, "work_spec_missing_title", err.Error())
+	case errors.Is(err, signals.ErrSignalItemBudgetExhausted):
+		// The signal row is recorded and the owner is escalated; the transport
+		// still refuses the item creation with a structured budget error,
+		// matching the xylem_budget_exhausted 409 convention.
+		writeAPIError(w, http.StatusConflict, "signal_item_budget_exhausted", err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, "signal_receive_failed", "could not receive signal")
 	}
