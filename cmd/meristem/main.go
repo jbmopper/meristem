@@ -67,6 +67,8 @@ func main() {
 		err = runHealthcheck(ctx, logger, args)
 	case "seed":
 		err = runSeed(ctx, logger, args)
+	case "node":
+		err = runNode(ctx, logger, args)
 	case "rebuild":
 		err = runRebuild(ctx, logger, args)
 	case "export":
@@ -145,6 +147,7 @@ usage:
   meristem tokens ...        create, list, or revoke bearer tokens
   meristem mcp               run the MCP stdio server (reads MERISTEM_TOKEN)
   meristem seed v1           seed the v1 substrate backlog (reads MERISTEM_TOKEN, must be source=system)
+  meristem node ...          register fleet nodes, update routes, list the registry (writes read MERISTEM_TOKEN, source=system)
   meristem rebuild           fold events through projectors into a sandbox schema and diff vs live
   meristem worker            run the deterministic reconciler daemon (reads MERISTEM_TOKEN, must be source=system)
   meristem worker --once     run one deterministic reconciler tick
