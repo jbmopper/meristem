@@ -43,6 +43,11 @@ an acceptable current deployment choice, but the core contract is only HTTPS
 ingress to `meristem api`. Swapping Cloudflare for another TLS reverse proxy
 must not require core code changes.
 
+Set `MERISTEM_PUBLIC_BASE_URL` on `meristem api` when the app cannot derive the
+public URL from forwarded proxy headers. It must be the externally reachable
+base URL only, for example `https://mcp.example.com`; the provider endpoint is
+then `${MERISTEM_PUBLIC_BASE_URL}/mcp`.
+
 Transport compatibility for a first vanilla provider registration is tracked
 separately. If the provider requires server-initiated `GET /mcp` SSE behavior
 before it will register, that transport work must land before the smoke test.

@@ -155,9 +155,10 @@ usage:
   meristem help              show this message
 
 environment:
-  MERISTEM_DATABASE_URL  Postgres DSN (required for api, worker, migrate, mcp, tokens, seed)
-  MERISTEM_HTTP_ADDR     listen address for the api (default :8080)
-  MERISTEM_TOKEN         bearer secret for mcp (any token), tokens (root), seed/worker (system)
+  MERISTEM_DATABASE_URL    Postgres DSN (required for api, worker, migrate, mcp, tokens, seed)
+  MERISTEM_HTTP_ADDR       listen address for the api (default :8080)
+  MERISTEM_PUBLIC_BASE_URL external base URL for provider OAuth metadata (optional)
+  MERISTEM_TOKEN           bearer secret for mcp (any token), tokens (root), seed/worker (system)
 `, version)
 }
 

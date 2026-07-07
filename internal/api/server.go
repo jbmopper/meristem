@@ -60,9 +60,11 @@ type Server struct {
 	pool                  *pgxpool.Pool
 	logger                *slog.Logger
 	addr                  string
+	publicBaseURL         string
 	mux                   *http.ServeMux
 	writer                *events.Writer
 	authService           *auth.Service
+	authenticator         auth.Authenticator
 	authMiddleware        *auth.Middleware
 	idempotencyMiddleware *idempotency.Middleware
 	inbox                 *inbox.Service
@@ -101,15 +103,17 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		addr = defaultAddr
 	}
 	s := &Server{
-		pool:   pool,
-		logger: logger,
-		addr:   addr,
-		mux:    http.NewServeMux(),
-		policy: policy,
+		pool:          pool,
+		logger:        logger,
+		addr:          addr,
+		publicBaseURL: normalizePublicBaseURL(os.Getenv(EnvPublicBaseURL)),
+		mux:           http.NewServeMux(),
+		policy:        policy,
 	}
 	if pool != nil {
 		s.writer = app.NewEventWriter()
 		s.authService = auth.NewService(pool, s.writer)
+		s.authenticator = s.authService
 		s.authMiddleware = auth.NewMiddleware(s.authService)
 		s.idempotencyMiddleware = idempotency.NewMiddleware(pool, s.writer)
 		s.inbox = inbox.NewService(pool, s.writer)
@@ -159,8 +163,12 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleLiveness)
 	s.mux.HandleFunc("GET /readyz", s.handleReadiness)
-	s.mux.Handle("GET /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
-	s.mux.Handle("POST /mcp", s.protected(http.HandlerFunc(s.handleMCP)))
+	s.mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleOAuthProtectedResourceMetadata)
+	s.mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthAuthorizationServerMetadata)
+	s.mux.HandleFunc("GET /oauth/authorize", s.handleOAuthFlowUnavailable)
+	s.mux.HandleFunc("POST /oauth/token", s.handleOAuthFlowUnavailable)
+	s.mux.Handle("GET /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
+	s.mux.Handle("POST /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
