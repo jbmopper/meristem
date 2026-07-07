@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/projections"
 )
 
-// RegisterProjectors adds the command_queue projection writer to registry.
+// RegisterProjectors adds the command_queue projection writers to registry:
+// the enqueue writer (command.queued -> one row) and the ack writer
+// (command.acked -> the row's terminal outcome).
 func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(commandQueuedProjector{})
+	registry.Register(commandAckedProjector{})
 }
 
 type commandQueuedProjector struct{}
@@ -63,6 +67,50 @@ func applyQueuedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	`, event.ID, p.TargetNodeID, p.CommandPath, []byte(body), p.OriginIdempotencyKey, p.OriginActorTokenID, event.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("command.queued: insert projection: %w", err)
+	}
+	return nil
+}
+
+type commandAckedProjector struct{}
+
+func (commandAckedProjector) Kind() string { return domain.EventCommandAcked }
+
+// Apply folds a command.acked event onto its command_queue row, advancing state
+// pending -> done (ok) / failed (not ok) and recording the structural outcome
+// the target observed. acked_at is the event clock (never wall time) so a
+// rebuild reproduces the row. The UPDATE is idempotent on the same event, and a
+// replayed ack POST never re-fires the projector (same deterministic event id).
+func (commandAckedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectNode {
+		return fmt.Errorf("command.acked: expected subject_kind %q, got %q", domain.SubjectNode, event.SubjectKind)
+	}
+	switch v := payloadVersion(event.Payload); v {
+	case 1:
+		return applyAckedV1(ctx, tx, event)
+	default:
+		return fmt.Errorf("command.acked: unknown payload_version %d", v)
+	}
+}
+
+func applyAckedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	var p ackedPayload
+	if err := decode(event.Payload, &p); err != nil {
+		return fmt.Errorf("command.acked: decode payload: %w", err)
+	}
+	if p.CommandQueueID == uuid.Nil {
+		return fmt.Errorf("command.acked: command_queue_id is required")
+	}
+	state := "failed"
+	if p.OK {
+		state = "done"
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE command_queue
+		SET state = $2, outcome_status_code = $3, outcome_ok = $4, acked_at = $5
+		WHERE id = $1
+	`, p.CommandQueueID, state, p.StatusCode, p.OK, event.OccurredAt)
+	if err != nil {
+		return fmt.Errorf("command.acked: update projection: %w", err)
 	}
 	return nil
 }

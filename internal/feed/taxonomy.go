@@ -132,7 +132,8 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventDeterministicErrorUnmasked,
 		domain.EventNodeRegistered,
 		domain.EventNodeRouteUpdated,
-		domain.EventCommandQueued:
+		domain.EventCommandQueued,
+		domain.EventCommandAcked:
 		return KindClassAdmin, false, true
 	default:
 		return "", false, false

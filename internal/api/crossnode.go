@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/safety"
@@ -101,6 +103,128 @@ func (s *Server) handleCrossnodeCommand(w http.ResponseWriter, r *http.Request) 
 		"queued": false,
 		"local":  true,
 	})
+}
+
+// handleCrossnodeCommandsList serves GET /v1/crossnode/commands?target=<node_id>&limit=N,
+// the hub read a pull-only target polls to drain its durable command queue
+// (docs/network-layer-spec.md §2 "Commands to nodes without inbound
+// reachability"). It returns the target's still-pending rows oldest-first; the
+// caller executes each locally and acks the outcome. Auth-only (no idempotency:
+// a read), mirroring the other GET routes.
+func (s *Server) handleCrossnodeCommandsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := authenticatedToken(w, r); !ok {
+		return
+	}
+	if s.crossnode == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "crossnode_unavailable",
+			"cross-node queue service is not configured")
+		return
+	}
+	target := strings.TrimSpace(r.URL.Query().Get("target"))
+	if target == "" {
+		writeAPIError(w, http.StatusBadRequest, "target_required", "target query parameter is required")
+		return
+	}
+	if !domain.ValidNodeID(target) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_target", "target must be a DNS-safe node id")
+		return
+	}
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	commands, err := s.crossnode.PendingForTarget(r.Context(), target, limit)
+	if err != nil {
+		if errors.Is(err, crossnode.ErrInvalidTargetNodeID) {
+			writeAPIError(w, http.StatusBadRequest, "invalid_target", "target must be a DNS-safe node id")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "command_queue_read_failed",
+			"could not read cross-node command queue")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"commands": commands})
+}
+
+// crossnodeAckRequest is the structural outcome a target posts to
+// POST /v1/crossnode/commands/{event_id}/ack after executing the command
+// locally: the HTTP status its local api returned and whether it succeeded.
+type crossnodeAckRequest struct {
+	StatusCode int   `json:"status_code"`
+	OK         *bool `json:"ok"`
+}
+
+// handleCrossnodeCommandAck receives a target's acknowledgement of a drained
+// command and folds the outcome onto the command_queue row (state pending ->
+// done/failed). Runs behind the command (auth + idempotency) middleware so a
+// replayed ack collapses.
+func (s *Server) handleCrossnodeCommandAck(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if s.crossnode == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "crossnode_unavailable",
+			"cross-node queue service is not configured")
+		return
+	}
+	eventID, err := uuid.Parse(strings.TrimSpace(r.PathValue("event_id")))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_event_id", "event_id must be a UUID")
+		return
+	}
+	req, ok := decodeCrossnodeAckRequest(w, r)
+	if !ok {
+		return
+	}
+	result, err := s.crossnode.Ack(r.Context(), crossnode.AckInput{
+		CommandQueueID: eventID,
+		StatusCode:     req.StatusCode,
+		OK:             *req.OK,
+		ActorTokenID:   &actor.ID,
+	})
+	if err != nil {
+		if errors.Is(err, crossnode.ErrUnknownCommand) {
+			writeAPIError(w, http.StatusNotFound, "unknown_command", "no queued command with that event_id")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "command_ack_failed",
+			"could not acknowledge cross-node command")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"acked":               true,
+		"event_id":            eventID,
+		"target_node_id":      result.TargetNodeID,
+		"command_acked_event": result.EventID,
+	})
+}
+
+func decodeCrossnodeAckRequest(w http.ResponseWriter, r *http.Request) (crossnodeAckRequest, bool) {
+	defer func() { _ = r.Body.Close() }()
+	r.Body = http.MaxBytesReader(w, r.Body, safety.DefaultPolicy().MaxRequestBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req crossnodeAckRequest
+	if err := dec.Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds resource safety limit")
+			return crossnodeAckRequest{}, false
+		}
+		writeAPIError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
+		return crossnodeAckRequest{}, false
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		writeAPIError(w, http.StatusBadRequest, "invalid_json", "request body must contain a single JSON object")
+		return crossnodeAckRequest{}, false
+	}
+	if req.OK == nil {
+		writeAPIError(w, http.StatusBadRequest, "ok_required", "ok is required")
+		return crossnodeAckRequest{}, false
+	}
+	return req, true
 }
 
 func decodeCrossnodeCommandRequest(w http.ResponseWriter, r *http.Request) (crossnodeCommandRequest, bool) {

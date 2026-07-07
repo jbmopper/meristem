@@ -102,6 +102,14 @@ const (
 	// key so replays collapse (docs/network-layer-spec.md §2 "Commands to
 	// nodes without inbound reachability" and §2b step 3 "Durable queue").
 	EventCommandQueued = "command.queued"
+	// EventCommandAcked records a target node's acknowledgement of a drained
+	// cross-node command: the structural outcome (status_code, ok) it observed
+	// executing the command locally, posted back to the hub on its next poll.
+	// The subject is the target node (SubjectNode); its projector folds the
+	// outcome onto the command_queue row (state pending -> done/failed). See
+	// docs/network-layer-spec.md §2 "Commands to nodes without inbound
+	// reachability" (the target "acknowledges by POSTing the outcome back").
+	EventCommandAcked = "command.acked"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -152,6 +160,7 @@ var AllEventKinds = []string{
 	EventNodeRegistered,
 	EventNodeRouteUpdated,
 	EventCommandQueued,
+	EventCommandAcked,
 }
 
 const (

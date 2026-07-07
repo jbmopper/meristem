@@ -86,6 +86,9 @@ var ExcludedKinds = []string{
 	// slot the target drains by outbound poll. The human activity narrative
 	// surfaces the command's effect on its home node, not this hop.
 	domain.EventCommandQueued,
+	// A command ack is the matching drain-side plumbing: it records the
+	// transport outcome onto the queue row, not human activity.
+	domain.EventCommandAcked,
 }
 
 type Item struct {

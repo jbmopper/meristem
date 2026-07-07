@@ -177,6 +177,8 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("POST /v1/crossnode/commands", s.command(http.HandlerFunc(s.handleCrossnodeCommand)))
+	s.mux.Handle("GET /v1/crossnode/commands", s.protected(http.HandlerFunc(s.handleCrossnodeCommandsList)))
+	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/ack", s.command(http.HandlerFunc(s.handleCrossnodeCommandAck)))
 	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
 	s.mux.Handle("POST /v1/policy-profile", s.commandWithAccess(s.canSwitchPolicyProfile, http.HandlerFunc(s.handleSwitchPolicyProfile)))
 	s.mux.Handle("POST /v1/tokens/revoke-all", s.commandWithAccess(s.canPanicRevokeTokens, http.HandlerFunc(s.handlePanicRevokeTokens)))
