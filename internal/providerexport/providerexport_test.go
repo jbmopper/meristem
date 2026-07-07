@@ -96,6 +96,8 @@ func TestScanContent(t *testing.T) {
 		{"aws key", "cfg := \"AKIAIOSFODNN7EXAMPLE\"", "aws_access_key_id"},
 		{"meristem token", "Bearer mrs_98HlzAZaZNHTPJhVE3H5VbMRZpZGiHgIS0dL", "meristem_bearer_token"},
 		{"env secret line", "DB_PASSWORD=hunter2hunter2\n", "generic_env_secret"},
+		{"yaml colon secret", "api_key: sk-abcdef1234567890\n", "generic_env_secret_colon"},
+		{"quoted json secret key", "  \"DB_PASSWORD\": \"hunter2hunter2\",\n", "generic_env_secret_colon"},
 		{"secret word in prose", "the password rules are documented elsewhere", ""},
 	}
 	for _, tc := range cases {

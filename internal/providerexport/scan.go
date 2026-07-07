@@ -3,6 +3,7 @@ package providerexport
 import (
 	"bytes"
 	"regexp"
+	"strings"
 )
 
 // RedactionPolicyID identifies the builtin scanner rule set. A rule change
@@ -26,6 +27,7 @@ var scanRules = []scanRule{
 	{"meristem_bearer_token", regexp.MustCompile(`\bmrs_[A-Za-z0-9_-]{20,}\b`)},
 	{"github_token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}\b`)},
 	{"generic_env_secret", regexp.MustCompile(`(?i)^\s*(?:export\s+)?[A-Z0-9_]*(?:SECRET|PASSWORD|API_KEY)[A-Z0-9_]*\s*=\s*\S{8,}`)},
+	{"generic_env_secret_colon", regexp.MustCompile(`(?i)^\s*"?[A-Z0-9_]*(?:SECRET|PASSWORD|API_KEY)[A-Z0-9_]*"?\s*:\s*\S{8,}`)},
 }
 
 // ScanContent runs the builtin:secret_deny@1 rules over one file's bytes.
@@ -34,7 +36,7 @@ var scanRules = []scanRule{
 func ScanContent(path string, content []byte) (passed bool, rule string) {
 	_ = path // path-level control is Plan's job; kept for rule evolution
 	for _, r := range scanRules {
-		if r.name == "generic_env_secret" {
+		if strings.HasPrefix(r.name, "generic_env_secret") {
 			for _, line := range bytes.Split(content, []byte("\n")) {
 				if r.pattern.Match(line) {
 					return false, r.name

@@ -115,6 +115,14 @@ func TestReduceRefusals(t *testing.T) {
 			r.Policy.AllowedPaths = append(r.Policy.AllowedPaths, "services/")
 			r.Manifest = append(r.Manifest, ManifestEntry{Path: "services/keys/prod.token", RedactionPassed: true})
 		}, domain.VerdictReject, "denied_paths"},
+		{"non-canonical env suffix hits deny", func(r *Request) {
+			r.Policy.AllowedPaths = append(r.Policy.AllowedPaths, "config/")
+			r.Manifest = append(r.Manifest, ManifestEntry{Path: "config/database.env", RedactionPassed: true})
+		}, domain.VerdictReject, "denied_paths"},
+		{"env variant with suffix hits deny", func(r *Request) {
+			r.Policy.AllowedPaths = append(r.Policy.AllowedPaths, "services/")
+			r.Manifest = append(r.Manifest, ManifestEntry{Path: "services/api/prod.env.local", RedactionPassed: true})
+		}, domain.VerdictReject, "denied_paths"},
 		{"patience above ceiling", func(r *Request) { r.Policy.PatienceSeconds = 31 * 24 * 3600 }, domain.VerdictReject, "MaxPatienceBudget"},
 		{"wrong reducer id", func(r *Request) { r.Policy.ReducerID = "provider_context_boundary@2" }, domain.VerdictReject, "this reducer"},
 		{"zero patience", func(r *Request) { r.Policy.PatienceSeconds = 0 }, domain.VerdictReject, "patience"},

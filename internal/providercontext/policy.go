@@ -81,6 +81,8 @@ var BuiltinSecretDenyList = []string{
 	".meristem/",
 	".env",
 	".env.*",
+	"*.env",
+	"*.env.*",
 	"*.token",
 }
 
