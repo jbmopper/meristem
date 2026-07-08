@@ -200,6 +200,9 @@ fi
 cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
 export MERISTEM_TOKEN="\$(cat "\$primary_repo/.meristem/claude-code-gui.token")"
+# Claude (like Cursor) rejects dot-namespaced MCP tool names; advertise the
+# underscore aliases. Dispatch still accepts canonical names.
+export MERISTEM_MCP_TOOL_NAMES="\${MERISTEM_MCP_TOOL_NAMES:-cursor}"
 exec "$GO_BIN" run ./cmd/meristem mcp
 EOF
   chmod 700 "$GENERATED_DIR/claude-code-meristem-command.sh"
