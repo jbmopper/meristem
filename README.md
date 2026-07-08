@@ -268,6 +268,7 @@ Use `MERISTEM_TEST_DATABASE_URL` instead of `MERISTEM_DATABASE_URL` if you want 
 |-----------------------------|----------|---------|--------------------------------------------------------------------|
 | `MERISTEM_DATABASE_URL`      | yes      | —       | Postgres DSN.                                                      |
 | `MERISTEM_HTTP_ADDR`         | no       | `:8080` | Listen address for `meristem api`.                                  |
+| `MERISTEM_PUBLIC_BASE_URL`   | no       | request | External base URL used in provider OAuth metadata and `/mcp` challenges. |
 | `MERISTEM_TOKEN`             | varies   | —       | Bearer token used by `meristem tokens` (non-root ops) and `meristem mcp`. |
 | `MERISTEM_HOSTNAME`          | no       | —       | Hostname Caddy issues a Let's Encrypt cert for (production profile only). |
 | `MERISTEM_VERSION`           | no       | `dev`   | Version string baked into the docker image and `meristem version`.  |

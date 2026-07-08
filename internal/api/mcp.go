@@ -4,10 +4,38 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
+	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/mcp"
 )
+
+func (s *Server) mcpProtected(next http.Handler) http.Handler {
+	if s.authenticator == nil {
+		return serviceUnavailableHandler()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		if header == "" || !strings.HasPrefix(header, "Bearer ") {
+			s.writeMCPAuthError(w, r, "missing_bearer_token", "missing bearer token", "")
+			return
+		}
+		secret := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+		tok, err := s.authenticator.Authenticate(r.Context(), secret)
+		if err != nil {
+			code := "invalid_bearer_token"
+			message := "invalid bearer token"
+			if errors.Is(err, auth.ErrTokenRevoked) {
+				code = "token_revoked"
+				message = "token revoked"
+			}
+			s.writeMCPAuthError(w, r, code, message, "invalid_token")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(auth.WithToken(r.Context(), tok)))
+	})
+}
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.mcpServer == nil {
