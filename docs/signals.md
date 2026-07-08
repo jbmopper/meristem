@@ -127,6 +127,7 @@ Status codes:
 | `400` | Malformed request (missing required field, invalid JSON, work_spec fails schema validation). |
 | `401` | Missing or invalid token. |
 | `403` | Token lacks the required scope (no scopes are required for signals in v0; reserved for v1). |
+| `409` | `signal_item_budget_exhausted`: the source token is over its per-hour new-work_item admission budget (`safety.MaxSignalItemsPerTokenPerHour`). The signal row is still recorded for audit and the owner is escalated; only the work_item creation is refused. Signals that dedupe-link to an existing live item are never metered and never hit this. |
 | `422` | Idempotency-Key reused with a different request body (per `docs/spec.md` idempotency rules). |
 
 ## Event contract

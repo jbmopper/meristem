@@ -30,6 +30,7 @@ type Policy struct {
 	MaxChildrenPerItem             int                                    `json:"max_children_per_item"`
 	MaxConcurrentRunningPerToken   int                                    `json:"max_concurrent_running_items_per_token"`
 	MaxEventsPerItemPerHourByClass map[string]int                         `json:"max_events_per_item_per_hour_by_class"`
+	MaxSignalItemsPerTokenPerHour  int                                    `json:"max_signal_items_per_token_per_hour"`
 }
 
 const (
@@ -47,6 +48,18 @@ const (
 	defaultMaxLifecycleEventsPerItemPerHour       = 120
 	defaultMaxDecisionEventsPerItemPerHour        = 120
 	defaultMaxProgressEventsPerItemPerHour        = 240
+
+	// Signal admission budget: the maximum number of NEW work_items one
+	// source token may create through /v1/signals per rolling hour. A signal
+	// that dedupe-links onto an existing live work_item is not metered — only
+	// item creation is. Over-budget admission records the signal for audit,
+	// refuses the work_item creation, and escalates to the owner rather than
+	// silently dropping. These are the owner-suggested starting values, split
+	// out as named constants so the human-ack can retune them without hunting
+	// through the profile literals. steady is the spec-normal envelope;
+	// bring-up is tighter while backlog and reconcilers are still standing up.
+	defaultMaxSignalItemsPerTokenPerHour = 30
+	bringUpMaxSignalItemsPerTokenPerHour = 10
 
 	// MaxPatienceBudget is the ceiling on any patience budget in
 	// any profile. Bounded patience is the invariant (spec principle 3);
@@ -86,6 +99,7 @@ func DefaultPolicy() Policy {
 		MaxChildrenPerItem:             defaultMaxChildrenPerItem,
 		MaxConcurrentRunningPerToken:   defaultMaxConcurrentRunningPerToken,
 		MaxEventsPerItemPerHourByClass: defaultMaxEventsPerItemPerHourByClass(),
+		MaxSignalItemsPerTokenPerHour:  defaultMaxSignalItemsPerTokenPerHour,
 		PatienceBudgets: map[domain.WorkItemState]time.Duration{
 			domain.WorkItemCaptured:         24 * time.Hour,
 			domain.WorkItemTriaged:          72 * time.Hour,
@@ -113,6 +127,7 @@ func Profiles() map[string]Policy {
 			MaxChildrenPerItem:             defaultMaxChildrenPerItem,
 			MaxConcurrentRunningPerToken:   defaultMaxConcurrentRunningPerToken,
 			MaxEventsPerItemPerHourByClass: defaultMaxEventsPerItemPerHourByClass(),
+			MaxSignalItemsPerTokenPerHour:  bringUpMaxSignalItemsPerTokenPerHour,
 			PatienceBudgets: map[domain.WorkItemState]time.Duration{
 				domain.WorkItemCaptured:         7 * 24 * time.Hour,
 				domain.WorkItemTriaged:          14 * 24 * time.Hour,
@@ -178,6 +193,9 @@ func (p Policy) Validate() error {
 	if err := validateEventRateBudgetMap(p.MaxEventsPerItemPerHourByClass); err != nil {
 		return err
 	}
+	if p.MaxSignalItemsPerTokenPerHour <= 0 {
+		return fmt.Errorf("safety: max_signal_items_per_token_per_hour must be positive")
+	}
 	for _, state := range nonTerminalStates() {
 		dur, ok := p.PatienceBudgets[state]
 		if !ok {
@@ -232,6 +250,7 @@ func (p Policy) Fingerprint() (string, error) {
 		MaxChildrenPerItem             int              `json:"max_children_per_item"`
 		MaxConcurrentRunningPerToken   int              `json:"max_concurrent_running_items_per_token"`
 		MaxEventsPerItemPerHourByClass map[string]int   `json:"max_events_per_item_per_hour_by_class"`
+		MaxSignalItemsPerTokenPerHour  int              `json:"max_signal_items_per_token_per_hour"`
 		PatienceSeconds                map[string]int64 `json:"patience_seconds"`
 	}{
 		MaxRequestBodyBytes:            p.MaxRequestBodyBytes,
@@ -243,6 +262,7 @@ func (p Policy) Fingerprint() (string, error) {
 		MaxChildrenPerItem:             p.MaxChildrenPerItem,
 		MaxConcurrentRunningPerToken:   p.MaxConcurrentRunningPerToken,
 		MaxEventsPerItemPerHourByClass: copyStringIntMap(p.MaxEventsPerItemPerHourByClass),
+		MaxSignalItemsPerTokenPerHour:  p.MaxSignalItemsPerTokenPerHour,
 		PatienceSeconds:                make(map[string]int64, len(p.PatienceBudgets)),
 	}
 	for state, dur := range p.PatienceBudgets {
