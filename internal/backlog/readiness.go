@@ -121,10 +121,24 @@ func Summarize(items []domain.WorkItem, opts Options) Summary {
 		}
 	}
 
+	// Only a *partial* refresh backlog is drift: if the DB carries at least
+	// one R1-R9 item, every missing sibling is suspicious. A fresh seed with
+	// zero refresh items is simply not a refresh-tracking DB — the R1-R9
+	// refresh is a completed one-time initiative (parent c6ba707b), so a new
+	// bring-up raises no drift rather than nine false positives.
+	seenAnyRefresh := false
 	for i := 1; i <= 9; i++ {
-		key := fmt.Sprintf("R%d", i)
-		if !seenRefresh[key] {
-			summary.SpecSeedDrift = append(summary.SpecSeedDrift, "missing_refresh_item:"+key)
+		if seenRefresh[fmt.Sprintf("R%d", i)] {
+			seenAnyRefresh = true
+			break
+		}
+	}
+	if seenAnyRefresh {
+		for i := 1; i <= 9; i++ {
+			key := fmt.Sprintf("R%d", i)
+			if !seenRefresh[key] {
+				summary.SpecSeedDrift = append(summary.SpecSeedDrift, "missing_refresh_item:"+key)
+			}
 		}
 	}
 	sortItems(summary.Groups.V1Substrate)

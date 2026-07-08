@@ -2,6 +2,14 @@
 
 Signals are meristem's bridge from non-human structured input — review findings, repairable runtime failures, webhook reports — into the work-item graph. They are the canonical answer to "how does my CI / my linter / my critic agent / my external monitor get something into meristem without pretending to be a human."
 
+There is deliberately no separate "external work" concept (owner decision
+2026-07-07, superseding a short-lived intake doc): once something is entered,
+it is a normal work_item. "External" is a property of the *reporter*, fully
+captured by the submitting token's attribution plus the body's `source` block;
+work targeting another repo or service is a work_item whose
+`work_spec.target.repo` names it. Bare submissions are acceptable — the scribe
+pass authors convergence checks for items that arrive without them.
+
 This document is the contract. It is the source of truth for client implementers. If it conflicts with `docs/spec.md`, that file wins; if it conflicts with `AGENTS.md`, raise the drift.
 
 ## Why signals exist
@@ -263,6 +271,22 @@ Per `AGENTS.md` principle 5, attribution is taken from the request context, not 
 - A token used by an agent (say, jay's orchestrator) has `tokens.source = 'agent'`, so every event it appends is attributed to an agent. The work_spec the agent sends is treated as content even when the operator authorizes it.
 
 Per `AGENTS.md` principle 6 ("default deny on side effects"), signals do not auto-execute side effects. They produce a work_item that proceeds through the normal lifecycle and, when it reaches actions that touch the world, blocks on an approval. There is no path for a signal to cause an external write without operator approval, even if the work_spec describes one. The approval primitive ships in v1.
+
+## Dedupe key and project identity conventions
+
+The client owns the semantic key: stable across retries, portable across
+hosts, narrow enough not to collapse unrelated work, broad enough not to
+duplicate live items. Recommended forms:
+
+- `repo:<project>:issue:<tracker-id>`
+- `repo:<project>:review:<review-id>:finding:<n>`
+- `repo:<project>:repair:<failure-class>`
+- `service:<project>:incident:<external-id>`
+
+`work_spec.target.repo` is the stable project identity
+(`github.com/acme/payments`, `srv://prod/wayline`) — never a local absolute
+path; checkout-specific paths belong in `target.path` or
+`source.external_ref`.
 
 ## Worked example
 
