@@ -13,6 +13,7 @@
 //	meristem seed     - seed substrate backlogs into the running system
 //	meristem rebuild  - rebuild projections from events into a sandbox schema and diff
 //	meristem safety   - validate deterministic resource-safety controls
+//	meristem export-context - materialize an allow/deny repo slice (operator-side)
 //	meristem git      - run git(1) (passes through all arguments)
 //	meristem version  - print build info
 package main
@@ -73,6 +74,8 @@ func main() {
 		err = runRebuild(ctx, logger, args)
 	case "export":
 		err = runExport(ctx, logger, args)
+	case "export-context":
+		err = runExportContext(ctx, logger, args)
 	case "worker":
 		err = runWorker(ctx, logger, args)
 	case "spoke":
@@ -155,6 +158,7 @@ usage:
   meristem worker --once     run one deterministic reconciler tick
   meristem spoke             run the pull-only outbound poll loop (drains the hub command queue; reads MERISTEM_HUB_URL/NODE_ID/HUB_TOKEN/TOKEN)
   meristem feed [--watch]    human-readable terminal view of the activity log
+  meristem export-context    deterministically materialize an allow/deny repo slice (operator-side; no API calls)
   meristem safety check      validate deterministic resource-safety controls
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
   meristem version           print version
