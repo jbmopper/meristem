@@ -106,7 +106,14 @@ func DefaultPolicy() Policy {
 			domain.WorkItemPlanned:          72 * time.Hour,
 			domain.WorkItemAwaitingApproval: 48 * time.Hour,
 			domain.WorkItemRunning:          24 * time.Hour,
-			domain.WorkItemBlocked:          24 * time.Hour,
+			// Blocked items are the owner's review court: they sit until a
+			// human acts, so a tight timer only re-surfaces them as noise. A
+			// 7d budget keeps bounded patience (spec principle 3) while giving
+			// the owner a working week before a blocked stay re-escalates. One
+			// escalation per blocked epoch is already guaranteed by the
+			// deterministic escalation id and the human_review_status=blocked
+			// skip (see internal/worker: TestScanOnceEscalationChildrenDoNotBreed).
+			domain.WorkItemBlocked: 7 * 24 * time.Hour,
 		},
 	}
 }
