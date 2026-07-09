@@ -13,6 +13,7 @@ import (
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/jobqueue"
 	"github.com/jbmopper/meristem/internal/nodes"
+	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/projections"
@@ -41,6 +42,7 @@ func NewProjectionRegistry() *projections.Registry {
 	projectiondefs.RegisterProjectors(reg)
 	nodes.RegisterProjectors(reg)
 	crossnode.RegisterProjectors(reg)
+	oauth.RegisterProjectors(reg)
 	return reg
 }
 
