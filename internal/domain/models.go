@@ -110,6 +110,14 @@ const (
 	// docs/network-layer-spec.md §2 "Commands to nodes without inbound
 	// reachability" (the target "acknowledges by POSTing the outcome back").
 	EventCommandAcked = "command.acked"
+	// EventOAuthClientRegistered records a provider OAuth client registering
+	// dynamically (RFC 7591) with its redirect_uri allowlist and public-client
+	// auth method. The subject is the client aggregate (SubjectOAuthClient); the
+	// projection is the `oauth_clients` table. No client secret is issued or
+	// stored — provider clients authenticate with PKCE. Enables the
+	// provider-facing /mcp OAuth authorization-code flow (work items 861cc404,
+	// 6cc6779f, 8c30b348).
+	EventOAuthClientRegistered = "oauth_client.registered"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -161,6 +169,7 @@ var AllEventKinds = []string{
 	EventNodeRouteUpdated,
 	EventCommandQueued,
 	EventCommandAcked,
+	EventOAuthClientRegistered,
 }
 
 const (
@@ -192,6 +201,12 @@ const (
 	// internal/nodes.NodeSubjectID) so every event about one node shares a
 	// subject while the projection keys on the DNS-safe node_id text.
 	SubjectNode = "node"
+	// SubjectOAuthClient is the subject kind for a dynamically-registered
+	// provider OAuth client (RFC 7591). The subject_id is a deterministic UUID
+	// derived from the client_id (see internal/oauth.ClientSubjectID) so every
+	// event about one client shares a subject while the projection keys on the
+	// client_id text.
+	SubjectOAuthClient = "oauth_client"
 )
 
 // Verdict is the disposition produced by a deterministic convergence

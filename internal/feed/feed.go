@@ -89,6 +89,10 @@ var ExcludedKinds = []string{
 	// A command ack is the matching drain-side plumbing: it records the
 	// transport outcome onto the queue row, not human activity.
 	domain.EventCommandAcked,
+	// Provider OAuth client registration is auth-surface audit (RFC 7591
+	// dynamic registration), not the human activity narrative; it belongs to
+	// the log, not /v1/feed.
+	domain.EventOAuthClientRegistered,
 }
 
 type Item struct {

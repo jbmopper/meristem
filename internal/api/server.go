@@ -34,6 +34,7 @@ import (
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
+	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
@@ -94,6 +95,7 @@ type Server struct {
 	projections           *projectiondefs.Service
 	registry              *registry.Service
 	crossnode             *crossnode.QueueService
+	oauthClients          *oauth.RegistrationService
 	policy                safety.Policy
 }
 
@@ -144,6 +146,7 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		s.projections = projectiondefs.NewService(pool, s.writer)
 		s.registry = registry.NewService(pool, s.writer)
 		s.crossnode = crossnode.NewQueueService(pool, s.writer)
+		s.oauthClients = oauth.NewRegistrationService(pool, s.writer)
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
@@ -178,6 +181,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /readyz", s.handleReadiness)
 	s.mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleOAuthProtectedResourceMetadata)
 	s.mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthAuthorizationServerMetadata)
+	s.mux.HandleFunc("POST /oauth/register", s.handleOAuthClientRegistration)
 	s.mux.HandleFunc("GET /oauth/authorize", s.handleOAuthFlowUnavailable)
 	s.mux.HandleFunc("POST /oauth/token", s.handleOAuthFlowUnavailable)
 	s.mux.Handle("GET /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
