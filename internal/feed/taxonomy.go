@@ -134,7 +134,9 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventNodeRouteUpdated,
 		domain.EventCommandQueued,
 		domain.EventCommandAcked,
-		domain.EventOAuthClientRegistered:
+		domain.EventOAuthClientRegistered,
+		domain.EventOAuthAuthorizationCodeIssued,
+		domain.EventOAuthAuthorizationCodeRedeemed:
 		return KindClassAdmin, false, true
 	default:
 		return "", false, false
