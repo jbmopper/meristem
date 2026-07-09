@@ -118,6 +118,18 @@ const (
 	// provider-facing /mcp OAuth authorization-code flow (work items 861cc404,
 	// 6cc6779f, 8c30b348).
 	EventOAuthClientRegistered = "oauth_client.registered"
+	// EventOAuthAuthorizationCodeIssued records a provider authorization code
+	// minted by the /oauth/authorize consent step: the PKCE challenge, the
+	// exact redirect_uri, the /mcp audience, and the meristem actor the eventual
+	// access token attributes to. Only the code's hash is in the payload, never
+	// the raw code. Subject is the code aggregate (SubjectOAuthAuthorizationCode);
+	// the projection is the oauth_authorization_codes table (work item 6cc6779f).
+	EventOAuthAuthorizationCodeIssued = "oauth_authorization_code.issued"
+	// EventOAuthAuthorizationCodeRedeemed records the one-time redemption of an
+	// authorization code at the /oauth/token endpoint. The deterministic event
+	// id plus the redeemed_at projection guard make redemption single-use and
+	// replay-safe (work item 6cc6779f).
+	EventOAuthAuthorizationCodeRedeemed = "oauth_authorization_code.redeemed"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -170,6 +182,8 @@ var AllEventKinds = []string{
 	EventCommandQueued,
 	EventCommandAcked,
 	EventOAuthClientRegistered,
+	EventOAuthAuthorizationCodeIssued,
+	EventOAuthAuthorizationCodeRedeemed,
 }
 
 const (
@@ -207,6 +221,12 @@ const (
 	// event about one client shares a subject while the projection keys on the
 	// client_id text.
 	SubjectOAuthClient = "oauth_client"
+	// SubjectOAuthAuthorizationCode is the subject kind for an issued OAuth
+	// authorization code. The subject_id is a deterministic UUID derived from
+	// the code hash (see internal/oauth.CodeSubjectID) so the issue and redeem
+	// events about one code share a subject while the projection keys on the
+	// non-secret code_id text.
+	SubjectOAuthAuthorizationCode = "oauth_authorization_code"
 )
 
 // Verdict is the disposition produced by a deterministic convergence
