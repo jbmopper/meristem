@@ -1276,6 +1276,86 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 	}
 }
 
+// TestScanOnceBlockedOwnerCourtEscalatesOnce pins the invariant behind work
+// item d957bedd: an item parked directly in the owner's review court
+// (lifecycle state=blocked, human_review_status=waved_through) that overshoots
+// its blocked-state patience budget spawns exactly one human-attention child,
+// no matter how many scans observe the same blocked epoch. The first breach
+// escalates and flips human_review_status to blocked; every later scan of the
+// same epoch takes the awaiting-human skip instead of breeding another child.
+func TestScanOnceBlockedOwnerCourtEscalatesOnce(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-blocked-owner-court")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "owner review court item",
+		State:                      domain.WorkItemBlocked,
+		SuggestedConvergenceChecks: []string{"human_response_recorded"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+
+	// Park the blocked epoch well past a tight budget so every scan below
+	// observes a breach of the same state_entered_at.
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-48*time.Hour))
+	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemBlocked: time.Hour,
+	}}
+
+	firstWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("New first: %v", err)
+	}
+	first, err := firstWorker.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce first: %v", err)
+	}
+	if first.PatienceEscalationsRequested != 1 {
+		t.Fatalf("first patience escalations = %d, want 1", first.PatienceEscalationsRequested)
+	}
+	if got := countHumanAttentionItems(t, ctx, pool); got != 1 {
+		t.Fatalf("human attention items after first = %d, want 1", got)
+	}
+
+	// A second scan of the same blocked epoch must not breed another child:
+	// the escalation already flipped human_review_status to blocked, so the
+	// breach now takes the awaiting-human skip.
+	secondNow := now.Add(24 * time.Hour)
+	secondWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return secondNow })
+	if err != nil {
+		t.Fatalf("New second: %v", err)
+	}
+	second, err := secondWorker.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce second: %v", err)
+	}
+	if second.PatienceEscalationsRequested != 0 {
+		t.Fatalf("second patience escalations = %d, want 0", second.PatienceEscalationsRequested)
+	}
+	if second.PatienceEscalationsSkippedAwaitingHuman != 1 {
+		t.Fatalf("second skipped awaiting human = %d, want 1", second.PatienceEscalationsSkippedAwaitingHuman)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
+		t.Fatalf("escalation requests after second scan = %d, want 1", got)
+	}
+	if got := countHumanAttentionItems(t, ctx, pool); got != 1 {
+		t.Fatalf("human attention items after second = %d, want 1", got)
+	}
+}
+
 func TestScanOnceConvergenceAcceptsAndPersistsVerdict(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
