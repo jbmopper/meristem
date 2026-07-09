@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/agentbudget"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/providercontext"
 	"github.com/jbmopper/meristem/internal/providerexport"
@@ -41,6 +42,16 @@ func runExportContext(ctx context.Context, logger *slog.Logger, args []string) e
 		workItem = fs.String("work-item", "", "anchor work_item UUID (required)")
 		allow    stringSlice
 		deny     stringSlice
+		// Agent execution budget ceilings (work item 3d5526e4). Each defaults
+		// to 0, which disables that dimension; a run with no budget flag prints
+		// no budget line and behaves exactly as before.
+		maxContextFiles = fs.Int("max-context-files", 0, "budget: max files in the exported context manifest (0 = unset)")
+		maxPromptWords  = fs.Int("max-prompt-words", 0, "budget: max assembled prompt/context words (0 = unset)")
+		maxResponse     = fs.Int("max-response-words", 0, "budget: max agent response words, best-effort (0 = unset)")
+		maxTurns        = fs.Int("max-turns", 0, "budget: max agent turns (0 = unset)")
+		maxRuntime      = fs.Int("max-runtime-seconds", 0, "budget: max wall-clock runtime seconds (0 = unset)")
+		maxToolCalls    = fs.Int("max-tool-calls", 0, "budget: max MCP tool calls (0 = unset)")
+		maxArtifacts    = fs.Int("max-artifacts", 0, "budget: max produced artifacts (0 = unset)")
 	)
 	fs.Var(&allow, "allow", "allowed path prefix or glob (repeatable)")
 	fs.Var(&deny, "deny", "denied path prefix or glob (repeatable); the builtin secret deny list is always appended")
@@ -64,6 +75,20 @@ func runExportContext(ctx context.Context, logger *slog.Logger, args []string) e
 	if err != nil {
 		exportContextUsage(os.Stderr)
 		return fmt.Errorf("export-context: --work-item must be a UUID: %w", err)
+	}
+
+	budget := agentbudget.Budget{
+		MaxContextFiles:   *maxContextFiles,
+		MaxPromptWords:    *maxPromptWords,
+		MaxResponseWords:  *maxResponse,
+		MaxTurns:          *maxTurns,
+		MaxRuntimeSeconds: *maxRuntime,
+		MaxToolCalls:      *maxToolCalls,
+		MaxArtifacts:      *maxArtifacts,
+	}
+	if err := budget.Valid(); err != nil {
+		exportContextUsage(os.Stderr)
+		return fmt.Errorf("export-context: %w", err)
 	}
 
 	// The builtin secret deny list is always appended so the policy is a deny
@@ -93,7 +118,7 @@ func runExportContext(ctx context.Context, logger *slog.Logger, args []string) e
 		return err
 	}
 
-	printExportSummary(os.Stdout, result, *out)
+	printExportSummary(os.Stdout, result, *out, budget)
 	logger.Info("context export complete",
 		slog.String("source_commit", result.Manifest.SourceCommit),
 		slog.Int("included", result.Manifest.PathCount),
@@ -103,7 +128,7 @@ func runExportContext(ctx context.Context, logger *slog.Logger, args []string) e
 	return nil
 }
 
-func printExportSummary(w io.Writer, result providerexport.Result, outDir string) {
+func printExportSummary(w io.Writer, result providerexport.Result, outDir string, budget agentbudget.Budget) {
 	m := result.Manifest
 	fmt.Fprintf(w, "source ref:     %s\n", m.SourceRef)
 	fmt.Fprintf(w, "source commit:  %s\n", m.SourceCommit)
@@ -112,6 +137,15 @@ func printExportSummary(w io.Writer, result providerexport.Result, outDir string
 	fmt.Fprintf(w, "paths included: %d\n", m.PathCount)
 	fmt.Fprintf(w, "paths omitted:  %d\n", len(m.Omitted))
 	fmt.Fprintf(w, "bundle digest:  %s\n", m.BundleDigest)
+	// A worker handoff visibly states its budget before launch (work item
+	// 3d5526e4 convergence criterion). Only printed when a ceiling is set, so
+	// an unbudgeted export's output is unchanged.
+	if budget.Enforced() {
+		fmt.Fprintf(w, "budget hash:    %s\n", agentbudget.BudgetHash(budget))
+		fmt.Fprintf(w, "budget:         context_files<=%d prompt_words<=%d response_words<=%d turns<=%d runtime_s<=%d tool_calls<=%d artifacts<=%d\n",
+			budget.MaxContextFiles, budget.MaxPromptWords, budget.MaxResponseWords,
+			budget.MaxTurns, budget.MaxRuntimeSeconds, budget.MaxToolCalls, budget.MaxArtifacts)
+	}
 	if outDir == "" {
 		fmt.Fprintf(w, "workspace:      (dry run — nothing written)\n")
 		return
@@ -138,5 +172,10 @@ git commit objects only, never the working tree. Makes no meristem API calls.
   --deny       denied path prefix or glob (repeatable); the builtin secret
                deny list is always appended
   --out        workspace destination; omit for a dry run (plan + manifest only)
+
+Agent execution budget (work item 3d5526e4; each 0/unset disables that
+dimension and is omitted from the summary):
+  --max-context-files, --max-prompt-words, --max-response-words,
+  --max-turns, --max-runtime-seconds, --max-tool-calls, --max-artifacts
 `)
 }

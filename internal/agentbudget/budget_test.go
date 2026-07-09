@@ -54,6 +54,18 @@ func TestBudgetValidRejectsNegative(t *testing.T) {
 	}
 }
 
+func TestEnforced(t *testing.T) {
+	if (Budget{}).Enforced() {
+		t.Fatal("all-zero budget should not be enforced")
+	}
+	if !(Budget{MaxToolCalls: 1}).Enforced() {
+		t.Fatal("a single positive ceiling should be enforced")
+	}
+	if !sampleBudget().Enforced() {
+		t.Fatal("populated budget should be enforced")
+	}
+}
+
 func TestReduceZeroBudgetAcceptsAnything(t *testing.T) {
 	d := Reduce(Budget{}, Observed{ToolCalls: 1_000_000, RuntimeSeconds: 999999})
 	if d.Disposition != Accept {

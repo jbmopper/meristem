@@ -71,6 +71,19 @@ func (b Budget) Valid() error {
 	return nil
 }
 
+// Enforced reports whether any dimension has a positive ceiling. A budget with
+// every field zero enforces nothing, so callers use this to decide whether to
+// surface a budget at all (an unbudgeted handoff states no budget line).
+func (b Budget) Enforced() bool {
+	return b.MaxContextFiles > 0 ||
+		b.MaxPromptWords > 0 ||
+		b.MaxResponseWords > 0 ||
+		b.MaxTurns > 0 ||
+		b.MaxRuntimeSeconds > 0 ||
+		b.MaxToolCalls > 0 ||
+		b.MaxArtifacts > 0
+}
+
 // BudgetHash is the canonical budget identity: sha256 over the struct marshal
 // (stable key order, no maps), mirroring providerexport.PolicyHash. The same
 // budget always hashes the same, so re-canonicalizing an unchanged budget
