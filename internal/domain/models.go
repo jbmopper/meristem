@@ -110,6 +110,14 @@ const (
 	// docs/network-layer-spec.md §2 "Commands to nodes without inbound
 	// reachability" (the target "acknowledges by POSTing the outcome back").
 	EventCommandAcked = "command.acked"
+	// EventAgentBudgetBreached records that an observed agent/provider run
+	// exceeded at least one enforced dimension of its execution budget (work
+	// item 3d5526e4). The subject is the owning work_item; the payload carries
+	// the budget hash and the sorted breached dimensions. The deterministic id
+	// keys on (work_item, budget_hash, breach set) via the event discriminator
+	// so re-observing the same breach dedupes onto one row and never mutates
+	// the original breach event.
+	EventAgentBudgetBreached = "agent_budget.breached"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -161,6 +169,7 @@ var AllEventKinds = []string{
 	EventNodeRouteUpdated,
 	EventCommandQueued,
 	EventCommandAcked,
+	EventAgentBudgetBreached,
 }
 
 const (

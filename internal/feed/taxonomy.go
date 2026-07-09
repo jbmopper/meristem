@@ -101,6 +101,7 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventHTTPConnectorActionRequested,
 		domain.EventHTTPConnectorActionApproved,
 		domain.EventPatienceBreached,
+		domain.EventAgentBudgetBreached,
 		domain.EventDispatchRequested:
 		return KindClassLifecycle, false, true
 	case domain.EventWorkItemEventAppended:

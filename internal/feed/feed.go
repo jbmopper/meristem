@@ -55,6 +55,7 @@ var IncludedKinds = []string{
 	domain.EventHTTPConnectorActionApproved,
 	domain.EventHTTPConnectorActionSent,
 	domain.EventPatienceBreached,
+	domain.EventAgentBudgetBreached,
 	domain.EventConvergenceVerdictRecorded,
 	domain.EventConvergenceChecksProposed,
 	domain.EventDispatchRequested,
