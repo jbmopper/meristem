@@ -80,6 +80,8 @@ func (p HTTPToolProfile) Name() string { return p.name }
 
 func validateProviderTrackerCall(tool string, raw json.RawMessage) error {
 	switch tool {
+	case "feed.read", "work_items.list", "work_items.get":
+		return nil
 	case "work_items.create", "work_items.spawn_child":
 		var args struct {
 			HumanReviewStatus string `json:"human_review_status"`
