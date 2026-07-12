@@ -143,8 +143,15 @@ func TestProviderOAuthLifecycle(t *testing.T) {
 	if _, err := tokens.Refresh(ctx, pair.RefreshToken, client.ClientID); !errors.Is(err, oauth.ErrRefreshReuse) {
 		t.Fatalf("reuse=%v", err)
 	}
-	if _, err := tokens.AuthenticateAccess(ctx, rotated.AccessToken, input.Resource); !errors.Is(err, oauth.ErrInvalidAccessToken) {
-		t.Fatalf("grant survived reuse: %v", err)
+	if _, err := tokens.AuthenticateAccess(ctx, rotated.AccessToken, input.Resource); err != nil {
+		t.Fatalf("healthy successor grant was revoked by lost-response retry: %v", err)
+	}
+	var reuseEvents, revokeEvents int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthRefreshReuseDetected).Scan(&reuseEvents); err != nil || reuseEvents != 1 {
+		t.Fatalf("reuse events=%d err=%v", reuseEvents, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthGrantRevoked).Scan(&revokeEvents); err != nil || revokeEvents != 0 {
+		t.Fatalf("reuse unexpectedly revoked grant: events=%d err=%v", revokeEvents, err)
 	}
 	var unattributed int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind LIKE 'oauth_%' AND actor_token_id IS NULL`).Scan(&unattributed); err != nil || unattributed != 0 {

@@ -128,3 +128,10 @@ func VerifyPKCE(codeVerifier, storedChallenge string) error {
 	}
 	return nil
 }
+
+func verifyStoredS256(codeVerifier, storedChallenge, storedMethod string) error {
+	if err := ValidateCodeChallenge(storedChallenge, storedMethod); err != nil {
+		return fmt.Errorf("%w: stored PKCE binding is invalid", ErrInvalidGrant)
+	}
+	return VerifyPKCE(codeVerifier, storedChallenge)
+}

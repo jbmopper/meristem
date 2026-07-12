@@ -193,7 +193,7 @@ func (s *AuthCodeService) Redeem(ctx context.Context, in RedeemInput) (RedeemRes
 	if redeemedAt != nil {
 		return RedeemResult{}, fmt.Errorf("%w: authorization code already redeemed", ErrInvalidGrant)
 	}
-	if s.now().UTC().After(expiresAt) {
+	if !s.now().UTC().Before(expiresAt) {
 		return RedeemResult{}, fmt.Errorf("%w: authorization code expired", ErrInvalidGrant)
 	}
 	if in.ClientID != "" && in.ClientID != clientID {
@@ -202,7 +202,7 @@ func (s *AuthCodeService) Redeem(ctx context.Context, in RedeemInput) (RedeemRes
 	if in.RedirectURI != redirectURI {
 		return RedeemResult{}, fmt.Errorf("%w: redirect_uri does not match the code", ErrInvalidGrant)
 	}
-	if err := VerifyPKCE(in.CodeVerifier, challenge); err != nil {
+	if err := verifyStoredS256(in.CodeVerifier, challenge, method); err != nil {
 		return RedeemResult{}, err
 	}
 
