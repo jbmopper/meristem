@@ -117,7 +117,9 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	if err != nil {
 		return AuthorizationRequest{}, err
 	}
-	if existing, found := s.getExistingRequest(ctx, reqID); found {
+	if existing, found, err := s.getExistingRequest(ctx, reqID); err != nil {
+		return AuthorizationRequest{}, err
+	} else if found {
 		return existing, nil
 	}
 	expires := item.CreatedAt.UTC().Add(AuthorizationRequestTTL).Truncate(time.Microsecond)
@@ -141,11 +143,17 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	return AuthorizationRequest{ID: reqID, WorkItemID: item.ID, ApprovalID: approvalID, ClientID: client.ClientID, RedirectURI: in.RedirectURI, State: in.State, Scope: scope, Resource: in.Resource, ExpiresAt: expires}, nil
 }
 
-func (s *AuthorizationService) getExistingRequest(ctx context.Context, id uuid.UUID) (AuthorizationRequest, bool) {
+func (s *AuthorizationService) getExistingRequest(ctx context.Context, id uuid.UUID) (AuthorizationRequest, bool, error) {
 	var out AuthorizationRequest
 	out.ID = id
 	err := s.pool.QueryRow(ctx, `SELECT work_item_id,approval_id,client_id,redirect_uri,state,scope,resource,expires_at FROM oauth_authorization_requests WHERE id=$1`, id).Scan(&out.WorkItemID, &out.ApprovalID, &out.ClientID, &out.RedirectURI, &out.State, &out.Scope, &out.Resource, &out.ExpiresAt)
-	return out, err == nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AuthorizationRequest{}, false, nil
+	}
+	if err != nil {
+		return AuthorizationRequest{}, false, err
+	}
+	return out, true, nil
 }
 
 func (s *AuthorizationService) ensureBindingWorkItem(ctx context.Context, client Client, systemActor domain.Token) (uuid.UUID, error) {
