@@ -116,7 +116,7 @@ func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
 	if strings.Contains(body, "work_items.create") || strings.Contains(body, "work_items.transition") || strings.Contains(body, "convergence.propose_checks") {
 		t.Fatalf("HTTP /mcp leaked write tools before idempotency contract: %s", body)
 	}
-	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "backlog.readiness") || !strings.Contains(body, "work_items.get") {
+	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "work_items.list") || !strings.Contains(body, "work_items.get") {
 		t.Fatalf("HTTP /mcp omitted expected read tools: %s", body)
 	}
 }
@@ -133,7 +133,7 @@ func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
 	}{
 		{name: "sealed read", actor: providerActor(t, access.ProviderOwnerTrackerReadV1), wantStatus: http.StatusOK},
 		{name: "sealed write", actor: providerActor(t, access.ProviderOwnerTrackerWriteV1), wantStatus: http.StatusOK, wantWrite: true},
-		{name: "missing profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusForbidden},
+		{name: "ordinary scoped static bearer", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeFeedRead, access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusOK},
 		{name: "unknown profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{"provider.profile:future_profile", access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -308,7 +308,7 @@ func TestMCPRouteInvalidBearerAdvertisesOAuthInvalidToken(t *testing.T) {
 func TestMCPRouteStaticBearerStillDispatches(t *testing.T) {
 	authenticator := &mcpRouteAuth{
 		wantSecret: "mrs_good",
-		tok:        providerActor(t, access.ProviderOwnerTrackerReadV1),
+		tok:        domain.Token{ID: uuid.New(), Source: domain.SourceAgent},
 	}
 	s := newMCPRouteTestServer(authenticator)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)

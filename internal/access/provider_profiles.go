@@ -99,6 +99,19 @@ func ProviderAuthorityProfileFromScopes(scopes []string) (ProviderAuthorityProfi
 	return found, nil
 }
 
+// HasProviderAuthorityMarker distinguishes an explicitly provider-profiled
+// credential from ordinary static/PAT credentials. A malformed marked token
+// must fail closed instead of falling back to the legacy safe-read HTTP MCP
+// surface.
+func HasProviderAuthorityMarker(scopes []string) bool {
+	for _, scope := range scopes {
+		if strings.HasPrefix(strings.TrimSpace(scope), providerProfileScopePrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func sameScopeSet(actual, expected []string) bool {
 	if len(actual) != len(expected) {
 		return false

@@ -104,7 +104,13 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request, actor dom
 func providerHTTPProfile(actor domain.Token) (*mcp.HTTPToolProfile, error) {
 	profile, err := access.ProviderAuthorityProfileFromScopes(actor.Scopes)
 	if err != nil {
-		return nil, err
+		if access.HasProviderAuthorityMarker(actor.Scopes) {
+			return nil, err
+		}
+		// Static internal/debug bearers predate provider profiles. Preserve
+		// their provider-safe read-only HTTP surface; ordinary access policy
+		// still filters tools and objects from the token's actual scopes.
+		return mcp.ProviderSafeReadHTTPProfile(), nil
 	}
 	switch profile {
 	case access.ProviderOwnerTrackerReadV1, access.ProviderDelegatedTreeReadV1:
