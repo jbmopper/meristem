@@ -23,9 +23,9 @@ Both are kept for historical context only and are no longer authoritative.
 
 - **Direction → convergence.** The owner gives instructions. The system pushes them to a terminal state — `done`, `failed`, or `canceled` — without further intervention beyond approvals. No work item sits indefinitely; if it cannot progress, it escalates, retries, or terminates.
 - **Idempotency everywhere.** Every layer — HTTP requests, jobs, connector actions, events, projections, approvals, inbox ingestion — is safely retryable. Re-sending the same instruction produces the same result, not duplicate work. This is the single property that makes "run itself out" possible.
-- **One owner, many client tokens.** The owner is the only human authority. Each client (iPhone, web, CLI, each MCP-connected agent) holds its own scoped token; the root token only mints and revokes others. There are no public endpoints.
-- **Postgres is the system.** All durable state, all queues, all audit lives in Postgres. Object storage is a reference target, not a second source of truth.
-- **One log.** All state changes append to `events` with full actor attribution. There is no separate audit ledger.
+- **One owner, many client tokens.** The owner is the only human authority. Each client (iPhone, web, CLI, each MCP-connected agent) holds its own scoped token; the root token only mints and revokes others. An endpoint may be internet-reachable only as an explicitly configured ingress and still requires meristem authentication; there are no anonymous business endpoints.
+- **One backing store per node; today it is Postgres.** All durable state, queues, and audit owned by a node live in that node's Postgres. Object storage is a reference target, not a second source of truth. Nodes never share a database or expose Postgres across a node boundary.
+- **One log per node.** All state changes owned by a node append to that node's `events` log with full actor attribution. There is no separate audit ledger, global event sequence, or multi-writer object history.
 - **Editor-agnostic surfaces.** REST is canonical. CLI, MCP, and the web UI are full-featured translation layers; every REST operation has an MCP tool.
 - **Portable substrate.** Go binary, Postgres, an object-storage interface. No managed cloud primitives in the core. Migration between clouds is a redeploy, not a feature gap.
 - **Default deny on side effects.** Write actions wait for owner approval. The system never auto-approves. Approvals are a first-class part of the convergence loop, not a stop on it.
@@ -33,7 +33,8 @@ Both are kept for historical context only and are no longer authoritative.
 
 ## Architecture
 
-A Go modular monolith with two runtime modes sharing one codebase and one database:
+A Go modular monolith with two runtime modes sharing one codebase and, on each
+node, one backing store:
 
 - `meristem api`: HTTP, webhooks, auth, inbox ingestion, reads, command submission.
 - `meristem worker`: background jobs, connector execution, retries, polling, summaries.
@@ -48,6 +49,57 @@ A Go modular monolith with two runtime modes sharing one codebase and one databa
 - `projections`: query models for inbox, feed, work-item detail, dashboards.
 
 Artifacts and audit are not components. They are tables plus thin interfaces.
+
+### Fleet and Network Contract
+
+Meristem may run as a one-operator fleet of a few nodes. A node is one meristem
+deployment and its private backing store. Each node owns one append-only event
+log; `events.seq` is meaningful only as a cursor within that log. Nodes do not
+replicate Postgres, merge event sequences, or elect a database leader.
+
+Every durable domain object has exactly one **home node**, initially the node
+that created it. Only the home node appends events for that object. Remote
+reads are authenticated REST GETs to the home node; remote mutations are
+authenticated, idempotency-keyed REST POSTs to the home node. Transport does
+not create a second business-logic path. Qualified references identify the
+home as `<node_id>:<uuid>` (canonical URI
+`mrs://<node_id>/work-items/<uuid>`); an unqualified UUID is local to the node
+interpreting it.
+
+One owner-selected **registry home** is authoritative for node ids and routing
+intent. This is a narrow control-plane authority, not the home of fleet data.
+Registry changes are events on that node. Other nodes pull authenticated
+snapshots, validate them, append the observed snapshot to their own log, and
+derive their local routing projection from that event. There is no gossip,
+ambient service discovery, or liveness consensus.
+
+The minimum cross-node transport has two paths:
+
+1. A direct HTTPS REST request to an explicitly approved origin for a node.
+2. A durable command queue on an explicitly approved reachable queue host when
+   the target accepts no inbound connection. The target polls outbound,
+   executes the allowlisted REST operation locally with the original
+   idempotency identity, and acknowledges a terminal outcome.
+
+Application-level forwarding through a relay is not part of the minimum
+network contract. It may be added only with a separate design covering target
+binding, credential selection, refusal behavior, loop prevention, and audit.
+Both direct attempts and queued commands have finite retry/expiry budgets and
+deterministic escalation; an unreachable node cannot leave a non-terminal
+command waiting forever.
+
+The provider-facing MCP ingress is a separate gateway concern. It may expose
+the existing API's `/mcp` route through public TLS, with mandatory standard
+provider authentication and per-client attribution. It is neither the fleet's
+event-log authority nor required for peer networking. REST remains canonical,
+and HTTP MCP writes remain disabled until their own mutation and idempotency
+contract is complete.
+
+`docs/network-layer-spec.md` gives the detailed registry, origin-validation,
+queue, patience, staging, and acceptance contract. In particular, Stage 1 is
+peer REST plus queue fallback; provider MCP ingress is Stage 2. Remote-reference
+caching, object re-homing implementation, application relay, and HTTP MCP
+writes are explicit follow-up work, not implicit parts of Stage 1.
 
 ### Deterministic and Probabilistic Subsystems
 
