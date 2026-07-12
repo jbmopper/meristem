@@ -30,11 +30,13 @@ func OAuthScopeForAuthorityProfile(profile access.ProviderAuthorityProfile) (str
 }
 
 // normalizeRegistrationScope accepts only the two exact contracts that a
-// later sealed profile can realize. An omitted DCR scope defaults to read.
+// later sealed profile can realize. An omitted DCR scope advertises the full
+// supported ceiling; registration grants no authority, and binding plus the
+// owner-approved authorization request still select one exact sealed profile.
 func normalizeRegistrationScope(raw string) (string, error) {
 	fields := strings.Fields(raw)
 	if len(fields) == 0 {
-		return ScopeMCPRead, nil
+		return ScopeMCPRead + " " + ScopeMCPTrackerWrite, nil
 	}
 	set, ok := exactScopeSet(fields)
 	if ok && len(set) == 1 && set[ScopeMCPRead] {
@@ -44,6 +46,30 @@ func normalizeRegistrationScope(raw string) (string, error) {
 		return ScopeMCPRead + " " + ScopeMCPTrackerWrite, nil
 	}
 	return "", fmt.Errorf("supported scope contracts are %q or %q", ScopeMCPRead, ScopeMCPRead+" "+ScopeMCPTrackerWrite)
+}
+
+// registrationScopeAllows reports whether a client's registered scope ceiling
+// permits an exact profile scope. Empty persisted values retain the historical
+// DCR default of read-only so old events remain usable and rebuild-safe.
+func registrationScopeAllows(registered, expected string) bool {
+	registered = strings.TrimSpace(registered)
+	if registered == "" {
+		registered = ScopeMCPRead
+	}
+	canonical, err := normalizeRegistrationScope(registered)
+	if err != nil {
+		return false
+	}
+	allowed, ok := exactScopeSet(strings.Fields(canonical))
+	if !ok {
+		return false
+	}
+	for _, scope := range strings.Fields(expected) {
+		if !allowed[scope] {
+			return false
+		}
+	}
+	return expected == ScopeMCPRead || expected == ScopeMCPRead+" "+ScopeMCPTrackerWrite
 }
 
 func normalizeScopeForProfile(raw string, profile access.ProviderAuthorityProfile) (string, error) {

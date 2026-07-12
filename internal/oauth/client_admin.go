@@ -77,8 +77,8 @@ func (s *ClientAdminService) BindActor(ctx context.Context, clientID string, act
 	if revokedAt != nil {
 		return fmt.Errorf("%w: client is revoked", ErrOAuthClientConflict)
 	}
-	if clientScope != expectedOAuthScope {
-		return fmt.Errorf("%w: registered OAuth scope %q does not match profile scope %q", ErrInvalidClientAdminInput, clientScope, expectedOAuthScope)
+	if !registrationScopeAllows(clientScope, expectedOAuthScope) {
+		return fmt.Errorf("%w: registered OAuth scope %q does not allow profile scope %q", ErrInvalidClientAdminInput, clientScope, expectedOAuthScope)
 	}
 	if currentActor != nil {
 		if *currentActor == actorID && currentProfile == authorityProfile {

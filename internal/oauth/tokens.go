@@ -104,7 +104,7 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 		return TokenPair{}, fmt.Errorf("%w: authority profile no longer matches actor scopes", ErrInvalidGrant)
 	}
 	expectedScope, err := OAuthScopeForAuthorityProfile(sealedProfile)
-	if err != nil || scope != expectedScope || client.Scope != expectedScope {
+	if err != nil || scope != expectedScope || !registrationScopeAllows(client.Scope, expectedScope) {
 		return TokenPair{}, fmt.Errorf("%w: OAuth scope no longer matches authority profile", ErrInvalidGrant)
 	}
 	access, accessID, accessHash, err := tokenSecret("mcpat_")
@@ -182,7 +182,7 @@ func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (To
 		return TokenPair{}, fmt.Errorf("%w: client inactive", ErrInvalidGrant)
 	}
 	expectedScope, err := OAuthScopeForAuthorityProfile(access.ProviderAuthorityProfile(grantProfile))
-	if err != nil || scope != expectedScope || client.Scope != expectedScope {
+	if err != nil || scope != expectedScope || !registrationScopeAllows(client.Scope, expectedScope) {
 		return TokenPair{}, fmt.Errorf("%w: OAuth scope no longer matches authority profile", ErrInvalidGrant)
 	}
 	access, accessID, accessHash, err := tokenSecret("mcpat_")

@@ -99,7 +99,7 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 		return AuthorizationRequest{}, ErrProviderActorUnavailable
 	}
 	expectedScope, err := OAuthScopeForAuthorityProfile(sealedProfile)
-	if err != nil || client.Scope != expectedScope {
+	if err != nil || !registrationScopeAllows(client.Scope, expectedScope) {
 		return AuthorizationRequest{}, ErrProviderActorUnavailable
 	}
 	scope, err := normalizeScopeForProfile(in.Scope, sealedProfile)

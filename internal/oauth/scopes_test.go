@@ -32,7 +32,7 @@ func TestRegistrationScopeAcceptsOnlyExactContracts(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"", ScopeMCPRead, true},
+		{"", ScopeMCPRead + " " + ScopeMCPTrackerWrite, true},
 		{ScopeMCPRead, ScopeMCPRead, true},
 		{ScopeMCPRead + " " + ScopeMCPTrackerWrite, ScopeMCPRead + " " + ScopeMCPTrackerWrite, true},
 		{ScopeMCPTrackerWrite, "", false},
@@ -44,5 +44,20 @@ func TestRegistrationScopeAcceptsOnlyExactContracts(t *testing.T) {
 		if (err == nil) != tc.ok || got != tc.want {
 			t.Errorf("scope %q => %q err=%v; want %q ok=%v", tc.raw, got, err, tc.want, tc.ok)
 		}
+	}
+}
+
+func TestRegistrationScopeCeiling(t *testing.T) {
+	if !registrationScopeAllows(ScopeMCPRead+" "+ScopeMCPTrackerWrite, ScopeMCPRead) {
+		t.Fatal("full registration ceiling should allow a read profile")
+	}
+	if !registrationScopeAllows(ScopeMCPRead+" "+ScopeMCPTrackerWrite, ScopeMCPRead+" "+ScopeMCPTrackerWrite) {
+		t.Fatal("full registration ceiling should allow a tracker-write profile")
+	}
+	if registrationScopeAllows(ScopeMCPRead, ScopeMCPRead+" "+ScopeMCPTrackerWrite) {
+		t.Fatal("explicit read-only registration must not allow tracker-write")
+	}
+	if !registrationScopeAllows("", ScopeMCPRead) || registrationScopeAllows("", ScopeMCPRead+" "+ScopeMCPTrackerWrite) {
+		t.Fatal("legacy empty registrations must remain read-only")
 	}
 }

@@ -369,7 +369,7 @@ func applyRegisteredV1(ctx context.Context, tx pgx.Tx, event domain.Event) error
 		return fmt.Errorf("oauth_client.registered: token_endpoint_auth_method must be %q", AuthMethodNone)
 	}
 	normalizedScope, err := normalizeRegistrationScope(p.Scope)
-	if err != nil || normalizedScope != p.Scope {
+	if err != nil || (p.Scope != "" && normalizedScope != p.Scope) {
 		return fmt.Errorf("oauth_client.registered: invalid or non-canonical scope %q", p.Scope)
 	}
 	legacyGrantSet := len(p.GrantTypes) == 1 && p.GrantTypes[0] == GrantAuthorizationCode

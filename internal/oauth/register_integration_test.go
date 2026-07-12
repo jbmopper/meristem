@@ -55,6 +55,13 @@ func TestRegistrationRoundTrip(t *testing.T) {
 	if got.TokenEndpointAuthMethod != AuthMethodNone {
 		t.Fatalf("auth method = %q, want none", got.TokenEndpointAuthMethod)
 	}
+	defaultClient, err := svc.Register(ctx, RegisterInput{
+		ClientName:   "Default-scope client",
+		RedirectURIs: []string{"https://default.example/callback"},
+	})
+	if err != nil || defaultClient.Scope != ScopeMCPRead+" "+ScopeMCPTrackerWrite {
+		t.Fatalf("default-scope registration=%+v err=%v", defaultClient, err)
+	}
 
 	client, err := GetClient(ctx, pool, got.ClientID)
 	if err != nil {
