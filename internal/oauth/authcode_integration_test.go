@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -23,8 +25,20 @@ func newAuthCodeService(t *testing.T, now func() time.Time) (*AuthCodeService, c
 		t.Fatalf("migrate: %v", err)
 	}
 	reg := projections.NewRegistry()
+	auth.RegisterProjectors(reg)
 	RegisterProjectors(reg)
-	svc := NewAuthCodeService(pool, events.NewWriter(reg))
+	writer := events.NewWriter(reg)
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "root", IsRoot: true, Source: domain.SourceHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "oauth-system", Source: domain.SourceSystem, Actor: &root.Token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewAuthCodeService(pool, writer)
+	svc.systemActorID = system.Token.ID
 	if now != nil {
 		svc.now = now
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
@@ -47,6 +48,9 @@ type AuthorizationRequest struct {
 }
 
 func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput) (AuthorizationRequest, error) {
+	if len(in.ClientID) > 256 || len(in.RedirectURI) > MaxRedirectURILength || len(in.State) > 4096 || len(in.CodeChallenge) > 256 || len(in.Scope) > MaxScopeLength || len(in.Resource) > MaxRedirectURILength {
+		return AuthorizationRequest{}, fmt.Errorf("%w: field exceeds resource limit", ErrInvalidAuthorizationRequest)
+	}
 	systemActor, err := loadActor(ctx, s.pool, s.systemActorID, domain.SourceSystem)
 	if err != nil {
 		return AuthorizationRequest{}, err
@@ -85,23 +89,30 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	if err != nil {
 		return AuthorizationRequest{}, err
 	}
+	sealedProfile, err := access.ProviderAuthorityProfileFromScopes(providerActor.Scopes)
+	if err != nil || string(sealedProfile) != client.AuthorityProfile {
+		return AuthorizationRequest{}, ErrProviderActorUnavailable
+	}
 	identity := strings.Join([]string{in.ClientID, in.RedirectURI, in.ResponseType, in.State, in.CodeChallenge, in.CodeChallengeMethod, scope, in.Resource}, "\x00")
 	hash := sha256.Sum256([]byte(identity))
 	ctx = idempotency.WithRequest(ctx, idempotency.Request{TokenID: systemActor.ID, Scope: "oauth.authorize", Key: hex.EncodeToString(hash[:]), RequestHash: hash[:]})
-	expires := s.now().UTC().Add(AuthorizationRequestTTL)
-	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "OAuth access request: " + client.ClientName, Body: "Provider OAuth client requests authority profile " + client.AuthorityProfile + " for the Meristem MCP resource.", Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewBlocked, PatienceBudgetSeconds: int(AuthorizationRequestTTL.Seconds()), EscalationRule: domain.EscalationRuleHandToHuman})
-	if err != nil {
-		return AuthorizationRequest{}, err
-	}
-	approvalResult, err := s.approvals.Create(ctx, approvals.CreateInput{WorkItemID: item.ID, Summary: "Authorize provider MCP access: " + client.AuthorityProfile, Request: map[string]any{"client_id": client.ClientID, "client_name": client.ClientName, "authority_profile": client.AuthorityProfile, "scope": scope, "resource": in.Resource}, ExpiresIn: AuthorizationRequestTTL, Actor: systemActor})
-	if err != nil {
-		return AuthorizationRequest{}, err
-	}
-	approvalID := approvalResult.Approval.ID
 	reqID, ok := idempotency.SubjectID(ctx, "oauth_authorization_request")
 	if !ok {
 		return AuthorizationRequest{}, errors.New("oauth: deterministic authorization identity unavailable")
 	}
+	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "OAuth access request: " + client.ClientID, Body: fmt.Sprintf("UNTRUSTED self-asserted client name: %q. Selected redirect: %s. Registered redirects: %s. Bound actor: %s. Sealed profile: %s. Effective scopes: %s. Resource: %s.", client.ClientName, in.RedirectURI, strings.Join(client.RedirectURIs, ", "), providerActor.ID, client.AuthorityProfile, strings.Join(providerActor.Scopes, ", "), in.Resource), Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewBlocked, PatienceBudgetSeconds: int(AuthorizationRequestTTL.Seconds()), EscalationRule: domain.EscalationRuleHandToHuman})
+	if err != nil {
+		return AuthorizationRequest{}, err
+	}
+	if existing, found := s.getExistingRequest(ctx, reqID); found {
+		return existing, nil
+	}
+	expires := item.CreatedAt.UTC().Add(AuthorizationRequestTTL).Truncate(time.Microsecond)
+	approvalResult, err := s.approvals.Create(ctx, approvals.CreateInput{WorkItemID: item.ID, Summary: "Authorize OAuth client " + client.ClientID + " with " + client.AuthorityProfile, Request: map[string]any{"client_id": client.ClientID, "client_name_untrusted": client.ClientName, "redirect_uri": in.RedirectURI, "registered_redirect_uris": client.RedirectURIs, "actor_token_id": providerActor.ID, "authority_profile": client.AuthorityProfile, "effective_scopes": providerActor.Scopes, "oauth_scope": scope, "resource": in.Resource}, ExpiresAt: expires, Actor: systemActor})
+	if err != nil {
+		return AuthorizationRequest{}, err
+	}
+	approvalID := approvalResult.Approval.ID
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return AuthorizationRequest{}, err
@@ -117,13 +128,20 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	return AuthorizationRequest{ID: reqID, WorkItemID: item.ID, ApprovalID: approvalID, ClientID: client.ClientID, RedirectURI: in.RedirectURI, State: in.State, Scope: scope, Resource: in.Resource, ExpiresAt: expires}, nil
 }
 
+func (s *AuthorizationService) getExistingRequest(ctx context.Context, id uuid.UUID) (AuthorizationRequest, bool) {
+	var out AuthorizationRequest
+	out.ID = id
+	err := s.pool.QueryRow(ctx, `SELECT work_item_id,approval_id,client_id,redirect_uri,state,scope,resource,expires_at FROM oauth_authorization_requests WHERE id=$1`, id).Scan(&out.WorkItemID, &out.ApprovalID, &out.ClientID, &out.RedirectURI, &out.State, &out.Scope, &out.Resource, &out.ExpiresAt)
+	return out, err == nil
+}
+
 func (s *AuthorizationService) ensureBindingWorkItem(ctx context.Context, client Client, systemActor domain.Token) (uuid.UUID, error) {
 	if client.BindingWorkItemID != nil {
 		return *client.BindingWorkItemID, nil
 	}
 	hash := sha256.Sum256([]byte(client.ClientID))
 	ctx = idempotency.WithRequest(ctx, idempotency.Request{TokenID: systemActor.ID, Scope: "oauth.bind_provider_actor", Key: client.ClientID, RequestHash: hash[:]})
-	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "Bind OAuth provider actor: " + client.ClientID, Body: "Root action required: bind this registered OAuth client to a pre-provisioned source=agent token and an approved authority profile, then retry authorization.", Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewBlocked, PatienceBudgetSeconds: 86400, EscalationRule: domain.EscalationRuleHandToHuman})
+	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "Bind OAuth provider actor: " + client.ClientID, Body: fmt.Sprintf("Root action required. Client name %q is UNTRUSTED self-asserted metadata. Registered redirect URIs: %s. Bind this client to a pre-provisioned source=agent token whose exact scopes match one sealed authority profile, then retry authorization.", client.ClientName, strings.Join(client.RedirectURIs, ", ")), Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewBlocked, PatienceBudgetSeconds: 86400, EscalationRule: domain.EscalationRuleHandToHuman})
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -187,17 +205,18 @@ func (s *AuthorizationService) Continue(ctx context.Context, id uuid.UUID) (Cont
 		return ContinuationResult{}, fmt.Errorf("%w: authorization request already completed", ErrInvalidAuthorizationRequest)
 	}
 	var status string
-	err = tx.QueryRow(ctx, `SELECT status FROM approvals WHERE id=$1`, req.approvalID).Scan(&status)
+	err = tx.QueryRow(ctx, `SELECT status FROM approvals WHERE id=$1 FOR UPDATE`, req.approvalID).Scan(&status)
 	if err != nil {
 		return ContinuationResult{}, err
 	}
-	if status == string(approvals.StatusPending) && s.now().UTC().Before(req.expires) {
+	now := s.now().UTC()
+	if status == string(approvals.StatusPending) && now.Before(req.expires) {
 		return ContinuationResult{Pending: true, WorkItemID: req.workItemID}, nil
 	}
 	outcome := status
 	oauthErr := ""
 	code := ""
-	if status == string(approvals.StatusApproved) {
+	if status == string(approvals.StatusApproved) && now.Before(req.expires) {
 		code, err = s.codes.issueInTx(ctx, tx, IssueInput{ClientID: req.clientID, RedirectURI: req.redirectURI, CodeChallenge: req.challenge, CodeChallengeMethod: req.method, Scope: req.scope, Resource: req.resource, ActorTokenID: req.actorID, SystemActorTokenID: systemActor.ID, AuthorityProfile: req.authorityProfile})
 		if err != nil {
 			return ContinuationResult{}, err
@@ -219,6 +238,8 @@ func (s *AuthorizationService) Continue(ctx context.Context, id uuid.UUID) (Cont
 	}
 	if outcome == "approved" {
 		_, _ = s.workItems.Transition(ctx, req.workItemID, domain.WorkItemDone, "oauth authorization completed", systemActor)
+	} else if outcome == "expired" {
+		_, _ = s.workItems.Transition(ctx, req.workItemID, domain.WorkItemFailed, "oauth authorization expired", systemActor)
 	}
 	return ContinuationResult{RedirectURI: req.redirectURI, State: req.state, Code: code, OAuthError: oauthErr, WorkItemID: req.workItemID}, nil
 }

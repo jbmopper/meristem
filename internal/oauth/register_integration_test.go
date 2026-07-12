@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -23,10 +25,19 @@ func TestRegistrationRoundTrip(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	reg := projections.NewRegistry()
+	auth.RegisterProjectors(reg)
 	RegisterProjectors(reg)
 	writer := events.NewWriter(reg)
-
-	svc := NewRegistrationService(pool, writer)
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "root", IsRoot: true, Source: domain.SourceHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "oauth-system", Source: domain.SourceSystem, Actor: &root.Token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewRegistrationServiceWithSystemActor(pool, writer, system.Token.ID)
 	got, err := svc.Register(ctx, RegisterInput{
 		ClientName:   "Claude",
 		RedirectURIs: []string{"https://claude.ai/api/mcp/auth_callback"},

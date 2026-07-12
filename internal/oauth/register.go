@@ -65,17 +65,19 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 	if s.pool == nil || s.writer == nil {
 		return RegisteredClient{}, errors.New("oauth: registration service is not configured")
 	}
-	systemActor, err := loadActor(ctx, s.pool, s.systemActorID, domain.SourceSystem)
-	if err != nil {
-		return RegisteredClient{}, err
+	if len(in.ClientName) > MaxClientNameLength || len(in.Scope) > MaxScopeLength {
+		return RegisteredClient{}, fmt.Errorf("%w: client_name or scope exceeds resource limit", ErrInvalidRegistration)
 	}
-
 	authMethod := strings.TrimSpace(in.TokenEndpointAuthMethod)
 	if authMethod == "" {
 		authMethod = AuthMethodNone
 	}
 	if authMethod != AuthMethodNone {
 		return RegisteredClient{}, fmt.Errorf("%w: token_endpoint_auth_method %q is unsupported; provider clients must be public (none) and use PKCE", ErrInvalidRegistration, authMethod)
+	}
+	scope, err := normalizeScope(in.Scope)
+	if err != nil {
+		return RegisteredClient{}, fmt.Errorf("%w: only scope %s is supported", ErrInvalidRegistration, ScopeMCPRead)
 	}
 
 	redirectURIs, err := validateRedirectURIs(in.RedirectURIs)
@@ -84,6 +86,10 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 	}
 
 	clientID, err := generateClientID()
+	if err != nil {
+		return RegisteredClient{}, err
+	}
+	systemActor, err := loadActor(ctx, s.pool, s.systemActorID, domain.SourceSystem)
 	if err != nil {
 		return RegisteredClient{}, err
 	}
@@ -96,7 +102,7 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 		GrantTypes:              []string{GrantAuthorizationCode},
 		ResponseTypes:           []string{ResponseTypeCode},
 		TokenEndpointAuthMethod: AuthMethodNone,
-		Scope:                   strings.TrimSpace(in.Scope),
+		Scope:                   scope,
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})

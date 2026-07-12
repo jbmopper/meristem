@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 )
@@ -28,12 +29,17 @@ func (s *ClientAdminService) BindActor(ctx context.Context, clientID string, act
 	if !actor.IsRoot {
 		return errors.New("oauth: root token required to bind provider actor")
 	}
-	if _, err := validateProviderActor(ctx, s.pool, actorID); err != nil {
+	providerActor, err := validateProviderActor(ctx, s.pool, actorID)
+	if err != nil {
 		return err
 	}
 	authorityProfile = strings.TrimSpace(authorityProfile)
 	if authorityProfile == "" {
 		return errors.New("oauth: authority_profile is required")
+	}
+	sealed, err := access.ProviderAuthorityProfileFromScopes(providerActor.Scopes)
+	if err != nil || string(sealed) != authorityProfile {
+		return fmt.Errorf("oauth: actor scopes do not exactly match sealed authority profile %q: %w", authorityProfile, access.ErrInvalidProviderAuthority)
 	}
 	if _, err := GetClient(ctx, s.pool, clientID); err != nil {
 		return err

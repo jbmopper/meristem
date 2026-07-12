@@ -90,6 +90,7 @@ type CreateInput struct {
 	Summary    string
 	Request    any
 	ExpiresIn  time.Duration
+	ExpiresAt  time.Time
 	Actor      domain.Token
 }
 
@@ -144,11 +145,14 @@ func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, in CreateInput) (ap
 	if summary == "" {
 		return uuid.Nil, uuid.Nil, false, fmt.Errorf("%w: summary is required", ErrInvalidRequest)
 	}
-	expiresIn := in.ExpiresIn
-	if expiresIn <= 0 {
-		expiresIn = time.Hour
+	expiresAt := in.ExpiresAt.UTC().Truncate(time.Microsecond)
+	if expiresAt.IsZero() {
+		expiresIn := in.ExpiresIn
+		if expiresIn <= 0 {
+			expiresIn = time.Hour
+		}
+		expiresAt = s.clock().UTC().Add(expiresIn).Truncate(time.Microsecond)
 	}
-	expiresAt := s.clock().UTC().Add(expiresIn).Truncate(time.Microsecond)
 	request := in.Request
 	if request == nil {
 		request = map[string]any{}
