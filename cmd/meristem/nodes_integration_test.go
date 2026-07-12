@@ -105,6 +105,39 @@ func TestNodeCommandPaths(t *testing.T) {
 	if after[4] != "active" {
 		t.Fatalf("status after update-route = %q, want active", after[4])
 	}
+
+	// Repeating the current declaration is an immediate retry and must not
+	// append. A later A -> B -> A cycle is two new logical actions even though
+	// the final A payload matches the first route update byte-for-byte.
+	routeA := []string{
+		"--node-id", "m4",
+		"--direct-url", "https://m4.peer.example/mcp",
+		"--status", "active",
+	}
+	routeCount := countNodeEvents(t, ctx, pool)
+	if err := updateNodeRoute(ctx, pool, writer, actor, routeA); err != nil {
+		t.Fatalf("updateNodeRoute immediate retry: %v", err)
+	}
+	if got := countNodeEvents(t, ctx, pool); got != routeCount {
+		t.Fatalf("immediate route retry appended: before=%d after=%d", routeCount, got)
+	}
+	if err := updateNodeRoute(ctx, pool, writer, actor, []string{
+		"--node-id", "m4",
+		"--relay-via", "den",
+		"--status", "unreachable",
+	}); err != nil {
+		t.Fatalf("updateNodeRoute B: %v", err)
+	}
+	if err := updateNodeRoute(ctx, pool, writer, actor, routeA); err != nil {
+		t.Fatalf("updateNodeRoute return to A: %v", err)
+	}
+	if got := countNodeEvents(t, ctx, pool); got != routeCount+2 {
+		t.Fatalf("A -> B -> A appended %d events, want 2", got-routeCount)
+	}
+	final := listRow(t, ctx, pool, "m4")
+	if final[2] != "https://m4.peer.example/mcp" || final[3] != "-" || final[4] != "active" {
+		t.Fatalf("final route A not restored: %v", final)
+	}
 }
 
 // listRow renders the node list and returns the tab-split columns for nodeID.

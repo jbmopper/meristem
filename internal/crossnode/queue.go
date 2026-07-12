@@ -55,6 +55,11 @@ type EnqueueInput struct {
 	OriginIdempotencyKey string
 	// OriginActorTokenID is the resolved token id of the queuing actor, if any.
 	OriginActorTokenID *uuid.UUID
+	// Source is the resolved source of the actor that caused the enqueue. A
+	// zero value preserves the historical system attribution for non-transport
+	// callers; authenticated transports should pass their request-context
+	// token source.
+	Source domain.Source
 }
 
 // EnqueueResult reports the command.queued event id the enqueue produced.
@@ -109,6 +114,9 @@ type AckInput struct {
 	OK         bool
 	// ActorTokenID is the resolved token id of the acking (hub-side) actor.
 	ActorTokenID *uuid.UUID
+	// Source is the resolved source of the actor that caused the ack. A zero
+	// value preserves the historical system attribution for existing callers.
+	Source domain.Source
 }
 
 // AckResult reports the command.acked event id and the target it folded onto.
@@ -167,7 +175,7 @@ func (s *QueueService) Enqueue(ctx context.Context, in EnqueueInput) (EnqueueRes
 		SubjectKind:   domain.SubjectNode,
 		SubjectID:     nodes.NodeSubjectID(in.TargetNodeID),
 		Kind:          domain.EventCommandQueued,
-		Source:        domain.SourceSystem,
+		Source:        eventSource(in.Source),
 		ActorTokenID:  in.OriginActorTokenID,
 		Discriminator: disc,
 		Payload: queuedPayload{
@@ -243,7 +251,16 @@ func (s *QueueService) Ack(ctx context.Context, in AckInput) (AckResult, error) 
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var target string
-	err = tx.QueryRow(ctx, `SELECT target_node_id FROM command_queue WHERE id = $1`, in.CommandQueueID).Scan(&target)
+	// Serialize acknowledgements on the queue row before appending their
+	// events. This makes the first row-lock winner also the first event in log
+	// order, so live projection and a seq-ordered rebuild choose the same
+	// terminal decision under concurrent, contradictory acks.
+	err = tx.QueryRow(ctx, `
+		SELECT target_node_id
+		FROM command_queue
+		WHERE id = $1
+		FOR UPDATE
+	`, in.CommandQueueID).Scan(&target)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AckResult{}, ErrUnknownCommand
 	}
@@ -256,7 +273,7 @@ func (s *QueueService) Ack(ctx context.Context, in AckInput) (AckResult, error) 
 		SubjectKind:   domain.SubjectNode,
 		SubjectID:     nodes.NodeSubjectID(target),
 		Kind:          domain.EventCommandAcked,
-		Source:        domain.SourceSystem,
+		Source:        eventSource(in.Source),
 		ActorTokenID:  in.ActorTokenID,
 		Discriminator: disc,
 		Payload: ackedPayload{
@@ -273,4 +290,15 @@ func (s *QueueService) Ack(ctx context.Context, in AckInput) (AckResult, error) 
 		return AckResult{}, err
 	}
 	return AckResult{EventID: id, TargetNodeID: target}, nil
+}
+
+// eventSource keeps existing internal callers source-compatible while giving
+// authenticated transports an explicit seam for request-context attribution.
+// Invalid non-empty sources are deliberately passed through so events.Spec
+// fails closed instead of silently rewriting bad attribution as system.
+func eventSource(source domain.Source) domain.Source {
+	if source == "" {
+		return domain.SourceSystem
+	}
+	return source
 }

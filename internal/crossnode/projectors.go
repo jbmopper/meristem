@@ -78,8 +78,9 @@ func (commandAckedProjector) Kind() string { return domain.EventCommandAcked }
 // Apply folds a command.acked event onto its command_queue row, advancing state
 // pending -> done (ok) / failed (not ok) and recording the structural outcome
 // the target observed. acked_at is the event clock (never wall time) so a
-// rebuild reproduces the row. The UPDATE is idempotent on the same event, and a
-// replayed ack POST never re-fires the projector (same deterministic event id).
+// rebuild reproduces the row. Only pending rows advance: if distinct ack
+// actions disagree, the first terminal decision in event order wins and every
+// later ack is an audit fact that cannot rewrite the projection.
 func (commandAckedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	if event.SubjectKind != domain.SubjectNode {
 		return fmt.Errorf("command.acked: expected subject_kind %q, got %q", domain.SubjectNode, event.SubjectKind)
@@ -107,8 +108,8 @@ func applyAckedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE command_queue
 		SET state = $2, outcome_status_code = $3, outcome_ok = $4, acked_at = $5
-		WHERE id = $1
-	`, p.CommandQueueID, state, p.StatusCode, p.OK, event.OccurredAt)
+		WHERE id = $1 AND target_node_id = $6 AND state = 'pending'
+	`, p.CommandQueueID, state, p.StatusCode, p.OK, event.OccurredAt, p.TargetNodeID)
 	if err != nil {
 		return fmt.Errorf("command.acked: update projection: %w", err)
 	}
