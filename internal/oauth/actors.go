@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -33,6 +34,9 @@ func loadActor(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, source dom
 	tok.Source = domain.Source(gotSource)
 	if tok.IsRoot || tok.RevokedAt != nil || tok.Source != source {
 		return domain.Token{}, fmt.Errorf("%w: token %s must be active, non-root, source=%s", ErrSystemActorUnavailable, id, source)
+	}
+	if err := json.Unmarshal(scopes, &tok.Scopes); err != nil {
+		return domain.Token{}, fmt.Errorf("oauth: decode actor scopes: %w", err)
 	}
 	return tok, nil
 }

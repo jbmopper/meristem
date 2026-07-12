@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
+	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 )
@@ -84,8 +86,13 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 	if err != nil || client.RevokedAt != nil || client.ActorTokenID == nil || *client.ActorTokenID != actorID {
 		return TokenPair{}, fmt.Errorf("%w: client or actor binding inactive", ErrInvalidGrant)
 	}
-	if _, err := validateProviderActor(ctx, s.pool, actorID); err != nil {
+	providerActor, err := validateProviderActor(ctx, s.pool, actorID)
+	if err != nil {
 		return TokenPair{}, err
+	}
+	sealedProfile, err := access.ProviderAuthorityProfileFromScopes(providerActor.Scopes)
+	if err != nil || string(sealedProfile) != authorityProfile {
+		return TokenPair{}, fmt.Errorf("%w: authority profile no longer matches actor scopes", ErrInvalidGrant)
 	}
 	access, accessID, accessHash, err := tokenSecret("mcpat_")
 	if err != nil {
@@ -127,21 +134,26 @@ func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (To
 	var generation int
 	var tokenExpiry, grantExpiry time.Time
 	var used, revoked *time.Time
-	var storedClient, scope, resource string
-	err = tx.QueryRow(ctx, `SELECT rt.token_id,rt.grant_id,rt.generation,rt.expires_at,rt.used_at,g.client_id,g.scope,g.resource,g.refresh_expires_at,g.revoked_at FROM oauth_refresh_tokens rt JOIN oauth_grants g ON g.id=rt.grant_id WHERE rt.token_hash=$1 FOR UPDATE OF rt,g`, h[:]).Scan(&tokenID, &grantID, &generation, &tokenExpiry, &used, &storedClient, &scope, &resource, &grantExpiry, &revoked)
+	var storedClient, scope, resource, grantProfile, currentProfile string
+	var grantActor, currentActor *uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT rt.token_id,rt.grant_id,rt.generation,rt.expires_at,rt.used_at,g.client_id,g.scope,g.resource,g.refresh_expires_at,g.revoked_at,g.actor_token_id,g.authority_profile,c.actor_token_id,c.authority_profile FROM oauth_refresh_tokens rt JOIN oauth_grants g ON g.id=rt.grant_id JOIN oauth_clients c ON c.client_id=g.client_id WHERE rt.token_hash=$1 FOR UPDATE OF rt,g`, h[:]).Scan(&tokenID, &grantID, &generation, &tokenExpiry, &used, &storedClient, &scope, &resource, &grantExpiry, &revoked, &grantActor, &grantProfile, &currentActor, &currentProfile)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("%w: unknown refresh token", ErrInvalidGrant)
 	}
 	now := s.now().UTC()
 	if used != nil {
-		_, _, _ = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthRefreshReuseDetected, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "token_id": tokenID, "detected_at_unix": now.Unix(), "reason": "rotated refresh token replayed"}})
-		_, _, _ = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthGrantRevoked, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "revoked_at_unix": now.Unix(), "reason": "refresh_token_reuse"}})
+		if _, _, err := s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthRefreshReuseDetected, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "token_id": tokenID, "detected_at_unix": now.Unix(), "reason": "rotated refresh token replayed"}}); err != nil {
+			return TokenPair{}, err
+		}
+		if _, _, err := s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthGrantRevoked, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "revoked_at_unix": now.Unix(), "reason": "refresh_token_reuse"}}); err != nil {
+			return TokenPair{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return TokenPair{}, err
 		}
 		return TokenPair{}, ErrRefreshReuse
 	}
-	if revoked != nil || now.After(tokenExpiry) || now.After(grantExpiry) || clientID != storedClient {
+	if revoked != nil || now.After(tokenExpiry) || now.After(grantExpiry) || clientID != storedClient || grantActor == nil || currentActor == nil || *grantActor != *currentActor || grantProfile != currentProfile {
 		return TokenPair{}, fmt.Errorf("%w: refresh token expired, revoked, or client mismatch", ErrInvalidGrant)
 	}
 	client, err := GetClient(ctx, s.pool, storedClient)
@@ -167,27 +179,45 @@ func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (To
 }
 
 func (s *TokenService) AuthenticateAccess(ctx context.Context, secret, expectedResource string) (domain.Token, error) {
-	if !strings.HasPrefix(secret, "mcpat_") {
+	if !validTokenSecret(secret, "mcpat_") {
 		return domain.Token{}, ErrInvalidAccessToken
 	}
 	h := sha256.Sum256([]byte(secret))
 	var tok domain.Token
-	var scopesJSON []byte
+	var scopesJSON, storedHash []byte
 	var source string
 	var tokenExpiry, grantExpiry time.Time
 	var grantRevoked, clientRevoked *time.Time
-	var scope, resource string
-	err := s.pool.QueryRow(ctx, `SELECT t.id,t.name,t.is_root,t.scopes,t.source,t.created_at,t.revoked_at,a.expires_at,g.refresh_expires_at,g.revoked_at,c.revoked_at,g.scope,g.resource FROM oauth_access_tokens a JOIN oauth_grants g ON g.id=a.grant_id JOIN oauth_clients c ON c.client_id=g.client_id JOIN tokens t ON t.id=g.actor_token_id WHERE a.token_hash=$1`, h[:]).Scan(&tok.ID, &tok.Name, &tok.IsRoot, &scopesJSON, &source, &tok.CreatedAt, &tok.RevokedAt, &tokenExpiry, &grantExpiry, &grantRevoked, &clientRevoked, &scope, &resource)
+	var scope, resource, authorityProfile, currentProfile string
+	var currentActor *uuid.UUID
+	err := s.pool.QueryRow(ctx, `SELECT t.id,t.name,t.is_root,t.scopes,t.source,t.created_at,t.revoked_at,a.token_hash,a.expires_at,g.refresh_expires_at,g.revoked_at,c.revoked_at,g.scope,g.resource,g.authority_profile,c.actor_token_id,c.authority_profile FROM oauth_access_tokens a JOIN oauth_grants g ON g.id=a.grant_id JOIN oauth_clients c ON c.client_id=g.client_id JOIN tokens t ON t.id=g.actor_token_id WHERE a.token_hash=$1`, h[:]).Scan(&tok.ID, &tok.Name, &tok.IsRoot, &scopesJSON, &source, &tok.CreatedAt, &tok.RevokedAt, &storedHash, &tokenExpiry, &grantExpiry, &grantRevoked, &clientRevoked, &scope, &resource, &authorityProfile, &currentActor, &currentProfile)
 	if err != nil {
 		return domain.Token{}, ErrInvalidAccessToken
 	}
 	tok.Source = domain.Source(source)
-	_ = json.Unmarshal(scopesJSON, &tok.Scopes)
+	if !auth.EqualHash(storedHash, h[:]) {
+		return domain.Token{}, ErrInvalidAccessToken
+	}
+	if err := json.Unmarshal(scopesJSON, &tok.Scopes); err != nil {
+		return domain.Token{}, ErrInvalidAccessToken
+	}
+	profile, err := access.ProviderAuthorityProfileFromScopes(tok.Scopes)
+	if err != nil || string(profile) != authorityProfile || currentActor == nil || *currentActor != tok.ID || currentProfile != authorityProfile {
+		return domain.Token{}, ErrInvalidAccessToken
+	}
 	now := s.now().UTC()
 	if tok.IsRoot || tok.Source != domain.SourceAgent || tok.RevokedAt != nil || grantRevoked != nil || clientRevoked != nil || now.After(tokenExpiry) || now.After(grantExpiry) || resource != expectedResource || normalizeScopeContains(scope, ScopeMCPRead) == false {
 		return domain.Token{}, ErrInvalidAccessToken
 	}
 	return tok, nil
+}
+
+func validTokenSecret(secret, prefix string) bool {
+	if !strings.HasPrefix(secret, prefix) {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(secret, prefix))
+	return err == nil && len(raw) == 32
 }
 
 func normalizeScopeContains(raw, want string) bool {

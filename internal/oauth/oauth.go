@@ -48,6 +48,9 @@ const (
 // MaxRedirectURIs caps how many redirect URIs a single client may register,
 // bounding projection row size and the authorize-time allowlist scan.
 const MaxRedirectURIs = 10
+const MaxRedirectURILength = 2048
+const MaxClientNameLength = 256
+const MaxScopeLength = 256
 
 // registeredPayload is the field-minimal structural payload of an
 // oauth_client.registered event. Every field here is read by deterministic
@@ -87,6 +90,9 @@ func validateRedirectURIs(uris []string) ([]string, error) {
 	}
 	out := make([]string, 0, len(uris))
 	for _, raw := range uris {
+		if len(raw) > MaxRedirectURILength {
+			return nil, fmt.Errorf("%w: redirect_uri exceeds %d bytes", ErrInvalidRegistration, MaxRedirectURILength)
+		}
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			return nil, fmt.Errorf("%w: empty redirect_uri", ErrInvalidRegistration)

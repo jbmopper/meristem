@@ -116,6 +116,11 @@ func VerifyPKCE(codeVerifier, storedChallenge string) error {
 	if len(codeVerifier) < 43 || len(codeVerifier) > 128 {
 		return fmt.Errorf("%w: code_verifier length must be 43..128", ErrInvalidGrant)
 	}
+	for _, r := range codeVerifier {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '.' || r == '_' || r == '~') {
+			return fmt.Errorf("%w: code_verifier contains a character outside the RFC 7636 unreserved set", ErrInvalidGrant)
+		}
+	}
 	sum := sha256.Sum256([]byte(codeVerifier))
 	computed := base64.RawURLEncoding.EncodeToString(sum[:])
 	if subtle.ConstantTimeCompare([]byte(computed), []byte(storedChallenge)) != 1 {

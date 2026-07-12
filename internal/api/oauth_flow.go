@@ -16,6 +16,8 @@ import (
 )
 
 func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	if s.oauthAuthorization == nil {
 		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "oauth authorization is not configured")
 		return
@@ -75,8 +77,15 @@ func (s *Server) writeOAuthPending(w http.ResponseWriter, r *http.Request, id, w
 }
 
 func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	if s.oauthTokens == nil {
 		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "oauth token service is not configured")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.policy.MaxRequestBodyBytes)
+	if mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])); mediaType != "application/x-www-form-urlencoded" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "token request must use application/x-www-form-urlencoded body")
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -85,11 +94,11 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	var pair oauth.TokenPair
 	var err error
-	switch r.Form.Get("grant_type") {
+	switch r.PostForm.Get("grant_type") {
 	case oauth.GrantAuthorizationCode:
-		pair, err = s.oauthTokens.ExchangeCode(r.Context(), oauth.RedeemInput{Code: r.Form.Get("code"), ClientID: r.Form.Get("client_id"), RedirectURI: r.Form.Get("redirect_uri"), CodeVerifier: r.Form.Get("code_verifier")})
+		pair, err = s.oauthTokens.ExchangeCode(r.Context(), oauth.RedeemInput{Code: r.PostForm.Get("code"), ClientID: r.PostForm.Get("client_id"), RedirectURI: r.PostForm.Get("redirect_uri"), CodeVerifier: r.PostForm.Get("code_verifier")})
 	case "refresh_token":
-		pair, err = s.oauthTokens.Refresh(r.Context(), r.Form.Get("refresh_token"), r.Form.Get("client_id"))
+		pair, err = s.oauthTokens.Refresh(r.Context(), r.PostForm.Get("refresh_token"), r.PostForm.Get("client_id"))
 	default:
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "grant_type is unsupported")
 		return

@@ -38,7 +38,6 @@ func (s *Server) handleOAuthAuthorizationServerMetadata(w http.ResponseWriter, r
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      []string{mcpReadScope},
-		"revocation_endpoint":                   base + "/v1/oauth/clients/{client_id}/revoke",
 	})
 }
 

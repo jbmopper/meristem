@@ -23,9 +23,10 @@ var ErrInvalidGrant = errors.New("oauth: invalid grant")
 // oauth_authorization_code.issued / .redeemed events folding into the
 // oauth_authorization_codes projection.
 type AuthCodeService struct {
-	pool   *pgxpool.Pool
-	writer *events.Writer
-	now    func() time.Time
+	pool          *pgxpool.Pool
+	writer        *events.Writer
+	now           func() time.Time
+	systemActorID uuid.UUID
 }
 
 func NewAuthCodeService(pool *pgxpool.Pool, writer *events.Writer) *AuthCodeService {
@@ -55,6 +56,12 @@ func (s *AuthCodeService) Issue(ctx context.Context, in IssueInput) (string, err
 	}
 	if in.ActorTokenID == uuid.Nil {
 		return "", fmt.Errorf("%w: actor_token_id is required for attribution", ErrInvalidGrant)
+	}
+	if in.SystemActorTokenID == uuid.Nil {
+		in.SystemActorTokenID = s.systemActorID
+	}
+	if in.SystemActorTokenID == uuid.Nil {
+		return "", fmt.Errorf("%w: system_actor_token_id is required for attribution", ErrInvalidGrant)
 	}
 	if err := ValidateCodeChallenge(in.CodeChallenge, in.CodeChallengeMethod); err != nil {
 		return "", err
@@ -113,10 +120,11 @@ func (s *AuthCodeService) issueInTx(ctx context.Context, tx pgx.Tx, in IssueInpu
 
 // RedeemInput is a token-endpoint code-exchange request.
 type RedeemInput struct {
-	Code         string
-	ClientID     string
-	RedirectURI  string
-	CodeVerifier string
+	Code               string
+	ClientID           string
+	RedirectURI        string
+	CodeVerifier       string
+	SystemActorTokenID uuid.UUID
 }
 
 // RedeemResult is what the token endpoint needs to mint an access token: the
@@ -138,6 +146,12 @@ func (s *AuthCodeService) Redeem(ctx context.Context, in RedeemInput) (RedeemRes
 	}
 	if in.Code == "" {
 		return RedeemResult{}, fmt.Errorf("%w: code is required", ErrInvalidGrant)
+	}
+	if in.SystemActorTokenID == uuid.Nil {
+		in.SystemActorTokenID = s.systemActorID
+	}
+	if in.SystemActorTokenID == uuid.Nil {
+		return RedeemResult{}, fmt.Errorf("%w: system_actor_token_id is required for attribution", ErrInvalidGrant)
 	}
 	hash := HashCode(in.Code)
 
@@ -193,10 +207,11 @@ func (s *AuthCodeService) Redeem(ctx context.Context, in RedeemInput) (RedeemRes
 	}
 
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind: domain.SubjectOAuthAuthorizationCode,
-		SubjectID:   CodeSubjectID(codeID),
-		Kind:        domain.EventOAuthAuthorizationCodeRedeemed,
-		Source:      domain.SourceSystem,
+		SubjectKind:  domain.SubjectOAuthAuthorizationCode,
+		SubjectID:    CodeSubjectID(codeID),
+		Kind:         domain.EventOAuthAuthorizationCodeRedeemed,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &in.SystemActorTokenID,
 		Payload: redeemedPayload{
 			PayloadVersion: 1,
 			CodeID:         codeID,
