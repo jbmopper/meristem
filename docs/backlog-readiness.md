@@ -18,6 +18,11 @@ The endpoint does not write events, create a new table, or maintain a second
 source of truth. Tokens see only the work items they could already see through
 `work_items.list`.
 
+Readiness scans the complete `work_items` projection before applying that
+access reducer. The response's `limit` is therefore `0`, meaning unbounded,
+and its totals cover every work item visible to the caller. This is deliberately
+different from the bounded `work_items.list` surface.
+
 ## Groups
 
 - `v1_substrate`: visible work items that match the current substrate/refresh
@@ -57,7 +62,7 @@ without mutating the backlog or hiding audit history.
 REST:
 
 ```bash
-curl -fsS 'http://127.0.0.1:8080/v1/backlog/readiness?limit=200' \
+curl -fsS 'http://127.0.0.1:8080/v1/backlog/readiness' \
   -H "Authorization: Bearer $(cat .meristem/codex.token)"
 ```
 
@@ -66,9 +71,10 @@ MCP:
 ```json
 {
   "name": "backlog.readiness",
-  "arguments": { "limit": 200 }
+  "arguments": {}
 }
 ```
 
-The `limit` defaults to `200` and is capped at `200`, matching the current
-work-item listing cap.
+The legacy `limit` argument is still accepted from `0` through `200` for REST
+and MCP client compatibility, but it is deprecated and does not truncate the
+scan. Values outside that range remain invalid.

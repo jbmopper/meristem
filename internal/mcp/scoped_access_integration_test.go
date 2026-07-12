@@ -151,6 +151,20 @@ func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
 			t.Fatalf("assigned feed did not include in-tree child transition %s: %s", a1.ID, text)
 		}
 	}
+
+	if isError, text := callToolForTest(t, s, "backlog.readiness", map[string]any{"limit": 1}); isError {
+		t.Fatalf("backlog.readiness returned tool error: %s", text)
+	} else {
+		if !strings.Contains(text, a.ID.String()) || !strings.Contains(text, a1.ID.String()) {
+			t.Fatalf("scoped readiness omitted assigned tree items: %s", text)
+		}
+		if strings.Contains(text, b.ID.String()) || strings.Contains(text, `"title":"B"`) {
+			t.Fatalf("scoped readiness leaked out-of-tree B: %s", text)
+		}
+		if !strings.Contains(text, `"limit":0`) {
+			t.Fatalf("scoped readiness did not report an unbounded scan: %s", text)
+		}
+	}
 }
 
 func callToolForTest(t *testing.T, s *Server, name string, args map[string]any) (bool, string) {

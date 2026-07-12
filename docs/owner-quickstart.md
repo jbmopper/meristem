@@ -93,7 +93,7 @@ Expect, per pass (all idempotent on re-run — a second tick emits ~0 fresh):
 
 ```bash
 OP="Authorization: Bearer $(tr -d '\n' < .meristem/operator.token)"
-curl -sS -H "$OP" 'localhost:8080/v1/backlog/readiness?limit=200'           # grouped board
+curl -sS -H "$OP" 'localhost:8080/v1/backlog/readiness'                     # complete grouped board
 curl -sS -H "$OP" 'localhost:8080/v1/feed?projection=activity'              # default activity log
 curl -sS -H "$OP" 'localhost:8080/v1/feed?projection=owner-attention'       # escalations + breach history
 curl -sS -H "$OP" 'localhost:8080/v1/feed?projection=dispatch'              # launcher work queue
