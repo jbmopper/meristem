@@ -36,6 +36,7 @@ import (
 type queuedPayload struct {
 	PayloadVersion       int             `json:"payload_version,omitempty"`
 	TargetNodeID         string          `json:"target_node_id"`
+	OriginNodeID         string          `json:"origin_node_id"`
 	CommandPath          string          `json:"command_path"`
 	CommandBody          json.RawMessage `json:"command_body"`
 	OriginIdempotencyKey string          `json:"origin_idempotency_key"`
@@ -48,6 +49,9 @@ type EnqueueInput struct {
 	// TargetNodeID is the DNS-safe home node the command is bound for. It must
 	// name a node other than the receiver (the caller enforces that).
 	TargetNodeID string
+	// OriginNodeID is authenticated structural provenance supplied by the
+	// peer request. It never replaces local ActorTokenID/Source attribution.
+	OriginNodeID string
 	// CommandPath and CommandBody are the home-node call to replay on drain.
 	CommandPath string
 	CommandBody json.RawMessage
@@ -137,6 +141,10 @@ type AckResult struct {
 // not a DNS-safe node id.
 var ErrInvalidTargetNodeID = errors.New("crossnode: target_node_id is not a DNS-safe node id")
 
+// ErrInvalidOriginNodeID is returned when queue provenance does not name a
+// DNS-safe originating node.
+var ErrInvalidOriginNodeID = errors.New("crossnode: origin_node_id is not a DNS-safe node id")
+
 // ErrUnknownCommand is returned when an ack references a command_queue id that
 // does not exist (unknown or already pruned queued command).
 var ErrUnknownCommand = errors.New("crossnode: unknown queued command")
@@ -175,6 +183,12 @@ func (s *QueueService) Enqueue(ctx context.Context, in EnqueueInput) (EnqueueRes
 	if !domain.ValidNodeID(in.TargetNodeID) {
 		return EnqueueResult{}, ErrInvalidTargetNodeID
 	}
+	if !domain.ValidNodeID(in.OriginNodeID) {
+		return EnqueueResult{}, ErrInvalidOriginNodeID
+	}
+	if err := ValidateCommandPath(in.CommandPath); err != nil {
+		return EnqueueResult{}, err
+	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -192,6 +206,7 @@ func (s *QueueService) Enqueue(ctx context.Context, in EnqueueInput) (EnqueueRes
 		Discriminator: disc,
 		Payload: queuedPayload{
 			TargetNodeID:         in.TargetNodeID,
+			OriginNodeID:         in.OriginNodeID,
 			CommandPath:          in.CommandPath,
 			CommandBody:          normalizeBody(in.CommandBody),
 			OriginIdempotencyKey: in.OriginIdempotencyKey,
@@ -249,6 +264,25 @@ func (s *QueueService) PendingForTarget(ctx context.Context, target string, limi
 		return nil, fmt.Errorf("crossnode: iterate pending commands: %w", err)
 	}
 	return out, nil
+}
+
+// TargetForCommand resolves the immutable target of one queued command. The
+// API uses this read-only lookup to authorize an acknowledgement before the
+// idempotency middleware can append any durable record.
+func (s *QueueService) TargetForCommand(ctx context.Context, commandQueueID uuid.UUID) (string, error) {
+	var target string
+	err := s.pool.QueryRow(ctx, `
+		SELECT target_node_id
+		FROM command_queue
+		WHERE id = $1
+	`, commandQueueID).Scan(&target)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUnknownCommand
+	}
+	if err != nil {
+		return "", fmt.Errorf("crossnode: resolve command target: %w", err)
+	}
+	return target, nil
 }
 
 // Ack appends a command.acked event for in.CommandQueueID and commits it,

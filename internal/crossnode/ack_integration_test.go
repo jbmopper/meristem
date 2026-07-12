@@ -35,7 +35,8 @@ func TestAckProjectorIntegration(t *testing.T) {
 	enqueue := func(key string) uuid.UUID {
 		res, err := svc.Enqueue(ctx, EnqueueInput{
 			TargetNodeID:         "m4",
-			CommandPath:          "/v1/work-items/abc/transition",
+			OriginNodeID:         "hub",
+			CommandPath:          "/v1/work-items/7b1fc532-14f2-4be5-81a5-4719dd11d453/transition",
 			CommandBody:          json.RawMessage(`{"to":"running"}`),
 			OriginIdempotencyKey: key,
 		})
@@ -49,7 +50,7 @@ func TestAckProjectorIntegration(t *testing.T) {
 
 	// A different target's command must not appear in m4's pending read.
 	if _, err := svc.Enqueue(ctx, EnqueueInput{
-		TargetNodeID: "laptop", CommandPath: "/v1/x", CommandBody: json.RawMessage(`{}`), OriginIdempotencyKey: "kx",
+		TargetNodeID: "laptop", OriginNodeID: "hub", CommandPath: "/v1/work-items", CommandBody: json.RawMessage(`{}`), OriginIdempotencyKey: "kx",
 	}); err != nil {
 		t.Fatalf("enqueue other target: %v", err)
 	}
