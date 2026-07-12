@@ -188,8 +188,9 @@ func (w *Worker) convergenceCandidates(ctx context.Context) ([]convergenceCandid
 		SELECT id, suggested_convergence_checks
 		FROM work_items
 		WHERE state = $1
+			AND human_review_status <> $2
 		ORDER BY updated_at ASC
-	`, domain.WorkItemRunning)
+	`, domain.WorkItemRunning, domain.HumanReviewBlocked)
 	if err != nil {
 		return nil, fmt.Errorf("query candidates: %w", err)
 	}

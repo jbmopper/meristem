@@ -172,6 +172,53 @@ func TestScanOnceEmitsBreachAndEscalates(t *testing.T) {
 	}
 }
 
+func TestScanOnceSkipsConvergenceForHumanReviewBlockedRunningItem(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "blocked-convergence-worker")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	item, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "provider-tracked running item",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"event:provider.progress"},
+		HumanReviewStatus:          domain.HumanReviewBlocked,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create running item: %v", err)
+	}
+	if err := service.AppendEvent(ctx, item.ID, "provider.progress", map[string]any{"pass": true}, systemTok.Token); err != nil {
+		t.Fatalf("append convergence-shaped provider progress: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("create worker: %v", err)
+	}
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("scan worker: %v", err)
+	}
+	if result.ConvergenceCandidatesScanned != 0 || result.ConvergenceVerdictsRecorded != 0 {
+		t.Fatalf("human-review-blocked item reached convergence: %+v", result)
+	}
+	var verdicts int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM convergence_verdicts WHERE work_item_id=$1`, item.ID).Scan(&verdicts); err != nil {
+		t.Fatalf("count convergence verdicts: %v", err)
+	}
+	if verdicts != 0 {
+		t.Fatalf("human-review-blocked item received %d convergence verdicts", verdicts)
+	}
+}
+
 // TestScanOnceReBreachesAfterStateRotation pins the "epoch" property: when
 // a work_item leaves a breached state and re-enters it, the next breach is
 // recorded as a distinct event, not collapsed against the prior one. This
