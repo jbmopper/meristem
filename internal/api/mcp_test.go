@@ -196,7 +196,7 @@ func TestOAuthAuthorizationServerMetadataUsesForwardedHost(t *testing.T) {
 	if body.Token != "https://mcp.example.test/oauth/token" {
 		t.Fatalf("token_endpoint = %q", body.Token)
 	}
-	if len(body.GrantTypesSupported) != 1 || body.GrantTypesSupported[0] != "authorization_code" {
+	if len(body.GrantTypesSupported) != 2 || body.GrantTypesSupported[0] != "authorization_code" || body.GrantTypesSupported[1] != "refresh_token" {
 		t.Fatalf("grant_types_supported = %#v", body.GrantTypesSupported)
 	}
 	if len(body.PKCE) != 1 || body.PKCE[0] != "S256" {

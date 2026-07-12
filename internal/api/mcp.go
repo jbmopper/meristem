@@ -22,7 +22,13 @@ func (s *Server) mcpProtected(next http.Handler) http.Handler {
 			return
 		}
 		secret := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-		tok, err := s.authenticator.Authenticate(r.Context(), secret)
+		var tok domain.Token
+		var err error
+		if strings.HasPrefix(secret, "mcpat_") && s.oauthTokens != nil {
+			tok, err = s.oauthTokens.AuthenticateAccess(r.Context(), secret, s.oauthPublicBaseURL(r)+"/mcp")
+		} else {
+			tok, err = s.authenticator.Authenticate(r.Context(), secret)
+		}
 		if err != nil {
 			code := "invalid_bearer_token"
 			message := "invalid bearer token"
