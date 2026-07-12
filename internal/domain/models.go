@@ -117,7 +117,12 @@ const (
 	// stored — provider clients authenticate with PKCE. Enables the
 	// provider-facing /mcp OAuth authorization-code flow (work items 861cc404,
 	// 6cc6779f, 8c30b348).
-	EventOAuthClientRegistered = "oauth_client.registered"
+	EventOAuthClientRegistered              = "oauth_client.registered"
+	EventOAuthClientActorBound              = "oauth_client.actor_bound"
+	EventOAuthClientActorBindingRequested   = "oauth_client.actor_binding_requested"
+	EventOAuthClientRevoked                 = "oauth_client.revoked"
+	EventOAuthAuthorizationRequestCreated   = "oauth_authorization_request.created"
+	EventOAuthAuthorizationRequestCompleted = "oauth_authorization_request.completed"
 	// EventOAuthAuthorizationCodeIssued records a provider authorization code
 	// minted by the /oauth/authorize consent step: the PKCE challenge, the
 	// exact redirect_uri, the /mcp audience, and the meristem actor the eventual
@@ -130,6 +135,10 @@ const (
 	// id plus the redeemed_at projection guard make redemption single-use and
 	// replay-safe (work item 6cc6779f).
 	EventOAuthAuthorizationCodeRedeemed = "oauth_authorization_code.redeemed"
+	EventOAuthGrantIssued               = "oauth_grant.issued"
+	EventOAuthGrantRefreshed            = "oauth_grant.refreshed"
+	EventOAuthGrantRevoked              = "oauth_grant.revoked"
+	EventOAuthRefreshReuseDetected      = "oauth_grant.refresh_reuse_detected"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -182,8 +191,17 @@ var AllEventKinds = []string{
 	EventCommandQueued,
 	EventCommandAcked,
 	EventOAuthClientRegistered,
+	EventOAuthClientActorBound,
+	EventOAuthClientActorBindingRequested,
+	EventOAuthClientRevoked,
+	EventOAuthAuthorizationRequestCreated,
+	EventOAuthAuthorizationRequestCompleted,
 	EventOAuthAuthorizationCodeIssued,
 	EventOAuthAuthorizationCodeRedeemed,
+	EventOAuthGrantIssued,
+	EventOAuthGrantRefreshed,
+	EventOAuthGrantRevoked,
+	EventOAuthRefreshReuseDetected,
 }
 
 const (
@@ -226,7 +244,9 @@ const (
 	// the code hash (see internal/oauth.CodeSubjectID) so the issue and redeem
 	// events about one code share a subject while the projection keys on the
 	// non-secret code_id text.
-	SubjectOAuthAuthorizationCode = "oauth_authorization_code"
+	SubjectOAuthAuthorizationCode    = "oauth_authorization_code"
+	SubjectOAuthAuthorizationRequest = "oauth_authorization_request"
+	SubjectOAuthGrant                = "oauth_grant"
 )
 
 // Verdict is the disposition produced by a deterministic convergence

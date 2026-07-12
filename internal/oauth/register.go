@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -22,12 +23,17 @@ var ErrInvalidRegistration = errors.New("oauth: invalid client registration")
 // oauth_client.registered events. It issues no client secret: provider clients
 // are public and authenticate with PKCE.
 type RegistrationService struct {
-	pool   *pgxpool.Pool
-	writer *events.Writer
+	pool          *pgxpool.Pool
+	writer        *events.Writer
+	systemActorID uuid.UUID
 }
 
 func NewRegistrationService(pool *pgxpool.Pool, writer *events.Writer) *RegistrationService {
 	return &RegistrationService{pool: pool, writer: writer}
+}
+
+func NewRegistrationServiceWithSystemActor(pool *pgxpool.Pool, writer *events.Writer, actorID uuid.UUID) *RegistrationService {
+	return &RegistrationService{pool: pool, writer: writer, systemActorID: actorID}
 }
 
 // RegisterInput is the subset of RFC 7591 client metadata the gateway accepts.
@@ -58,6 +64,10 @@ type RegisteredClient struct {
 func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (RegisteredClient, error) {
 	if s.pool == nil || s.writer == nil {
 		return RegisteredClient{}, errors.New("oauth: registration service is not configured")
+	}
+	systemActor, err := loadActor(ctx, s.pool, s.systemActorID, domain.SourceSystem)
+	if err != nil {
+		return RegisteredClient{}, err
 	}
 
 	authMethod := strings.TrimSpace(in.TokenEndpointAuthMethod)
@@ -96,11 +106,12 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind: domain.SubjectOAuthClient,
-		SubjectID:   ClientSubjectID(clientID),
-		Kind:        domain.EventOAuthClientRegistered,
-		Source:      domain.SourceSystem,
-		Payload:     payload,
+		SubjectKind:  domain.SubjectOAuthClient,
+		SubjectID:    ClientSubjectID(clientID),
+		Kind:         domain.EventOAuthClientRegistered,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &systemActor.ID,
+		Payload:      payload,
 	}); err != nil {
 		return RegisteredClient{}, fmt.Errorf("oauth: append oauth_client.registered: %w", err)
 	}

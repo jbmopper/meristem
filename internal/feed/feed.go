@@ -93,11 +93,20 @@ var ExcludedKinds = []string{
 	// dynamic registration), not the human activity narrative; it belongs to
 	// the log, not /v1/feed.
 	domain.EventOAuthClientRegistered,
+	domain.EventOAuthClientActorBound,
+	domain.EventOAuthClientActorBindingRequested,
+	domain.EventOAuthClientRevoked,
+	domain.EventOAuthAuthorizationRequestCreated,
+	domain.EventOAuthAuthorizationRequestCompleted,
 	// Authorization code issue/redeem are OAuth transport plumbing: the
 	// short-lived code exchanged for an access token. Auth-surface audit, not
 	// human activity narrative.
 	domain.EventOAuthAuthorizationCodeIssued,
 	domain.EventOAuthAuthorizationCodeRedeemed,
+	domain.EventOAuthGrantIssued,
+	domain.EventOAuthGrantRefreshed,
+	domain.EventOAuthGrantRevoked,
+	domain.EventOAuthRefreshReuseDetected,
 }
 
 type Item struct {

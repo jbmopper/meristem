@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/access"
@@ -96,6 +97,9 @@ type Server struct {
 	registry              *registry.Service
 	crossnode             *crossnode.QueueService
 	oauthClients          *oauth.RegistrationService
+	oauthAuthorization    *oauth.AuthorizationService
+	oauthTokens           *oauth.TokenService
+	oauthClientAdmin      *oauth.ClientAdminService
 	policy                safety.Policy
 }
 
@@ -146,7 +150,11 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		s.projections = projectiondefs.NewService(pool, s.writer)
 		s.registry = registry.NewService(pool, s.writer)
 		s.crossnode = crossnode.NewQueueService(pool, s.writer)
-		s.oauthClients = oauth.NewRegistrationService(pool, s.writer)
+		systemActorID, _ := uuid.Parse(strings.TrimSpace(os.Getenv(EnvOAuthSystemActorID)))
+		s.oauthClients = oauth.NewRegistrationServiceWithSystemActor(pool, s.writer, systemActorID)
+		s.oauthAuthorization = oauth.NewAuthorizationService(pool, s.writer, s.workItems, s.approvals, systemActorID)
+		s.oauthTokens = oauth.NewTokenService(pool, s.writer, systemActorID)
+		s.oauthClientAdmin = oauth.NewClientAdminService(pool, s.writer)
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
@@ -182,8 +190,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleOAuthProtectedResourceMetadata)
 	s.mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthAuthorizationServerMetadata)
 	s.mux.HandleFunc("POST /oauth/register", s.handleOAuthClientRegistration)
-	s.mux.HandleFunc("GET /oauth/authorize", s.handleOAuthFlowUnavailable)
-	s.mux.HandleFunc("POST /oauth/token", s.handleOAuthFlowUnavailable)
+	s.mux.HandleFunc("GET /oauth/authorize", s.handleOAuthAuthorize)
+	s.mux.HandleFunc("POST /oauth/token", s.handleOAuthToken)
+	s.mux.Handle("POST /v1/oauth/clients/{client_id}/actor", s.command(http.HandlerFunc(s.handleOAuthBindActor)))
+	s.mux.Handle("POST /v1/oauth/clients/{client_id}/revoke", s.command(http.HandlerFunc(s.handleOAuthRevokeClient)))
 	s.mux.Handle("GET /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
 	s.mux.Handle("POST /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))

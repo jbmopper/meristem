@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -26,6 +27,10 @@ type Client struct {
 	Scope                   string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
+	ActorTokenID            *uuid.UUID
+	AuthorityProfile        string
+	BindingWorkItemID       *uuid.UUID
+	RevokedAt               *time.Time
 }
 
 // AllowsRedirectURI reports whether uri is in the client's registered
@@ -50,12 +55,12 @@ func GetClient(ctx context.Context, pool *pgxpool.Pool, clientID string) (Client
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT client_id, client_name, redirect_uris, grant_types, response_types,
-		       token_endpoint_auth_method, scope, created_at, updated_at
+		       token_endpoint_auth_method, scope, created_at, updated_at, actor_token_id, authority_profile, binding_work_item_id, revoked_at
 		FROM oauth_clients
 		WHERE client_id = $1
 	`, clientID).Scan(
 		&c.ClientID, &c.ClientName, &redirectsJSON, &grantsJSON, &respsJSON,
-		&c.TokenEndpointAuthMethod, &c.Scope, &c.CreatedAt, &c.UpdatedAt,
+		&c.TokenEndpointAuthMethod, &c.Scope, &c.CreatedAt, &c.UpdatedAt, &c.ActorTokenID, &c.AuthorityProfile, &c.BindingWorkItemID, &c.RevokedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

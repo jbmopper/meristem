@@ -43,6 +43,8 @@ type IssueInput struct {
 	Scope               string
 	Resource            string
 	ActorTokenID        uuid.UUID
+	SystemActorTokenID  uuid.UUID
+	AuthorityProfile    string
 }
 
 // Issue mints a one-time authorization code and records its issue event. The
@@ -61,24 +63,34 @@ func (s *AuthCodeService) Issue(ctx context.Context, in IssueInput) (string, err
 		return "", fmt.Errorf("%w: resource (audience) is required", ErrInvalidGrant)
 	}
 
-	secret, codeID, hash, err := generateCode()
-	if err != nil {
-		return "", err
-	}
-	issuedAt := s.now().UTC()
-	expiresAt := issuedAt.Add(CodeTTLSeconds * time.Second)
-
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	secret, err := s.issueInTx(ctx, tx, in)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return secret, nil
+}
+
+func (s *AuthCodeService) issueInTx(ctx context.Context, tx pgx.Tx, in IssueInput) (string, error) {
+	secret, codeID, hash, err := generateCode()
+	if err != nil {
+		return "", err
+	}
+	expiresAt := s.now().UTC().Add(CodeTTLSeconds * time.Second)
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind: domain.SubjectOAuthAuthorizationCode,
-		SubjectID:   CodeSubjectID(codeID),
-		Kind:        domain.EventOAuthAuthorizationCodeIssued,
-		Source:      domain.SourceSystem,
+		SubjectKind:  domain.SubjectOAuthAuthorizationCode,
+		SubjectID:    CodeSubjectID(codeID),
+		Kind:         domain.EventOAuthAuthorizationCodeIssued,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &in.SystemActorTokenID,
 		Payload: issuedPayload{
 			PayloadVersion:      1,
 			CodeID:              codeID,
@@ -90,13 +102,11 @@ func (s *AuthCodeService) Issue(ctx context.Context, in IssueInput) (string, err
 			Scope:               in.Scope,
 			Resource:            in.Resource,
 			ActorTokenID:        in.ActorTokenID,
+			AuthorityProfile:    in.AuthorityProfile,
 			ExpiresAtUnix:       expiresAt.Unix(),
 		},
 	}); err != nil {
 		return "", fmt.Errorf("oauth: append authorization_code.issued: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", err
 	}
 	return secret, nil
 }

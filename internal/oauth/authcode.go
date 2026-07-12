@@ -71,6 +71,7 @@ type issuedPayload struct {
 	Scope               string    `json:"scope,omitempty"`
 	Resource            string    `json:"resource"`
 	ActorTokenID        uuid.UUID `json:"actor_token_id"`
+	AuthorityProfile    string    `json:"authority_profile"`
 	ExpiresAtUnix       int64     `json:"expires_at_unix"`
 }
 

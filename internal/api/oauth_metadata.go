@@ -11,6 +11,7 @@ import (
 // provider OAuth metadata. When unset, API requests derive it from forwarded
 // proxy headers and the request host.
 const EnvPublicBaseURL = "MERISTEM_PUBLIC_BASE_URL"
+const EnvOAuthSystemActorID = "MERISTEM_OAUTH_SYSTEM_ACTOR_TOKEN_ID"
 
 const mcpReadScope = "mcp:read"
 
@@ -33,10 +34,11 @@ func (s *Server) handleOAuthAuthorizationServerMetadata(w http.ResponseWriter, r
 		"token_endpoint":                        base + "/oauth/token",
 		"registration_endpoint":                 base + "/oauth/register",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      []string{mcpReadScope},
+		"revocation_endpoint":                   base + "/v1/oauth/clients/{client_id}/revoke",
 	})
 }
 
