@@ -24,7 +24,7 @@ func TestNetworkProjectionsRebuildFromEvents(t *testing.T) {
 	writer := app.NewEventWriter()
 	actor := createCmdSystemToken(t, ctx, pool, writer, "network-rebuild")
 	if err := registerNode(ctx, pool, writer, actor, []string{
-		"--node-id", "m4", "--base-url", "https://m4.example/mcp", "--status", "active",
+		"--node-id", "m4", "--base-url", "https://m4.example", "--status", "active",
 	}); err != nil {
 		t.Fatalf("register node: %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(registeredProjector{})
 	registry.Register(routeUpdatedProjector{})
+	registry.Register(snapshotObservedProjector{})
 }
 
 type registeredProjector struct{}
@@ -50,10 +51,12 @@ func applyRegisteredV1(ctx context.Context, tx pgx.Tx, event domain.Event) error
 	if p.Status == "" {
 		return fmt.Errorf("node.registered: status is required")
 	}
-	if err := validateOrigin("base_url", p.BaseURL); err != nil {
+	baseURL, err := canonicalOrigin("base_url", p.BaseURL)
+	if err != nil {
 		return fmt.Errorf("node.registered: %w", err)
 	}
-	if err := validateOrigin("direct_url", p.DirectURL); err != nil {
+	directURL, err := canonicalOrigin("direct_url", p.DirectURL)
+	if err != nil {
 		return fmt.Errorf("node.registered: %w", err)
 	}
 	relay, err := normalizeRelayVia(p.RelayVia)
@@ -61,15 +64,16 @@ func applyRegisteredV1(ctx context.Context, tx pgx.Tx, event domain.Event) error
 		return fmt.Errorf("node.registered: %w", err)
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO nodes (node_id, base_url, direct_url, relay_via, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $6)
+		INSERT INTO nodes (node_id, base_url, direct_url, relay_via, status, created_at, updated_at, registry_revision)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $6, $7)
 		ON CONFLICT (node_id) DO UPDATE SET
 			base_url = EXCLUDED.base_url,
 			direct_url = EXCLUDED.direct_url,
 			relay_via = EXCLUDED.relay_via,
 			status = EXCLUDED.status,
-			updated_at = EXCLUDED.updated_at
-	`, p.NodeID, p.BaseURL, p.DirectURL, relay, p.Status, event.OccurredAt)
+			updated_at = EXCLUDED.updated_at,
+			registry_revision = EXCLUDED.registry_revision
+	`, p.NodeID, baseURL, directURL, relay, p.Status, event.OccurredAt, event.Seq)
 	if err != nil {
 		return fmt.Errorf("node.registered: upsert projection: %w", err)
 	}
@@ -108,7 +112,8 @@ func applyRouteUpdatedV1(ctx context.Context, tx pgx.Tx, event domain.Event) err
 	if p.Status == "" {
 		return fmt.Errorf("node.route_updated: status is required")
 	}
-	if err := validateOrigin("direct_url", p.DirectURL); err != nil {
+	directURL, err := canonicalOrigin("direct_url", p.DirectURL)
+	if err != nil {
 		return fmt.Errorf("node.route_updated: %w", err)
 	}
 	relay, err := normalizeRelayVia(p.RelayVia)
@@ -120,9 +125,10 @@ func applyRouteUpdatedV1(ctx context.Context, tx pgx.Tx, event domain.Event) err
 			direct_url = $2,
 			relay_via = $3::jsonb,
 			status = $4,
-			updated_at = $5
+			updated_at = $5,
+			registry_revision = $6
 		WHERE node_id = $1
-	`, p.NodeID, p.DirectURL, relay, p.Status, event.OccurredAt)
+	`, p.NodeID, directURL, relay, p.Status, event.OccurredAt, event.Seq)
 	if err != nil {
 		return fmt.Errorf("node.route_updated: update projection: %w", err)
 	}

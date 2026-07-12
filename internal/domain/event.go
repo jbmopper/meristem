@@ -44,6 +44,7 @@ func (s Source) Valid() bool {
 // do not influence the id.
 type Event struct {
 	ID           uuid.UUID
+	Seq          int64
 	OccurredAt   time.Time
 	ActorTokenID *uuid.UUID
 	Source       Source

@@ -94,6 +94,10 @@ const (
 	// re-registering it. §2b of the network spec models route changes as
 	// node.route_updated events folded into the same `nodes` row.
 	EventNodeRouteUpdated = "node.route_updated"
+	// EventRegistrySnapshotObserved records one complete, validated registry
+	// snapshot pulled from the pinned registry home. Its projector atomically
+	// replaces the consumer's nodes projection and accepted source revision.
+	EventRegistrySnapshotObserved = "registry_snapshot.observed"
 	// EventCommandQueued records a cross-node command durably parked for a
 	// target node that has no inbound route reachable from the sender. The
 	// subject is the target node (SubjectNode); the projection is the
@@ -167,6 +171,7 @@ var AllEventKinds = []string{
 	EventProjectionDefined,
 	EventNodeRegistered,
 	EventNodeRouteUpdated,
+	EventRegistrySnapshotObserved,
 	EventCommandQueued,
 	EventCommandAcked,
 	EventOAuthClientRegistered,
@@ -201,6 +206,9 @@ const (
 	// internal/nodes.NodeSubjectID) so every event about one node shares a
 	// subject while the projection keys on the DNS-safe node_id text.
 	SubjectNode = "node"
+	// SubjectRegistrySnapshot is the consumer-local aggregate for snapshots
+	// from one pinned registry home.
+	SubjectRegistrySnapshot = "registry_snapshot"
 	// SubjectOAuthClient is the subject kind for a dynamically-registered
 	// provider OAuth client (RFC 7591). The subject_id is a deterministic UUID
 	// derived from the client_id (see internal/oauth.ClientSubjectID) so every
@@ -410,6 +418,9 @@ const (
 	// NodeStatusActive marks a node that is registered and expected to be
 	// reachable over at least one approved route.
 	NodeStatusActive NodeStatus = "active"
+	// NodeStatusDisabled records operator intent to exclude a node from route
+	// selection without conflating that choice with observed health.
+	NodeStatusDisabled NodeStatus = "disabled"
 	// NodeStatusUnreachable marks a node with no currently reachable route
 	// (e.g. ingress down during interim bring-up). It stays in the registry.
 	NodeStatusUnreachable NodeStatus = "unreachable"
@@ -426,6 +437,9 @@ type Node struct {
 	Status    NodeStatus
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// RegistryRevision is the events.seq revision on the authoritative
+	// registry home that last produced this entry.
+	RegistryRevision int64
 }
 
 // DeterministicError is the current-state projection for deterministic-layer
