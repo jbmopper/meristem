@@ -167,12 +167,13 @@ func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID
 	}
 
 	var occurredAt time.Time
+	var seq int64
 	err = tx.QueryRow(ctx, `
 		INSERT INTO events (id, actor_token_id, source, subject_kind, subject_id, kind, payload)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (id) DO NOTHING
-		RETURNING occurred_at
-	`, id, spec.ActorTokenID, string(spec.Source), spec.SubjectKind, spec.SubjectID, spec.Kind, payload).Scan(&occurredAt)
+		RETURNING occurred_at, seq
+	`, id, spec.ActorTokenID, string(spec.Source), spec.SubjectKind, spec.SubjectID, spec.Kind, payload).Scan(&occurredAt, &seq)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return id, false, nil
@@ -183,6 +184,7 @@ func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID
 
 	event := domain.Event{
 		ID:           id,
+		Seq:          seq,
 		OccurredAt:   occurredAt,
 		ActorTokenID: spec.ActorTokenID,
 		Source:       spec.Source,

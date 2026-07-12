@@ -5,13 +5,17 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
 )
 
 // CursorStore persists the spoke's hub-feed poll bookmark so a restart resumes
-// where it left off. It is deliberately not on the events path: the cursor is
-// derived, best-effort operational state (see migration 0024_spoke_state).
+// where it left off. The bookmark is projected from spoke_cursor.advanced
+// events (migration 0027), not written to spoke_state directly.
 type CursorStore interface {
 	// Load returns the persisted cursor, or "" when none has been stored yet.
 	Load(ctx context.Context) (string, error)
@@ -23,15 +27,36 @@ type CursorStore interface {
 // hub base URL so re-pointing a spoke at a different hub starts a fresh cursor
 // rather than replaying the old hub's seq against the new one.
 type pgCursorStore struct {
-	pool *pgxpool.Pool
-	key  string
+	pool    *pgxpool.Pool
+	key     string
+	service *CursorService
+	actorID uuid.UUID
+	source  domain.Source
 }
 
-// NewCursorStore constructs a Postgres-backed CursorStore for hubBaseURL over
-// the spoke's local pool.
+// NewCursorStore preserves the old constructor for compile-time compatibility,
+// but its Save fails closed. New wiring must use NewEventCursorStore with a
+// resolved local actor so every cursor mutation is fully attributed.
 func NewCursorStore(pool *pgxpool.Pool, hubBaseURL string) CursorStore {
 	return &pgCursorStore{pool: pool, key: "hub_feed_cursor:" + hubBaseURL}
 }
+
+// NewEventCursorStore constructs an event-backed CursorStore. Root wiring must
+// resolve actorID/source from the local spoke token and pass the full app event
+// writer; no remote metadata may supply this attribution.
+func NewEventCursorStore(pool *pgxpool.Pool, writer *events.Writer, hubBaseURL string, actorID uuid.UUID, source domain.Source) CursorStore {
+	return &pgCursorStore{
+		pool:    pool,
+		key:     "hub_feed_cursor:" + hubBaseURL,
+		service: NewCursorService(pool, writer),
+		actorID: actorID,
+		source:  source,
+	}
+}
+
+// ErrCursorWriterNotConfigured makes legacy wiring fail closed rather than
+// directly mutating spoke_state outside the event log.
+var ErrCursorWriterNotConfigured = errors.New("spoke: event-backed cursor writer is not configured")
 
 func (s *pgCursorStore) Load(ctx context.Context) (string, error) {
 	var value string
@@ -48,13 +73,14 @@ func (s *pgCursorStore) Load(ctx context.Context) (string, error) {
 }
 
 func (s *pgCursorStore) Save(ctx context.Context, cursor string) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO spoke_state (key, value, updated_at)
-		VALUES ($1, $2, now())
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-	`, s.key, cursor)
-	if err != nil {
-		return fmt.Errorf("spoke: save cursor: %w", err)
+	if s.service == nil {
+		return ErrCursorWriterNotConfigured
 	}
-	return nil
+	_, err := s.service.Advance(ctx, AdvanceCursorInput{
+		Key:          s.key,
+		Value:        cursor,
+		ActorTokenID: s.actorID,
+		Source:       s.source,
+	})
+	return err
 }

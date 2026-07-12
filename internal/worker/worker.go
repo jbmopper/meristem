@@ -161,6 +161,9 @@ func EvaluateBreaches(now time.Time, candidates []Candidate) []Breach {
 
 // Result is the outcome of a single ScanOnce call.
 type Result struct {
+	// NetworkCommandsExpired is the number of pending cross-node commands this
+	// worker tick moved to the deterministic expired terminal state.
+	NetworkCommandsExpired int
 	// Scanned is the count of non-terminal work_items inspected, including
 	// those that were not in breach.
 	Scanned int

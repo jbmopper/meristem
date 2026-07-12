@@ -30,7 +30,7 @@ func TestNodeProjectorsIntegration(t *testing.T) {
 	RegisterProjectors(reg)
 	writer := events.NewWriter(reg)
 
-	base := "https://ingress.example/mcp"
+	base := "https://ingress.example"
 	registeredPayload := map[string]any{
 		"node_id":   "m4",
 		"base_url":  base,
@@ -109,7 +109,7 @@ func TestNodeProjectorsIntegration(t *testing.T) {
 
 	// A route update rewrites direct_url/relay_via/status, leaves base_url and
 	// created_at intact.
-	direct := "https://m4.peer.example/mcp"
+	direct := "https://m4.peer.example"
 	appendEvent(domain.EventNodeRouteUpdated, map[string]any{
 		"node_id":    "m4",
 		"direct_url": direct,

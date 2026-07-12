@@ -40,10 +40,18 @@ func BuildRegisteredPayload(p RegisterParams) (any, error) {
 	if err := validateRelayVia(p.RelayVia); err != nil {
 		return nil, err
 	}
+	baseURL, err := canonicalOrigin("base_url", p.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	directURL, err := canonicalOrigin("direct_url", p.DirectURL)
+	if err != nil {
+		return nil, err
+	}
 	return registeredPayload{
 		NodeID:    p.NodeID,
-		BaseURL:   p.BaseURL,
-		DirectURL: p.DirectURL,
+		BaseURL:   baseURL,
+		DirectURL: directURL,
 		RelayVia:  p.RelayVia,
 		Status:    p.Status,
 	}, nil
@@ -72,12 +80,32 @@ func BuildRouteUpdatedPayload(p RouteParams) (any, error) {
 	if err := validateRelayVia(p.RelayVia); err != nil {
 		return nil, err
 	}
+	directURL, err := canonicalOrigin("direct_url", p.DirectURL)
+	if err != nil {
+		return nil, err
+	}
 	return routeUpdatedPayload{
 		NodeID:    p.NodeID,
-		DirectURL: p.DirectURL,
+		DirectURL: directURL,
 		RelayVia:  p.RelayVia,
 		Status:    p.Status,
 	}, nil
+}
+
+func validateOrigin(field string, value *string) error {
+	_, err := canonicalOrigin(field, value)
+	return err
+}
+
+func canonicalOrigin(field string, value *string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	canonical, err := domain.CanonicalNodeOrigin(*value)
+	if err != nil {
+		return nil, fmt.Errorf("%s %q: %w", field, *value, err)
+	}
+	return &canonical, nil
 }
 
 // validateRelayVia reports the first relay hop that is not a DNS-safe node_id.
@@ -98,7 +126,7 @@ func validateRelayVia(relay []string) error {
 // stage-0 exit.
 func List(ctx context.Context, pool *pgxpool.Pool) ([]domain.Node, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT node_id, base_url, direct_url, relay_via, status, created_at, updated_at
+		SELECT node_id, base_url, direct_url, relay_via, status, created_at, updated_at, registry_revision
 		FROM nodes
 		ORDER BY node_id
 	`)
@@ -114,7 +142,7 @@ func List(ctx context.Context, pool *pgxpool.Pool) ([]domain.Node, error) {
 			relay  []byte
 			status string
 		)
-		if err := rows.Scan(&n.NodeID, &n.BaseURL, &n.DirectURL, &relay, &status, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(&n.NodeID, &n.BaseURL, &n.DirectURL, &relay, &status, &n.CreatedAt, &n.UpdatedAt, &n.RegistryRevision); err != nil {
 			return nil, fmt.Errorf("nodes: scan row: %w", err)
 		}
 		n.Status = domain.NodeStatus(status)

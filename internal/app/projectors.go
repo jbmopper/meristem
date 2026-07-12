@@ -19,6 +19,7 @@ import (
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/signals"
+	"github.com/jbmopper/meristem/internal/spoke"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -42,6 +43,7 @@ func NewProjectionRegistry() *projections.Registry {
 	projectiondefs.RegisterProjectors(reg)
 	nodes.RegisterProjectors(reg)
 	crossnode.RegisterProjectors(reg)
+	spoke.RegisterProjectors(reg)
 	oauth.RegisterProjectors(reg)
 	return reg
 }

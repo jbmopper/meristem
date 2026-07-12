@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
-// CommandPath is the route every cross-node command posts to on the receiving
-// node, whatever the delivery mechanism.
+// CommandPath is the durable queue ingress. Direct delivery calls the
+// command's canonical REST path on its home node instead of wrapping it.
 const CommandPath = "/v1/crossnode/commands"
 
 // Delivery headers. Only relay candidates set Relayed; only queue candidates
@@ -22,6 +25,13 @@ const (
 	// HeaderIdempotencyKey carries the caller-supplied idempotency key so a
 	// retried command collapses at the home node's idempotency middleware.
 	HeaderIdempotencyKey = "Idempotency-Key"
+	// HeaderTargetNode binds a direct or queued request to the registry entry
+	// selected by the sender. A canonical REST receiver rejects a non-local
+	// value before appending an event.
+	HeaderTargetNode = "X-Meristem-Target-Node"
+	// HeaderOriginNode records the sending node as structural provenance. It
+	// never substitutes for the receiver-resolved actor token.
+	HeaderOriginNode = "X-Meristem-Origin-Node"
 	// HeaderRelayed marks a relay hop. §2b: a node never forwards an already
 	// relayed request, so loops are impossible structurally.
 	HeaderRelayed = "X-Meristem-Relayed"
@@ -38,82 +48,242 @@ type wireCommand struct {
 	CommandBody json.RawMessage `json:"command_body"`
 }
 
+const (
+	defaultHTTPTimeout    = 10 * time.Second
+	defaultDirectAttempts = 3
+	defaultDirectPatience = 60 * time.Second
+)
+
+// DeliveryPolicy bounds direct delivery before durable queue fallback. Zero
+// values select the Stage 1 defaults. DirectBackoff is injectable so tests and
+// deployments with shorter budgets can preserve the same deterministic retry
+// count without sleeping on the default schedule.
+type DeliveryPolicy struct {
+	DirectAttempts int
+	AttemptTimeout time.Duration
+	DirectPatience time.Duration
+	DirectBackoff  func(failedAttempt int) time.Duration
+}
+
+func defaultDeliveryPolicy() DeliveryPolicy {
+	return DeliveryPolicy{
+		DirectAttempts: defaultDirectAttempts,
+		AttemptTimeout: defaultHTTPTimeout,
+		DirectPatience: defaultDirectPatience,
+		DirectBackoff: func(failedAttempt int) time.Duration {
+			// Two retry gaps: 1s, then 2s. The attempt and 60-second wall-clock
+			// caps remain the authoritative patience bounds.
+			return time.Second << (failedAttempt - 1)
+		},
+	}
+}
+
 // Deliver walks candidates in order, posting req to each until one gives a
 // definitive answer, and returns the outcome plus an updated cooldown map.
+// credentials is mandatory and resolves a bearer for the node terminating each
+// attempt; credential material is attached only to the outbound request.
 //
 // Per candidate:
-//   - a transport failure or a 5xx cools the route down (RouteKey recorded at
-//     now) and advances to the next candidate;
-//   - a 4xx is definitive: the walk stops and the response is surfaced
+//   - a transport failure or 502/503/504 cools the route down (RouteKey
+//     recorded at now), consumes the finite direct retry budget, then advances;
+//   - every other non-2xx is definitive: the walk stops and surfaces it
 //     (Delivered false, StatusCode/Body set) — a home node that rejects the
 //     command will reject the retry too, so trying another route is pointless;
 //   - a 2xx is success: the walk stops with Delivered true.
 //
-// If every candidate fails at the transport/5xx level the walk exhausts and
+// If every candidate fails at the retryable transport/peer level the walk exhausts and
 // Deliver returns the accumulated cooldowns with ErrAllRoutesFailed.
 //
 // cooldowns is treated as read-only input; the returned Outcome.Cooldowns is a
 // fresh map (input entries copied) so the function stays pure-ish — cooldowns
 // in, cooldowns out. now stamps any cooldown this walk records.
-func Deliver(ctx context.Context, client *http.Client, candidates []Candidate, req Command, cooldowns map[string]time.Time, now time.Time) (Outcome, error) {
+func Deliver(ctx context.Context, client *http.Client, credentials BearerResolver, candidates []Candidate, req Command, cooldowns map[string]time.Time, now time.Time) (Outcome, error) {
+	return DeliverWithPolicy(ctx, client, credentials, candidates, req, cooldowns, now, DeliveryPolicy{})
+}
+
+// DeliverWithPolicy is Deliver with an explicit finite direct retry budget.
+// A direct route is retried only for transport failures and 502/503/504. Once
+// its budget is exhausted, the walk advances to the approved durable queue
+// candidates. All other HTTP responses are terminal and never bypassed through
+// a queue.
+func DeliverWithPolicy(ctx context.Context, client *http.Client, credentials BearerResolver, candidates []Candidate, req Command, cooldowns map[string]time.Time, now time.Time, policy DeliveryPolicy) (Outcome, error) {
+	if !domain.ValidNodeID(req.OriginNodeID) {
+		return Outcome{Cooldowns: copyCooldowns(cooldowns)}, ErrInvalidOriginNodeID
+	}
+	if !domain.ValidNodeID(req.TargetNodeID) {
+		return Outcome{Cooldowns: copyCooldowns(cooldowns)}, ErrInvalidTargetNodeID
+	}
+	if err := ValidateCommandPath(req.Path); err != nil {
+		return Outcome{Cooldowns: copyCooldowns(cooldowns)}, err
+	}
+	if credentials == nil {
+		return Outcome{Cooldowns: copyCooldowns(cooldowns)}, ErrMissingCredential
+	}
 	if client == nil {
 		client = http.DefaultClient
 	}
+	policy = normalizeDeliveryPolicy(policy)
 	out := Outcome{Cooldowns: copyCooldowns(cooldowns)}
-
-	body, err := json.Marshal(wireCommand{CommandPath: req.Path, CommandBody: normalizeBody(req.Body)})
-	if err != nil {
-		return out, fmt.Errorf("crossnode: marshal command: %w", err)
-	}
+	var configurationErr error
 
 	for _, c := range candidates {
-		status, respBody, reqErr := post(ctx, client, c, req, body)
-		attempt := Attempt{Candidate: c, StatusCode: status, Err: reqErr}
-
-		switch {
-		case reqErr != nil || status >= http.StatusInternalServerError:
-			// Transport failure or 5xx: cool this route down and advance.
-			out.Cooldowns[c.RouteKey] = now
-			attempt.CooledDown = true
-			out.Attempts = append(out.Attempts, attempt)
-			continue
-		case status >= http.StatusBadRequest:
-			// Definitive 4xx: stop and surface, do not try another route.
-			out.Attempts = append(out.Attempts, attempt)
-			out.Terminal = c
-			out.StatusCode = status
-			out.Body = respBody
-			return out, nil
-		default:
-			// 2xx success.
-			out.Attempts = append(out.Attempts, attempt)
-			out.Delivered = true
-			out.Terminal = c
-			out.StatusCode = status
-			out.Body = respBody
-			return out, nil
+		attempts := 1
+		attemptParent := ctx
+		cancelBudget := func() {}
+		if c.Kind == KindDirect {
+			attempts = policy.DirectAttempts
+			attemptParent, cancelBudget = context.WithTimeout(ctx, policy.DirectPatience)
 		}
+
+		for attemptNumber := 1; attemptNumber <= attempts; attemptNumber++ {
+			attemptCtx, cancel := context.WithTimeout(attemptParent, policy.AttemptTimeout)
+			status, respBody, reqErr := post(attemptCtx, client, credentials, c, req)
+			cancel()
+			attempt := Attempt{Candidate: c, StatusCode: status, Err: reqErr}
+
+			switch {
+			case errors.Is(reqErr, ErrMissingCredential), errors.Is(reqErr, ErrUnsupportedRoute), errors.Is(reqErr, ErrInvalidOrigin):
+				out.Attempts = append(out.Attempts, attempt)
+				configurationErr = errors.Join(configurationErr, reqErr)
+				attemptNumber = attempts
+			case reqErr != nil || retryablePeerStatus(status):
+				out.Cooldowns[c.RouteKey] = now
+				attempt.CooledDown = true
+				out.Attempts = append(out.Attempts, attempt)
+				if c.Kind == KindDirect && attemptNumber < attempts {
+					if !waitForDirectRetry(ctx, attemptParent, policy.DirectBackoff(attemptNumber)) {
+						attemptNumber = attempts
+					}
+				}
+			case status < http.StatusOK || status >= http.StatusMultipleChoices:
+				out.Attempts = append(out.Attempts, attempt)
+				out.Terminal = c
+				out.StatusCode = status
+				out.Body = respBody
+				cancelBudget()
+				return out, nil
+			default:
+				out.Attempts = append(out.Attempts, attempt)
+				out.Delivered = true
+				out.Terminal = c
+				out.StatusCode = status
+				out.Body = respBody
+				cancelBudget()
+				return out, nil
+			}
+		}
+		cancelBudget()
 	}
 
+	if configurationErr != nil {
+		return out, errors.Join(ErrAllRoutesFailed, configurationErr)
+	}
 	return out, ErrAllRoutesFailed
 }
 
-func post(ctx context.Context, client *http.Client, c Candidate, req Command, body []byte) (int, []byte, error) {
-	url := strings.TrimRight(c.URL, "/") + CommandPath
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+func normalizeDeliveryPolicy(policy DeliveryPolicy) DeliveryPolicy {
+	defaults := defaultDeliveryPolicy()
+	if policy.DirectAttempts <= 0 {
+		policy.DirectAttempts = defaults.DirectAttempts
+	}
+	if policy.AttemptTimeout <= 0 {
+		policy.AttemptTimeout = defaults.AttemptTimeout
+	}
+	if policy.DirectPatience <= 0 {
+		policy.DirectPatience = defaults.DirectPatience
+	}
+	if policy.DirectBackoff == nil {
+		policy.DirectBackoff = defaults.DirectBackoff
+	}
+	return policy
+}
+
+func retryablePeerStatus(status int) bool {
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func waitForDirectRetry(ctx, budget context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return ctx.Err() == nil && budget.Err() == nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-budget.Done():
+		return false
+	}
+}
+
+func post(ctx context.Context, client *http.Client, credentials BearerResolver, c Candidate, req Command) (int, []byte, error) {
+	if err := ValidateOrigin(c.URL); err != nil {
+		return 0, nil, err
+	}
+	if c.NodeID == "" {
+		return 0, nil, fmt.Errorf("%w: route has no terminating node id", ErrMissingCredential)
+	}
+	bearer, err := credentials(ctx, c.NodeID)
+	if err != nil {
+		return 0, nil, fmt.Errorf("%w for node %s: %v", ErrMissingCredential, c.NodeID, err)
+	}
+	if strings.TrimSpace(bearer) == "" {
+		return 0, nil, fmt.Errorf("%w for node %s", ErrMissingCredential, c.NodeID)
+	}
+
+	var endpoint string
+	var body []byte
+	switch c.Kind {
+	case KindDirect:
+		endpoint = strings.TrimRight(c.URL, "/") + req.Path
+		body = normalizeBody(req.Body)
+	case KindQueue:
+		endpoint = strings.TrimRight(c.URL, "/") + CommandPath
+		body, err = json.Marshal(wireCommand{
+			CommandPath: req.Path,
+			CommandBody: normalizeBody(req.Body),
+		})
+		if err != nil {
+			return 0, nil, fmt.Errorf("crossnode: marshal command: %w", err)
+		}
+	case KindRelay:
+		return 0, nil, ErrUnsupportedRoute
+	default:
+		return 0, nil, fmt.Errorf("%w: unknown candidate kind %q", ErrUnsupportedRoute, c.Kind)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set(HeaderIdempotencyKey, req.IdempotencyKey)
+	httpReq.Header.Set("Authorization", "Bearer "+bearer)
+	// Bind the HTTP request to the node terminating this attempt. For a queue
+	// fallback that is the queue host; HeaderQueueFor separately names the
+	// logical home target.
+	httpReq.Header.Set(HeaderTargetNode, c.NodeID)
+	httpReq.Header.Set(HeaderOriginNode, req.OriginNodeID)
 	switch c.Kind {
-	case KindRelay:
-		httpReq.Header.Set(HeaderRelayed, "true")
 	case KindQueue:
 		httpReq.Header.Set(HeaderQueueFor, req.TargetNodeID)
 	}
 
-	resp, err := client.Do(httpReq)
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	// Call the transport directly so redirects cannot move an authenticated
+	// cross-node command to a different origin. The per-attempt context above
+	// supplies the finite timeout normally provided by http.Client.Do.
+	resp, err := transport.RoundTrip(httpReq)
 	if err != nil {
 		return 0, nil, err
 	}

@@ -18,14 +18,16 @@
 // register appends a node.registered event whose payload carries the full
 // declared state; an identical re-run collapses onto the same event (the
 // payload is the idempotency key, as in seed.go) while any changed field
-// appends a fresh event. update-route appends a node.route_updated event that
-// fully replaces the reachability route state (direct_url, relay_via, status);
-// fields the operator omits are cleared, per the projector's replacement
-// contract. list is read-only.
+// appends a fresh event. update-route declares the full replacement
+// reachability state (direct_url, relay_via, status): repeating the current
+// declaration is a no-op, while returning to an earlier state appends a new
+// node.route_updated event. Fields the operator omits are cleared, per the
+// projector's replacement contract. list is read-only.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -96,7 +98,7 @@ func registerNode(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer
 	var relayVia stringSliceFlag
 	fs.Var(&baseURL, "base-url", "registered ingress base URL (optional)")
 	fs.Var(&directURL, "direct-url", "direct peer route URL (optional)")
-	fs.Var(&relayVia, "relay-via", "node id to relay through; repeatable")
+	fs.Var(&relayVia, "relay-via", "legacy queue-host node id; repeatable")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -142,7 +144,7 @@ func updateNodeRoute(ctx context.Context, pool *pgxpool.Pool, writer *events.Wri
 	var directURL optionalStringFlag
 	var relayVia stringSliceFlag
 	fs.Var(&directURL, "direct-url", "direct peer route URL (optional; omitted clears it)")
-	fs.Var(&relayVia, "relay-via", "node id to relay through; repeatable (omitted clears the chain)")
+	fs.Var(&relayVia, "relay-via", "legacy queue-host node id; repeatable (omitted clears the list)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -164,12 +166,107 @@ func updateNodeRoute(ctx context.Context, pool *pgxpool.Pool, writer *events.Wri
 		return fmt.Errorf("node update-route: %w", err)
 	}
 
-	fresh, err := appendNodeEvent(ctx, pool, writer, actor, nodes.NodeSubjectID(*nodeID), domain.EventNodeRouteUpdated, payload)
+	fresh, err := appendNodeRouteEvent(ctx, pool, writer, actor, *nodeID, payload)
 	if err != nil {
 		return fmt.Errorf("node update-route: %w", err)
 	}
 	fmt.Fprintf(os.Stdout, "node update-route: node_id=%s %s\n", *nodeID, freshLabel(fresh, "updated"))
 	return nil
+}
+
+// appendNodeRouteEvent serializes declarations for one node against its
+// current projection. Repeating the current desired route is a no-op, while a
+// later A -> B -> A declaration receives the immediately preceding node event
+// as its discriminator and therefore cannot collapse onto the earlier A.
+// Locking the node row makes the comparison/discriminator pair safe when two
+// node-admin processes update the same node concurrently.
+func appendNodeRouteEvent(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, nodeID string, payload any) (bool, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var (
+		currentDirect *string
+		currentRelay  []byte
+		currentStatus string
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT direct_url, relay_via, status
+		FROM nodes
+		WHERE node_id = $1
+		FOR UPDATE
+	`, nodeID).Scan(&currentDirect, &currentRelay, &currentStatus); err != nil {
+		if err == pgx.ErrNoRows {
+			return false, fmt.Errorf("node %q is not registered", nodeID)
+		}
+		return false, fmt.Errorf("lock node route: %w", err)
+	}
+
+	var desired struct {
+		DirectURL *string  `json:"direct_url"`
+		RelayVia  []string `json:"relay_via"`
+		Status    string   `json:"status"`
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Errorf("marshal route payload: %w", err)
+	}
+	if err := json.Unmarshal(b, &desired); err != nil {
+		return false, fmt.Errorf("decode route payload: %w", err)
+	}
+	var relay []string
+	if err := json.Unmarshal(currentRelay, &relay); err != nil {
+		return false, fmt.Errorf("decode current relay_via: %w", err)
+	}
+	if optionalStringsEqual(currentDirect, desired.DirectURL) && stringSlicesEqual(relay, desired.RelayVia) && currentStatus == desired.Status {
+		return false, nil
+	}
+
+	var predecessor uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id
+		FROM events
+		WHERE subject_kind = $1 AND subject_id = $2
+		ORDER BY seq DESC
+		LIMIT 1
+	`, domain.SubjectNode, nodes.NodeSubjectID(nodeID)).Scan(&predecessor); err != nil {
+		return false, fmt.Errorf("resolve route predecessor: %w", err)
+	}
+
+	_, fresh, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind:   domain.SubjectNode,
+		SubjectID:     nodes.NodeSubjectID(nodeID),
+		Kind:          domain.EventNodeRouteUpdated,
+		Source:        domain.SourceSystem,
+		ActorTokenID:  &actor.ID,
+		Discriminator: "predecessor:" + predecessor.String(),
+		Payload:       payload,
+	})
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return fresh, nil
+}
+
+func optionalStringsEqual(a, b *string) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // listNodes prints the nodes projection: one tab-separated row per node with

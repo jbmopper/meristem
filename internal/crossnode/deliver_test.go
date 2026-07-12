@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -11,16 +13,21 @@ import (
 	"time"
 )
 
-// capture records what one stub receiver saw, so tests assert on headers and
-// the decoded envelope.
+const sampleWorkItemID = "11111111-1111-4111-8111-111111111111"
+
+// capture records what one stub receiver saw, so tests assert the exact
+// direct-REST versus durable-queue wire shape.
 type capture struct {
 	mu       sync.Mutex
 	hits     int
 	path     string
-	relayed  string
+	auth     string
 	queueFor string
+	target   string
+	origin   string
 	idemKey  string
-	body     wireCommand
+	rawBody  []byte
+	wireBody wireCommand
 }
 
 func (c *capture) record(r *http.Request) {
@@ -28,10 +35,13 @@ func (c *capture) record(r *http.Request) {
 	defer c.mu.Unlock()
 	c.hits++
 	c.path = r.URL.Path
-	c.relayed = r.Header.Get(HeaderRelayed)
+	c.auth = r.Header.Get("Authorization")
 	c.queueFor = r.Header.Get(HeaderQueueFor)
+	c.target = r.Header.Get(HeaderTargetNode)
+	c.origin = r.Header.Get(HeaderOriginNode)
 	c.idemKey = r.Header.Get(HeaderIdempotencyKey)
-	_ = json.NewDecoder(r.Body).Decode(&c.body)
+	c.rawBody, _ = io.ReadAll(r.Body)
+	_ = json.Unmarshal(c.rawBody, &c.wireBody)
 }
 
 func stub(t *testing.T, status int, cap *capture) *httptest.Server {
@@ -49,198 +59,277 @@ func stub(t *testing.T, status int, cap *capture) *httptest.Server {
 
 func sampleCommand() Command {
 	return Command{
+		OriginNodeID:   "den",
 		TargetNodeID:   "m4",
 		IdempotencyKey: "idem-123",
-		Path:           "/v1/work-items/abc/transition",
+		Path:           "/v1/work-items/" + sampleWorkItemID + "/transition",
 		Body:           json.RawMessage(`{"to":"running"}`),
 	}
 }
 
-func TestDeliverDirectSuccess(t *testing.T) {
-	cap := &capture{}
-	srv := stub(t, http.StatusAccepted, cap)
-	candidates := []Candidate{{Kind: KindDirect, URL: srv.URL, RouteKey: "direct|m4"}}
+func resolver(tokens map[string]string) BearerResolver {
+	return func(_ context.Context, nodeID string) (string, error) {
+		if token := tokens[nodeID]; token != "" {
+			return token, nil
+		}
+		return "", fmt.Errorf("no credential for %s", nodeID)
+	}
+}
 
-	out, err := Deliver(context.Background(), srv.Client(), candidates, sampleCommand(), nil, time.Now())
+func fastDeliveryPolicy() DeliveryPolicy {
+	return DeliveryPolicy{
+		DirectAttempts: 3,
+		AttemptTimeout: time.Second,
+		DirectPatience: time.Second,
+		DirectBackoff:  func(int) time.Duration { return 0 },
+	}
+}
+
+func TestDeliverDirectCallsCanonicalRESTWithTargetBearer(t *testing.T) {
+	cap := &capture{}
+	srv := stub(t, http.StatusOK, cap)
+	candidates := []Candidate{{Kind: KindDirect, URL: srv.URL, NodeID: "m4", RouteKey: "direct|m4"}}
+
+	out, err := Deliver(context.Background(), srv.Client(), resolver(map[string]string{"m4": "target-token"}), candidates, sampleCommand(), nil, time.Now())
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if !out.Delivered || out.StatusCode != http.StatusAccepted {
-		t.Fatalf("out = %+v, want delivered 202", out)
+	if !out.Delivered || out.StatusCode != http.StatusOK || out.Terminal.Kind != KindDirect {
+		t.Fatalf("out = %+v, want direct 200", out)
 	}
-	if out.Terminal.Kind != KindDirect {
-		t.Fatalf("terminal kind = %s, want direct", out.Terminal.Kind)
+	if cap.path != sampleCommand().Path {
+		t.Fatalf("path = %s, want canonical %s", cap.path, sampleCommand().Path)
 	}
-	if cap.path != CommandPath {
-		t.Fatalf("path = %s, want %s", cap.path, CommandPath)
+	if cap.queueFor != "" {
+		t.Fatalf("direct request set queue-for header: %q", cap.queueFor)
 	}
-	if cap.relayed != "" || cap.queueFor != "" {
-		t.Fatalf("direct request set routing headers: relayed=%q queueFor=%q", cap.relayed, cap.queueFor)
+	if cap.auth != "Bearer target-token" {
+		t.Fatalf("authorization = %q", cap.auth)
 	}
-	if cap.idemKey != "idem-123" {
-		t.Fatalf("idempotency key = %q, want idem-123", cap.idemKey)
+	if cap.target != "m4" || cap.origin != "den" {
+		t.Fatalf("direct target/origin binding = %q/%q", cap.target, cap.origin)
 	}
-	if cap.body.CommandPath != "/v1/work-items/abc/transition" {
-		t.Fatalf("body command_path = %q", cap.body.CommandPath)
+	if cap.idemKey != "idem-123" || string(cap.rawBody) != `{"to":"running"}` {
+		t.Fatalf("direct wire key/body = %q %s", cap.idemKey, cap.rawBody)
 	}
 	if len(out.Cooldowns) != 0 {
 		t.Fatalf("success recorded cooldowns: %v", out.Cooldowns)
 	}
 }
 
-func TestDeliverRelaySetsRelayedHeader(t *testing.T) {
+func TestDeliverQueueUsesEnvelopeAndQueueHostBearer(t *testing.T) {
 	cap := &capture{}
 	srv := stub(t, http.StatusAccepted, cap)
-	candidates := []Candidate{{Kind: KindRelay, URL: srv.URL, Via: "hub", RouteKey: "relay|m4|hub"}}
+	candidates := []Candidate{{Kind: KindQueue, URL: srv.URL, NodeID: "hub", Via: "hub", RouteKey: "queue|m4|hub"}}
 
-	out, err := Deliver(context.Background(), srv.Client(), candidates, sampleCommand(), nil, time.Now())
-	if err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-	if !out.Delivered {
-		t.Fatalf("relay not delivered: %+v", out)
-	}
-	if cap.relayed != "true" {
-		t.Fatalf("relay header = %q, want true", cap.relayed)
-	}
-	if cap.queueFor != "" {
-		t.Fatalf("relay set queue-for header: %q", cap.queueFor)
-	}
-}
-
-func TestDeliverQueueSetsQueueForHeader(t *testing.T) {
-	cap := &capture{}
-	srv := stub(t, http.StatusAccepted, cap)
-	candidates := []Candidate{{Kind: KindQueue, URL: srv.URL, Via: "hub", RouteKey: "queue|m4|hub"}}
-
-	out, err := Deliver(context.Background(), srv.Client(), candidates, sampleCommand(), nil, time.Now())
-	if err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-	if !out.Delivered {
-		t.Fatalf("queue not delivered: %+v", out)
-	}
-	if cap.queueFor != "m4" {
-		t.Fatalf("queue-for header = %q, want m4", cap.queueFor)
-	}
-	if cap.relayed != "" {
-		t.Fatalf("queue set relayed header: %q", cap.relayed)
-	}
-}
-
-func TestDeliverAdvancesPast5xxAndRecordsCooldown(t *testing.T) {
-	failing := stub(t, http.StatusBadGateway, nil)
-	good := &capture{}
-	goodSrv := stub(t, http.StatusAccepted, good)
-	now := time.Unix(1_700_000_000, 0).UTC()
-
-	candidates := []Candidate{
-		{Kind: KindDirect, URL: failing.URL, RouteKey: "direct|m4"},
-		{Kind: KindRelay, URL: goodSrv.URL, Via: "hub", RouteKey: "relay|m4|hub"},
-	}
-
-	out, err := Deliver(context.Background(), http.DefaultClient, candidates, sampleCommand(), nil, now)
-	if err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-	if !out.Delivered || out.Terminal.Kind != KindRelay {
-		t.Fatalf("expected relay to win, got %+v", out)
-	}
-	if ts, ok := out.Cooldowns["direct|m4"]; !ok || !ts.Equal(now) {
-		t.Fatalf("failed direct route not cooled at now: %v", out.Cooldowns)
-	}
-	if _, ok := out.Cooldowns["relay|m4|hub"]; ok {
-		t.Fatalf("winning relay route was cooled: %v", out.Cooldowns)
-	}
-	if good.relayed != "true" {
-		t.Fatalf("second attempt was not marked relayed: %q", good.relayed)
-	}
-}
-
-func TestDeliverAdvancesPastTransportFailure(t *testing.T) {
-	// A closed server yields a transport error (connection refused).
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
-
-	good := &capture{}
-	goodSrv := stub(t, http.StatusAccepted, good)
-	now := time.Unix(42, 0).UTC()
-
-	candidates := []Candidate{
-		{Kind: KindDirect, URL: deadURL, RouteKey: "direct|m4"},
-		{Kind: KindQueue, URL: goodSrv.URL, Via: "hub", RouteKey: "queue|m4|hub"},
-	}
-	out, err := Deliver(context.Background(), http.DefaultClient, candidates, sampleCommand(), nil, now)
+	out, err := Deliver(context.Background(), srv.Client(), resolver(map[string]string{"hub": "hub-token"}), candidates, sampleCommand(), nil, time.Now())
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if !out.Delivered || out.Terminal.Kind != KindQueue {
-		t.Fatalf("expected queue fallback to win, got %+v", out)
+		t.Fatalf("queue not delivered: %+v", out)
 	}
-	if ts, ok := out.Cooldowns["direct|m4"]; !ok || !ts.Equal(now) {
-		t.Fatalf("dead route not cooled: %v", out.Cooldowns)
+	if cap.path != CommandPath || cap.queueFor != "m4" {
+		t.Fatalf("queue path/target = %q %q", cap.path, cap.queueFor)
 	}
-	if out.Attempts[0].Err == nil {
-		t.Fatalf("first attempt should carry a transport error")
+	if cap.auth != "Bearer hub-token" {
+		t.Fatalf("authorization = %q", cap.auth)
+	}
+	if cap.wireBody.CommandPath != sampleCommand().Path || string(cap.wireBody.CommandBody) != `{"to":"running"}` {
+		t.Fatalf("queue envelope = %+v", cap.wireBody)
+	}
+	if cap.target != "hub" || cap.origin != "den" {
+		t.Fatalf("queue provenance headers = %q/%q", cap.target, cap.origin)
 	}
 }
 
-func TestDeliverStopsOn4xx(t *testing.T) {
-	rejecting := &capture{}
-	rejectSrv := stub(t, http.StatusConflict, rejecting)
-	nextCap := &capture{}
-	nextSrv := stub(t, http.StatusAccepted, nextCap)
+func TestDeliverRejectsApplicationRelay(t *testing.T) {
+	cap := &capture{}
+	srv := stub(t, http.StatusAccepted, cap)
+	candidates := []Candidate{{Kind: KindRelay, URL: srv.URL, NodeID: "hub", Via: "hub", RouteKey: "relay|m4|hub"}}
 
-	candidates := []Candidate{
-		{Kind: KindRelay, URL: rejectSrv.URL, Via: "hub", RouteKey: "relay|m4|hub"},
-		{Kind: KindQueue, URL: nextSrv.URL, Via: "hub", RouteKey: "queue|m4|hub"},
+	_, err := Deliver(context.Background(), srv.Client(), resolver(map[string]string{"hub": "hub-token"}), candidates, sampleCommand(), nil, time.Now())
+	if !errors.Is(err, ErrUnsupportedRoute) {
+		t.Fatalf("err = %v, want ErrUnsupportedRoute", err)
 	}
-	out, err := Deliver(context.Background(), http.DefaultClient, candidates, sampleCommand(), nil, time.Now())
+	if cap.hits != 0 {
+		t.Fatalf("unsupported relay reached network %d times", cap.hits)
+	}
+}
+
+func TestDeliverAdvancesPast5xxToQueue(t *testing.T) {
+	failedDirect := &capture{}
+	failing := stub(t, http.StatusBadGateway, failedDirect)
+	good := &capture{}
+	goodSrv := stub(t, http.StatusAccepted, good)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	candidates := []Candidate{
+		{Kind: KindDirect, URL: failing.URL, NodeID: "m4", RouteKey: "direct|m4"},
+		{Kind: KindQueue, URL: goodSrv.URL, NodeID: "hub", Via: "hub", RouteKey: "queue|m4|hub"},
+	}
+
+	out, err := DeliverWithPolicy(context.Background(), http.DefaultClient, resolver(map[string]string{"m4": "m4-token", "hub": "hub-token"}), candidates, sampleCommand(), nil, now, fastDeliveryPolicy())
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if out.Delivered {
-		t.Fatalf("4xx must not count as delivered: %+v", out)
+	if !out.Delivered || out.Terminal.Kind != KindQueue {
+		t.Fatalf("expected queue to win, got %+v", out)
 	}
-	if out.StatusCode != http.StatusConflict || out.Terminal.Kind != KindRelay {
-		t.Fatalf("expected terminal 409 on relay, got %+v", out)
+	if ts, ok := out.Cooldowns["direct|m4"]; !ok || !ts.Equal(now) {
+		t.Fatalf("failed direct route not cooled at now: %v", out.Cooldowns)
 	}
-	if nextCap.hits != 0 {
-		t.Fatalf("walk did not stop on 4xx; next route was tried %d times", nextCap.hits)
+	if good.queueFor != "m4" {
+		t.Fatalf("fallback was not queued for target: %q", good.queueFor)
 	}
-	if len(out.Cooldowns) != 0 {
-		t.Fatalf("4xx must not cool a route: %v", out.Cooldowns)
+	if failedDirect.hits != 3 {
+		t.Fatalf("direct attempts = %d, want finite budget of 3", failedDirect.hits)
+	}
+}
+
+func TestDeliverAdvancesPastTransportFailure(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	good := &capture{}
+	goodSrv := stub(t, http.StatusAccepted, good)
+	now := time.Unix(42, 0).UTC()
+	candidates := []Candidate{
+		{Kind: KindDirect, URL: deadURL, NodeID: "m4", RouteKey: "direct|m4"},
+		{Kind: KindQueue, URL: goodSrv.URL, NodeID: "hub", Via: "hub", RouteKey: "queue|m4|hub"},
+	}
+
+	out, err := DeliverWithPolicy(context.Background(), http.DefaultClient, resolver(map[string]string{"m4": "m4-token", "hub": "hub-token"}), candidates, sampleCommand(), nil, now, fastDeliveryPolicy())
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if !out.Delivered || out.Terminal.Kind != KindQueue || out.Attempts[0].Err == nil {
+		t.Fatalf("expected queue fallback after transport failure, got %+v", out)
+	}
+}
+
+func TestDeliverStopsOnDefinitiveNon2xx(t *testing.T) {
+	rejectSrv := stub(t, http.StatusConflict, nil)
+	nextCap := &capture{}
+	nextSrv := stub(t, http.StatusAccepted, nextCap)
+	candidates := []Candidate{
+		{Kind: KindDirect, URL: rejectSrv.URL, NodeID: "m4", RouteKey: "direct|m4"},
+		{Kind: KindQueue, URL: nextSrv.URL, NodeID: "hub", Via: "hub", RouteKey: "queue|m4|hub"},
+	}
+
+	out, err := Deliver(context.Background(), http.DefaultClient, resolver(map[string]string{"m4": "m4-token", "hub": "hub-token"}), candidates, sampleCommand(), nil, time.Now())
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if out.Delivered || out.StatusCode != http.StatusConflict || out.Terminal.Kind != KindDirect {
+		t.Fatalf("expected terminal direct 409, got %+v", out)
+	}
+	if nextCap.hits != 0 || len(out.Cooldowns) != 0 {
+		t.Fatalf("definitive rejection advanced/cooled: hits=%d cooldowns=%v", nextCap.hits, out.Cooldowns)
+	}
+}
+
+func TestDeliverDoesNotBypassUnclassified500ThroughQueue(t *testing.T) {
+	rejectSrv := stub(t, http.StatusInternalServerError, nil)
+	nextCap := &capture{}
+	nextSrv := stub(t, http.StatusAccepted, nextCap)
+	candidates := []Candidate{
+		{Kind: KindDirect, URL: rejectSrv.URL, NodeID: "m4", RouteKey: "direct|m4"},
+		{Kind: KindQueue, URL: nextSrv.URL, NodeID: "hub", Via: "hub", RouteKey: "queue|m4|hub"},
+	}
+
+	out, err := Deliver(context.Background(), http.DefaultClient, resolver(map[string]string{"m4": "m4-token", "hub": "hub-token"}), candidates, sampleCommand(), nil, time.Now())
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if out.Delivered || out.StatusCode != http.StatusInternalServerError || out.Terminal.Kind != KindDirect {
+		t.Fatalf("expected terminal direct 500, got %+v", out)
+	}
+	if nextCap.hits != 0 || len(out.Cooldowns) != 0 {
+		t.Fatalf("unclassified 500 bypassed policy: hits=%d cooldowns=%v", nextCap.hits, out.Cooldowns)
 	}
 }
 
 func TestDeliverAllRoutesFail(t *testing.T) {
-	a := stub(t, http.StatusInternalServerError, nil)
+	a := stub(t, http.StatusBadGateway, nil)
 	b := stub(t, http.StatusServiceUnavailable, nil)
 	now := time.Unix(7, 0).UTC()
-
 	existing := map[string]time.Time{"stale|route": now.Add(-time.Hour)}
 	candidates := []Candidate{
-		{Kind: KindRelay, URL: a.URL, Via: "hub", RouteKey: "relay|m4|hub"},
-		{Kind: KindQueue, URL: b.URL, Via: "hub", RouteKey: "queue|m4|hub"},
+		{Kind: KindDirect, URL: a.URL, NodeID: "m4", RouteKey: "direct|m4"},
+		{Kind: KindQueue, URL: b.URL, NodeID: "hub", Via: "hub", RouteKey: "queue|m4|hub"},
 	}
-	out, err := Deliver(context.Background(), http.DefaultClient, candidates, sampleCommand(), existing, now)
-	if !errors.Is(err, ErrAllRoutesFailed) {
-		t.Fatalf("err = %v, want ErrAllRoutesFailed", err)
+	out, err := DeliverWithPolicy(context.Background(), http.DefaultClient, resolver(map[string]string{"m4": "m4-token", "hub": "hub-token"}), candidates, sampleCommand(), existing, now, fastDeliveryPolicy())
+	if !errors.Is(err, ErrAllRoutesFailed) || out.Delivered {
+		t.Fatalf("out=%+v err=%v, want exhausted", out, err)
 	}
-	if out.Delivered {
-		t.Fatalf("nothing should be delivered: %+v", out)
-	}
-	for _, k := range []string{"relay|m4|hub", "queue|m4|hub"} {
+	for _, k := range []string{"direct|m4", "queue|m4|hub"} {
 		if ts, ok := out.Cooldowns[k]; !ok || !ts.Equal(now) {
 			t.Fatalf("route %q not cooled at now: %v", k, out.Cooldowns)
 		}
 	}
-	// Input cooldowns are preserved, not mutated.
-	if out.Cooldowns["stale|route"] != existing["stale|route"] {
-		t.Fatalf("input cooldown lost")
+	if _, ok := existing["direct|m4"]; ok {
+		t.Fatal("Deliver mutated the caller's cooldown map")
 	}
-	if _, ok := existing["relay|m4|hub"]; ok {
-		t.Fatalf("Deliver mutated the caller's cooldown map")
+}
+
+func TestDeliverFailsClosedBeforeNetwork(t *testing.T) {
+	cap := &capture{}
+	srv := stub(t, http.StatusAccepted, cap)
+	candidate := []Candidate{{Kind: KindDirect, URL: srv.URL, NodeID: "m4", RouteKey: "direct|m4"}}
+
+	bad := sampleCommand()
+	bad.Path = "/v1/approvals/11111111-1111-4111-8111-111111111111/decision"
+	if _, err := Deliver(context.Background(), srv.Client(), resolver(map[string]string{"m4": "token"}), candidate, bad, nil, time.Now()); !errors.Is(err, ErrInvalidCommandPath) {
+		t.Fatalf("invalid path err = %v", err)
+	}
+	if _, err := Deliver(context.Background(), srv.Client(), resolver(nil), candidate, sampleCommand(), nil, time.Now()); !errors.Is(err, ErrMissingCredential) {
+		t.Fatalf("missing credential err = %v", err)
+	}
+	badOrigin := sampleCommand()
+	badOrigin.OriginNodeID = ""
+	if _, err := Deliver(context.Background(), srv.Client(), resolver(map[string]string{"m4": "token"}), candidate, badOrigin, nil, time.Now()); !errors.Is(err, ErrInvalidOriginNodeID) {
+		t.Fatalf("invalid origin node err = %v", err)
+	}
+	if cap.hits != 0 {
+		t.Fatalf("fail-closed calls reached network %d times", cap.hits)
+	}
+}
+
+func TestValidateOrigin(t *testing.T) {
+	for _, good := range []string{"https://node.example", "https://node.example:8443/", "http://127.0.0.1:8080", "http://localhost:8080"} {
+		if err := ValidateOrigin(good); err != nil {
+			t.Errorf("ValidateOrigin(%q): %v", good, err)
+		}
+	}
+	for _, bad := range []string{"http://10.0.0.63:8080", "https://user:pass@node.example", "https://node.example/mcp", "https://node.example?x=1", "ftp://node.example"} {
+		if err := ValidateOrigin(bad); !errors.Is(err, ErrInvalidOrigin) {
+			t.Errorf("ValidateOrigin(%q) err = %v", bad, err)
+		}
+	}
+}
+
+func TestValidateCommandPath(t *testing.T) {
+	for _, good := range []string{
+		"/v1/work-items",
+		"/v1/work-items/" + sampleWorkItemID + "/children",
+		"/v1/work-items/" + sampleWorkItemID + "/events",
+		"/v1/work-items/" + sampleWorkItemID + "/metadata",
+		"/v1/work-items/" + sampleWorkItemID + "/transition",
+		"/v1/work-items/" + sampleWorkItemID + "/convergence-proposal",
+	} {
+		if err := ValidateCommandPath(good); err != nil {
+			t.Errorf("ValidateCommandPath(%q): %v", good, err)
+		}
+	}
+	for _, bad := range []string{
+		"/v1/inbox/messages",
+		"/v1/approvals/" + sampleWorkItemID + "/decision",
+		"/v1/work-items/not-a-uuid/transition",
+		"/v1/work-items/" + sampleWorkItemID + "/transition?force=true",
+		"https://node.example/v1/work-items",
+	} {
+		if err := ValidateCommandPath(bad); !errors.Is(err, ErrInvalidCommandPath) {
+			t.Errorf("ValidateCommandPath(%q) err = %v", bad, err)
+		}
 	}
 }

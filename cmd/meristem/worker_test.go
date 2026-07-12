@@ -19,6 +19,7 @@ import (
 
 func TestFormatWorkerOnceResultIncludesDispatchCounters(t *testing.T) {
 	line := formatWorkerOnceResult(worker.Result{
+		NetworkCommandsExpired:                  26,
 		Scanned:                                 10,
 		BreachesEmitted:                         1,
 		BreachesAlreadyRecorded:                 2,
@@ -48,6 +49,7 @@ func TestFormatWorkerOnceResultIncludesDispatchCounters(t *testing.T) {
 	})
 
 	for _, want := range []string{
+		"network_commands_expired=26",
 		"patience_dispatches=6",
 		"patience_dispatches_already_requested=7",
 		"review_candidates=11",

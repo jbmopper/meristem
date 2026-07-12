@@ -28,6 +28,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/policyprofile"
@@ -96,7 +97,20 @@ func (r *workerRuntime) ScanOnce(ctx context.Context) (worker.Result, error) {
 	if err != nil {
 		return worker.Result{}, err
 	}
-	return w.ScanOnce(ctx)
+	result, err := w.ScanOnce(ctx)
+	if err != nil {
+		return worker.Result{}, err
+	}
+	expired, err := crossnode.NewQueueService(r.pool, r.writer).ExpireDue(ctx, crossnode.ExpireDueInput{
+		Now:          time.Now().UTC(),
+		ActorTokenID: r.systemTok.ID,
+		Source:       r.systemTok.Source,
+	})
+	if err != nil {
+		return worker.Result{}, fmt.Errorf("worker: expire cross-node commands: %w", err)
+	}
+	result.NetworkCommandsExpired = len(expired)
+	return result, nil
 }
 
 func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) error {
@@ -233,6 +247,7 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 	logger.Info(msg,
 		slog.String("token_id", actor.ID.String()),
 		slog.String("token_source", string(actor.Source)),
+		slog.Int("network_commands_expired", result.NetworkCommandsExpired),
 		slog.Int("scanned", result.Scanned),
 		slog.Int("breaches_emitted", result.BreachesEmitted),
 		slog.Int("breaches_already_recorded", result.BreachesAlreadyRecorded),
@@ -263,7 +278,8 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 }
 
 func formatWorkerOnceResult(result worker.Result) string {
-	return fmt.Sprintf("worker --once: scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d review_candidates=%d review_children_spawned=%d review_children_already_present=%d review_skipped_missing_cultivar=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
+	return fmt.Sprintf("worker --once: network_commands_expired=%d scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d review_candidates=%d review_children_spawned=%d review_children_already_present=%d review_skipped_missing_cultivar=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
+		result.NetworkCommandsExpired,
 		result.Scanned,
 		result.BreachesEmitted,
 		result.BreachesAlreadyRecorded,

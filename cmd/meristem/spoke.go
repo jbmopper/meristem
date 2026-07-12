@@ -27,6 +27,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/jbmopper/meristem/internal/app"
+	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/spoke"
 	"github.com/jbmopper/meristem/internal/storage"
 )
@@ -78,7 +81,22 @@ func runSpoke(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	defer pool.Close()
 
-	poller := spoke.New(cfg, &http.Client{Timeout: 30 * time.Second}, spoke.NewCursorStore(pool, cfg.HubBaseURL), logger)
+	writer := app.NewEventWriter()
+	localActor, err := auth.NewService(pool, writer).Authenticate(ctx, cfg.LocalToken)
+	if err != nil {
+		return fmt.Errorf("spoke: authenticate local token for event attribution: %w", err)
+	}
+	if localActor.IsRoot || localActor.Source != domain.SourceAgent {
+		return fmt.Errorf("spoke: %s must resolve to a dedicated non-root agent token", spoke.EnvLocalToken)
+	}
+	cursor := spoke.NewEventCursorStore(pool, writer, cfg.HubBaseURL, localActor.ID, localActor.Source)
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	poller := spoke.New(cfg, client, cursor, logger)
 
 	logger.Info("spoke poller starting",
 		slog.String("node_id", cfg.NodeID),

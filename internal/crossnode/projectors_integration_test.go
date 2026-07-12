@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -37,9 +38,11 @@ func TestCommandQueuedProjectorIntegration(t *testing.T) {
 	// attributed path with a real token.
 	in := EnqueueInput{
 		TargetNodeID:         "m4",
-		CommandPath:          "/v1/work-items/abc/transition",
+		OriginNodeID:         "hub",
+		CommandPath:          "/v1/work-items/7b1fc532-14f2-4be5-81a5-4719dd11d453/transition",
 		CommandBody:          json.RawMessage(`{"to":"running"}`),
 		OriginIdempotencyKey: "idem-xyz",
+		Source:               domain.SourceAgent,
 	}
 
 	res, err := svc.Enqueue(ctx, in)
@@ -48,6 +51,13 @@ func TestCommandQueuedProjectorIntegration(t *testing.T) {
 	}
 	if res.EventID == uuid.Nil {
 		t.Fatal("expected a command.queued event id")
+	}
+	var source string
+	if err := pool.QueryRow(ctx, `SELECT source FROM events WHERE id = $1`, res.EventID).Scan(&source); err != nil {
+		t.Fatalf("read event source: %v", err)
+	}
+	if source != string(domain.SourceAgent) {
+		t.Fatalf("event source = %q, want agent", source)
 	}
 
 	type row struct {

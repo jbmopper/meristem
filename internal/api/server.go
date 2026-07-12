@@ -26,6 +26,7 @@ import (
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
+	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/errorreporting"
 	"github.com/jbmopper/meristem/internal/escalations"
 	"github.com/jbmopper/meristem/internal/events"
@@ -35,6 +36,7 @@ import (
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
+	"github.com/jbmopper/meristem/internal/nodes"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
@@ -54,6 +56,10 @@ const EnvHTTPAddr = "MERISTEM_HTTP_ADDR"
 // naming a peer is still queued, so a single-node deploy needs no config.
 const EnvNodeID = "MERISTEM_NODE_ID"
 
+// EnvRegistryHomeNodeID pins the only source identity accepted by the local
+// registry snapshot observation endpoint.
+const EnvRegistryHomeNodeID = "MERISTEM_REGISTRY_HOME_NODE_ID"
+
 // Defaults chosen to be reasonable behind a reverse proxy (Caddy/nginx). The
 // spec calls for TLS termination at that layer, not in-process.
 const (
@@ -72,6 +78,7 @@ type Server struct {
 	logger                *slog.Logger
 	addr                  string
 	nodeID                string
+	registryHomeNodeID    string
 	publicBaseURL         string
 	mux                   *http.ServeMux
 	writer                *events.Writer
@@ -96,6 +103,7 @@ type Server struct {
 	projections           *projectiondefs.Service
 	registry              *registry.Service
 	crossnode             *crossnode.QueueService
+	nodeSnapshots         *nodes.SnapshotService
 	oauthClients          *oauth.RegistrationService
 	oauthAuthorization    *oauth.AuthorizationService
 	oauthTokens           *oauth.TokenService
@@ -120,13 +128,14 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		addr = defaultAddr
 	}
 	s := &Server{
-		pool:          pool,
-		logger:        logger,
-		addr:          addr,
-		nodeID:        strings.TrimSpace(os.Getenv(EnvNodeID)),
-		publicBaseURL: normalizePublicBaseURL(os.Getenv(EnvPublicBaseURL)),
-		mux:           http.NewServeMux(),
-		policy:        policy,
+		pool:               pool,
+		logger:             logger,
+		addr:               addr,
+		nodeID:             strings.TrimSpace(os.Getenv(EnvNodeID)),
+		registryHomeNodeID: strings.TrimSpace(os.Getenv(EnvRegistryHomeNodeID)),
+		publicBaseURL:      normalizePublicBaseURL(os.Getenv(EnvPublicBaseURL)),
+		mux:                http.NewServeMux(),
+		policy:             policy,
 	}
 	if pool != nil {
 		s.writer = app.NewEventWriter()
@@ -150,6 +159,7 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		s.projections = projectiondefs.NewService(pool, s.writer)
 		s.registry = registry.NewService(pool, s.writer)
 		s.crossnode = crossnode.NewQueueService(pool, s.writer)
+		s.nodeSnapshots = nodes.NewSnapshotService(pool, s.writer)
 		systemActorID, _ := uuid.Parse(strings.TrimSpace(os.Getenv(EnvOAuthSystemActorID)))
 		s.oauthClients = oauth.NewRegistrationServiceWithSystemActor(pool, s.writer, systemActorID)
 		s.oauthAuthorization = oauth.NewAuthorizationService(pool, s.writer, s.workItems, s.approvals, systemActorID)
@@ -180,9 +190,9 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 // Addr returns the configured listen address.
 func (s *Server) Addr() string { return s.addr }
 
-// Handler exposes the underlying mux so tests can hit handlers without going
-// through the network.
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler exposes the target-bound mux so tests and the network server enforce
+// identical cross-node metadata checks.
+func (s *Server) Handler() http.Handler { return s.targetBound(s.mux) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleLiveness)
@@ -198,9 +208,12 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
-	s.mux.Handle("POST /v1/crossnode/commands", s.command(http.HandlerFunc(s.handleCrossnodeCommand)))
+	s.mux.Handle("POST /v1/crossnode/commands", s.crossnodeQueueCommand(http.HandlerFunc(s.handleCrossnodeCommand)))
 	s.mux.Handle("GET /v1/crossnode/commands", s.protected(http.HandlerFunc(s.handleCrossnodeCommandsList)))
-	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/ack", s.command(http.HandlerFunc(s.handleCrossnodeCommandAck)))
+	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/attempt", s.crossnodeAckCommand(http.HandlerFunc(s.handleCrossnodeCommandAttempt)))
+	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/ack", s.crossnodeAckCommand(http.HandlerFunc(s.handleCrossnodeCommandAck)))
+	s.mux.Handle("GET /v1/nodes/registry-snapshot", s.protected(http.HandlerFunc(s.handleRegistrySnapshotRead)))
+	s.mux.Handle("POST /v1/nodes/registry-snapshot/observe", s.commandWithAccess(s.canObserveRegistrySnapshot, http.HandlerFunc(s.handleRegistrySnapshotObserve)))
 	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
 	s.mux.Handle("POST /v1/policy-profile", s.commandWithAccess(s.canSwitchPolicyProfile, http.HandlerFunc(s.handleSwitchPolicyProfile)))
 	s.mux.Handle("POST /v1/tokens/revoke-all", s.commandWithAccess(s.canPanicRevokeTokens, http.HandlerFunc(s.handlePanicRevokeTokens)))
@@ -262,13 +275,38 @@ func (s *Server) commandWithAccess(gate accessGate, next http.Handler) http.Hand
 	}))
 }
 
+// targetBound validates optional peer-routing metadata before authentication,
+// idempotency, or a domain handler can append events. Ordinary local requests
+// omit the metadata and continue unchanged.
+func (s *Server) targetBound(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			target := strings.TrimSpace(r.Header.Get(crossnode.HeaderTargetNode))
+			if target != "" {
+				if !domain.ValidNodeID(target) || target != s.nodeID {
+					writeAPIError(w, http.StatusConflict, "target_node_mismatch",
+						"X-Meristem-Target-Node does not match this node")
+					return
+				}
+				origin := strings.TrimSpace(r.Header.Get(crossnode.HeaderOriginNode))
+				if !domain.ValidNodeID(origin) {
+					writeAPIError(w, http.StatusBadRequest, "invalid_origin_node",
+						"X-Meristem-Origin-Node must name a DNS-safe originating node")
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Run starts the HTTP server and blocks until ctx is cancelled or the
 // underlying server returns an error. Shutdown is graceful: in-flight
 // requests get up to 10 seconds to complete.
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:              s.addr,
-		Handler:           s.mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: defaultReadHeaderLimit,
 		ReadTimeout:       defaultReadTimeout,
 		WriteTimeout:      defaultWriteTimeout,

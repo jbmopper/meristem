@@ -59,6 +59,16 @@ var projectionTables = []string{
 	"projections",
 	"approvals",
 	"http_connector_actions",
+	"nodes",
+	"registry_snapshot_state",
+	"command_queue",
+	"spoke_state",
+	"oauth_clients",
+	"oauth_authorization_codes",
+	"oauth_authorization_requests",
+	"oauth_grants",
+	"oauth_access_tokens",
+	"oauth_refresh_tokens",
 }
 
 // rebuildScratchTables are event-caused operational tables that projectors
@@ -247,7 +257,7 @@ func foldEvents(ctx context.Context, tx pgx.Tx, registry *projections.Registry, 
 	// timestamp, and deterministic event ids are content-addressed rather than
 	// chronological.
 	rows, err := tx.Query(ctx, `
-		SELECT id, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload
+		SELECT id, seq, occurred_at, actor_token_id, source, subject_kind, subject_id, kind, payload
 		FROM public.events
 		ORDER BY seq ASC
 	`)
@@ -262,7 +272,7 @@ func foldEvents(ctx context.Context, tx pgx.Tx, registry *projections.Registry, 
 			payloadJSON []byte
 			source      string
 		)
-		if err := rows.Scan(&ev.ID, &ev.OccurredAt, &ev.ActorTokenID, &source, &ev.SubjectKind, &ev.SubjectID, &ev.Kind, &payloadJSON); err != nil {
+		if err := rows.Scan(&ev.ID, &ev.Seq, &ev.OccurredAt, &ev.ActorTokenID, &source, &ev.SubjectKind, &ev.SubjectID, &ev.Kind, &payloadJSON); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("rebuild: scan event row: %w", err)
 		}
