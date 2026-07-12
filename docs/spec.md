@@ -79,7 +79,10 @@ The minimum cross-node transport has two paths:
 2. A durable command queue on an explicitly approved reachable queue host when
    the target accepts no inbound connection. The target polls outbound,
    executes the allowlisted REST operation locally with the original
-   idempotency identity, and acknowledges a terminal outcome.
+   idempotency identity, and acknowledges a terminal outcome. When the
+   command's causing work item is homed on another node, that origin polls the
+   queue host's origin-filtered terminal-outcome feed and records the evidence
+   in its own log before applying its local delivery policy.
 
 Application-level forwarding through a relay is not part of the minimum
 network contract. It may be added only with a separate design covering target

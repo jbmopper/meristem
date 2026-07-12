@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -140,6 +141,56 @@ func (s *Server) handleCrossnodeCommandsList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"commands": commands})
+}
+
+// handleCrossnodeOutcomesList serves an origin-scoped, outbound-poll read of
+// immutable terminal queue outcomes. The cursor is the queue host's event seq;
+// origin filtering occurs in the database query before any row is returned.
+func (s *Server) handleCrossnodeOutcomesList(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if s.crossnode == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "crossnode_unavailable", "cross-node queue service is not configured")
+		return
+	}
+	origin := strings.TrimSpace(r.URL.Query().Get("origin"))
+	if !domain.ValidNodeID(origin) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_origin", "origin must be a DNS-safe node id")
+		return
+	}
+	if err := crossnode.AuthorizeQueueOutcomeRead(actor, origin); err != nil {
+		writeCrossnodeAuthorizationError(w, err, "token cannot read this origin's queue outcomes")
+		return
+	}
+	after := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("after")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeAPIError(w, http.StatusBadRequest, "invalid_cursor", "after must be a non-negative event sequence")
+			return
+		}
+		after = parsed
+	}
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	outcomes, err := s.crossnode.OutcomesForOrigin(r.Context(), origin, after, limit)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "command_outcome_read_failed", "could not read cross-node outcomes")
+		return
+	}
+	next := after
+	if len(outcomes) != 0 {
+		next = outcomes[len(outcomes)-1].RemoteEventSeq
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"origin_node_id": origin,
+		"next_cursor":    next,
+		"outcomes":       outcomes,
+	})
 }
 
 // crossnodeAckRequest is the structural outcome a target posts to

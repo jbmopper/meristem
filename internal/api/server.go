@@ -222,6 +222,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("POST /v1/crossnode/commands", s.crossnodeQueueCommand(http.HandlerFunc(s.handleCrossnodeCommand)))
 	s.mux.Handle("GET /v1/crossnode/commands", s.protected(http.HandlerFunc(s.handleCrossnodeCommandsList)))
+	s.mux.Handle("GET /v1/crossnode/outcomes", s.protected(http.HandlerFunc(s.handleCrossnodeOutcomesList)))
 	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/attempt", s.crossnodeAckCommand(http.HandlerFunc(s.handleCrossnodeCommandAttempt)))
 	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/ack", s.crossnodeAckCommand(http.HandlerFunc(s.handleCrossnodeCommandAck)))
 	s.mux.Handle("GET /v1/nodes/registry-snapshot", s.protected(http.HandlerFunc(s.handleRegistrySnapshotRead)))

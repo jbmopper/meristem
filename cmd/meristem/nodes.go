@@ -15,6 +15,7 @@
 //	                           [--relay-via ID ...] [--status active]
 //	meristem node list
 //	meristem node sync-registry [--once] [--interval 30s]
+//	meristem node sync-outcomes [--once] [--interval 30s]
 //
 // register appends a node.registered event whose payload carries the full
 // declared state; an identical re-run collapses onto the same event (the
@@ -43,6 +44,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/nodes"
@@ -54,6 +56,9 @@ const (
 	envRegistryHomeNodeID         = "MERISTEM_REGISTRY_HOME_NODE_ID"
 	envRegistryHomeOrigin         = "MERISTEM_REGISTRY_HOME_URL"
 	envRegistryHomeToken          = "MERISTEM_REGISTRY_HOME_TOKEN"
+	envOutcomeQueueHostNodeID     = "MERISTEM_QUEUE_HOST_NODE_ID"
+	envOutcomeQueueHostOrigin     = "MERISTEM_QUEUE_HOST_URL"
+	envOutcomeQueueHostToken      = "MERISTEM_QUEUE_HOST_OUTCOME_TOKEN"
 	defaultRegistrySyncInterval   = 30 * time.Second
 	defaultRegistryRequestTimeout = 5 * time.Second
 )
@@ -90,10 +95,85 @@ func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
 		return listNodes(ctx, pool, os.Stdout, args[1:])
 	case "sync-registry":
 		return syncRegistryNode(ctx, logger, pool, writer, auth.NewService(pool, writer), args[1:])
+	case "sync-outcomes":
+		return syncOutcomeNode(ctx, logger, pool, writer, auth.NewService(pool, writer), args[1:])
 	default:
 		logger.Error("unknown node subcommand", slog.String("subcommand", args[0]))
 		nodeUsage(os.Stderr)
 		return fmt.Errorf("node: unknown subcommand %q", args[0])
+	}
+}
+
+func syncOutcomeNode(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, writer *events.Writer, authenticator tokenAuthenticator, args []string) error {
+	fs := flag.NewFlagSet("node sync-outcomes", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	once := fs.Bool("once", false, "perform one queue-outcome reconciliation tick and exit")
+	interval := fs.Duration("interval", defaultRegistrySyncInterval, "retry/poll interval")
+	requestTimeout := fs.Duration("request-timeout", defaultRegistryRequestTimeout, "timeout for one queue-host request")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *interval <= 0 || *requestTimeout <= 0 {
+		return fmt.Errorf("node sync-outcomes: arguments and durations must be valid")
+	}
+	queueHostNodeID := strings.TrimSpace(os.Getenv(envOutcomeQueueHostNodeID))
+	queueHostOrigin := strings.TrimSpace(os.Getenv(envOutcomeQueueHostOrigin))
+	originNodeID := strings.TrimSpace(os.Getenv("MERISTEM_NODE_ID"))
+	remoteToken := os.Getenv(envOutcomeQueueHostToken)
+	localSecret := os.Getenv("MERISTEM_TOKEN")
+	if queueHostNodeID == "" || queueHostOrigin == "" || originNodeID == "" || remoteToken == "" || localSecret == "" {
+		return fmt.Errorf("node sync-outcomes: %s, %s, %s, MERISTEM_NODE_ID, and MERISTEM_TOKEN are required", envOutcomeQueueHostNodeID, envOutcomeQueueHostOrigin, envOutcomeQueueHostToken)
+	}
+	actor, err := authenticator.Authenticate(ctx, localSecret)
+	if err != nil {
+		return fmt.Errorf("node sync-outcomes: authenticate local observer: %w", err)
+	}
+	service, err := crossnode.NewOutcomeSyncService(crossnode.NewOutcomeObserver(pool, writer), crossnode.OutcomeSyncConfig{
+		QueueHostNodeID: queueHostNodeID,
+		QueueHostOrigin: queueHostOrigin,
+		OriginNodeID:    originNodeID,
+		QueueHostToken:  remoteToken,
+		LocalActor:      actor,
+		RequestTimeout:  *requestTimeout,
+	}, peerhttp.Options{})
+	if err != nil {
+		return fmt.Errorf("node sync-outcomes: %w", err)
+	}
+	tick := func() error {
+		result, err := service.Tick(ctx)
+		if err != nil {
+			return err
+		}
+		logger.Info("queue outcome reconciliation complete",
+			slog.String("queue_host_node_id", queueHostNodeID),
+			slog.String("origin_node_id", originNodeID),
+			slog.Int64("remote_event_seq", result.Cursor),
+			slog.Int("observed", result.Observed),
+			slog.Int("cause_transitions", result.CauseTransitions))
+		return nil
+	}
+	if *once {
+		return tick()
+	}
+	for {
+		if err := tick(); err != nil {
+			logger.Warn("queue outcome reconciliation failed; retaining cursor",
+				slog.String("queue_host_node_id", queueHostNodeID),
+				slog.String("retry_in", interval.String()),
+				slog.String("error", err.Error()))
+		}
+		timer := time.NewTimer(*interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -507,6 +587,11 @@ func nodeUsage(w io.Writer) {
     MERISTEM_REGISTRY_HOME_TOKEN=mrs_<home-read> \
     MERISTEM_TOKEN=mrs_<local-observer> \
     meristem node sync-registry [--once] [--interval=30s] [--request-timeout=5s]
+  MERISTEM_QUEUE_HOST_URL=https://queue.example \
+    MERISTEM_QUEUE_HOST_NODE_ID=queue-host \
+    MERISTEM_QUEUE_HOST_OUTCOME_TOKEN=mrs_<origin-read> \
+    MERISTEM_NODE_ID=origin MERISTEM_TOKEN=mrs_<local-observer> \
+    meristem node sync-outcomes [--once] [--interval=30s] [--request-timeout=5s]
 
 Appends node.registered / node.route_updated events to the fleet node registry
 and prints the resulting projection. Connects directly via MERISTEM_DATABASE_URL;
@@ -518,5 +603,10 @@ sync-registry performs authenticated outbound GETs against the pinned registry
 home and appends validated snapshots to this node's own log. It never pushes to
 the consumer. Without --once it retries forever at the finite --interval; an
 outage retains the last accepted snapshot. Bearers are required and never logged.
+
+sync-outcomes polls a queue host for terminal commands whose immutable origin
+matches MERISTEM_NODE_ID. It records local observed-outcome events and advances
+an event-backed cursor; an observed expiry fails only a non-terminal causing
+work item homed on that origin. Queue-host outages retain outcomes and cursor.
 `)
 }

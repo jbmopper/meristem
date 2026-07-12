@@ -260,6 +260,24 @@ unacknowledged command remains pending until its finite expiry; a target restart
 resumes from its durable poll cursor and idempotency identity. Queue outcomes
 do not create a shadow authoritative copy of the target object.
 
+An origin with remotely queued commands polls the queue host outbound through
+`GET /v1/crossnode/outcomes?origin=<origin>&after=<seq>`. The queue host filters
+terminal rows by their immutable `origin_node_id` before returning them and
+orders them by the queue host's terminal-event sequence. The remote credential
+requires the exact `crossnode.outcomes:<origin>` scope; root, unscoped, and
+other-origin tokens are denied. The origin uses a separate local system/agent
+token with `crossnode.observe:<queue_host>:<origin>` to append
+`command_outcome.observed`. That event projects both the immutable observation
+and the per-host cursor. An exact stale page is a no-op; conflicting terminal
+facts fail closed. No bearer crosses nodes or is persisted in either payload.
+
+Only the configured origin may apply the causing-item policy. For an observed
+expiry, a non-terminal origin-homed cause transitions once to `failed` with
+`cross_node_delivery_expired`. Missing and already-terminal causes still record
+the observation and advance the cursor with an explicit resolution; they do
+not wedge the poller or mutate another object's home. Acknowledged outcomes are
+recorded as delivery evidence but do not create a target-object projection.
+
 ## 6. Identity, data, and failure boundaries
 
 Tokens live in the Postgres of the node that minted them. A client that calls

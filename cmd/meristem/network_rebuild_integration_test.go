@@ -97,6 +97,20 @@ func TestNetworkProjectionsRebuildFromEvents(t *testing.T) {
 		t.Fatalf("advance cursor: %v", err)
 	}
 
+	// The origin outcome bookmark is projected by the observations themselves;
+	// replay must reproduce both the immutable evidence and max remote seq.
+	outcomes, err := queue.OutcomesForOrigin(ctx, "hub", 0, 10)
+	if err != nil || len(outcomes) != 2 {
+		t.Fatalf("read terminal outcomes = (%+v, %v)", outcomes, err)
+	}
+	observerActor := actor
+	observerActor.Scopes = []string{crossnode.OutcomeObserveScope("queue-host", "hub")}
+	if result, err := crossnode.NewOutcomeObserver(pool, writer).Observe(ctx, crossnode.ObserveOutcomesInput{
+		QueueHostNodeID: "queue-host", LocalNodeID: "hub", LocalActor: observerActor, Outcomes: outcomes,
+	}); err != nil || result.Observed != 2 {
+		t.Fatalf("observe terminal outcomes = (%+v, %v)", result, err)
+	}
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	report, err := rebuildAndDiff(ctx, pool, app.NewProjectionRegistry(), "network_rebuild", logger, false)
 	if err != nil {
