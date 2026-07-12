@@ -129,7 +129,18 @@ func validateProviderTrackerCall(tool string, raw json.RawMessage) error {
 		}
 
 	case "work_items.append_event":
-		return nil
+		var args struct {
+			Kind string `json:"kind"`
+		}
+		if err := decodeHTTPProfileArgs(raw, &args); err != nil {
+			return err
+		}
+		switch args.Kind {
+		case "provider.note", "provider.progress":
+			return nil
+		default:
+			return executionAuthorityDenied(tool + " may only append provider.note or provider.progress")
+		}
 	default:
 		return fmt.Errorf("tool not enabled on provider-tracker HTTP MCP profile: %s", tool)
 	}

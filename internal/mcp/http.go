@@ -67,10 +67,11 @@ func (s *Server) HandleHTTPMessage(ctx context.Context, raw []byte, actor domain
 }
 
 func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, actor domain.Token, opts HTTPOptions) HTTPResponse {
-	// The API's provider route always supplies a non-nil allowlist. Treat that
-	// as both a tool filter and a response-data boundary so a future tool cannot
-	// accidentally return the ordinary raw event/work-item DTO through /mcp.
-	if opts.AllowedTools != nil {
+	// The API's provider route always supplies a non-nil allowlist or an
+	// explicit profile. Treat either as both a tool filter and a response-data
+	// boundary so a future tool cannot accidentally return the ordinary raw
+	// event/work-item DTO through /mcp.
+	if opts.AllowedTools != nil || opts.Profile != nil {
 		ctx = withProviderSafeContext(ctx)
 	}
 	var msg rpcMessage

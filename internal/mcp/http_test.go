@@ -225,6 +225,7 @@ func TestProviderTrackerHTTPProfileRejectsLatentExecutionAuthority(t *testing.T)
 		{"create running", `{"name":"work_items.create","arguments":{"title":"x","state":"running","human_review_status":"blocked","idempotency_key":"x"}}`},
 		{"metadata wave through", `{"name":"work_items.update_metadata","arguments":{"id":"00000000-0000-0000-0000-000000000001","suggested_convergence_checks":[],"human_review_status":"waved_through","idempotency_key":"x"}}`},
 		{"transition running", `{"name":"work_items.transition","arguments":{"id":"00000000-0000-0000-0000-000000000001","to":"running","idempotency_key":"x"}}`},
+		{"append worker signal", `{"name":"work_items.append_event","arguments":{"id":"00000000-0000-0000-0000-000000000001","kind":"coordination.implementation_ready","payload":{},"idempotency_key":"x"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

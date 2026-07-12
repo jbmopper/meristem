@@ -132,16 +132,32 @@ func TestProviderSafeHTTPContextAllVersusTreeAndNoEventPayloadLeakage(t *testing
 	if strings.Contains(delegatedList, "Visible project B") {
 		t.Fatalf("delegated list leaked out-of-tree B: %s", delegatedList)
 	}
+
+	ownerTrackerAuthority, err := access.ReduceProviderAuthority(access.ProviderOwnerTrackerWriteV1, uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerTracker := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: ownerTrackerAuthority.Scopes}
+	ownerTrackerList := providerHTTPToolTextWithOptions(t, s, ownerTracker, "work_items.list", map[string]any{"limit": 50}, HTTPOptions{Profile: ProviderTrackerHTTPProfile()})
+	if !strings.Contains(ownerTrackerList, ProviderSafeWorkItemsContract) {
+		t.Fatalf("tracker profile did not select provider-safe work-item DTO: %s", ownerTrackerList)
+	}
+	assertProviderTextSafe(t, ownerTrackerList)
 }
 
 func providerHTTPToolText(t *testing.T, s *Server, actor domain.Token, name string, args map[string]any) string {
+	t.Helper()
+	return providerHTTPToolTextWithOptions(t, s, actor, name, args, HTTPOptions{AllowedTools: ReadOnlyHTTPTools()})
+}
+
+func providerHTTPToolTextWithOptions(t *testing.T, s *Server, actor domain.Token, name string, args map[string]any, opts HTTPOptions) string {
 	t.Helper()
 	arguments, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":` + quoteJSON(t, name) + `,"arguments":` + string(arguments) + `}}`)
-	resp := s.HandleHTTPMessageWithOptions(context.Background(), request, actor, HTTPOptions{AllowedTools: ReadOnlyHTTPTools()})
+	resp := s.HandleHTTPMessageWithOptions(context.Background(), request, actor, opts)
 	var rpc rpcMessage
 	if err := json.Unmarshal(resp.Body, &rpc); err != nil {
 		t.Fatalf("decode HTTP RPC: %v body=%s", err, resp.Body)
