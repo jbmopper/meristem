@@ -23,6 +23,11 @@ import (
 // UUID keeps NodeSubjectID pure and stable across processes and rebuilds.
 var subjectNamespace = uuid.MustParse("b8f2e0a4-3c1d-5e6f-8a9b-0c1d2e3f4a5b")
 
+// routePayloadVersion 2 introduced credential-safe canonical node origins.
+// Version 1 remains replayable because historical events legitimately contain
+// private/plaintext development origins that were accepted by the old writer.
+const routePayloadVersion = 2
+
 // NodeSubjectID derives the deterministic event subject id for a node from its
 // node_id, mirroring internal/registry's name→subject derivation. Every event
 // about one node shares this subject while the projection keys on node_id.

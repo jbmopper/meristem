@@ -35,12 +35,22 @@ func (registeredProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Ev
 	switch v := payloadVersion(event.Payload); v {
 	case 1:
 		return applyRegisteredV1(ctx, tx, event)
+	case 2:
+		return applyRegisteredV2(ctx, tx, event)
 	default:
 		return fmt.Errorf("node.registered: unknown payload_version %d", v)
 	}
 }
 
 func applyRegisteredV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	return applyRegistered(ctx, tx, event, false)
+}
+
+func applyRegisteredV2(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	return applyRegistered(ctx, tx, event, true)
+}
+
+func applyRegistered(ctx context.Context, tx pgx.Tx, event domain.Event, strictOrigins bool) error {
 	var p registeredPayload
 	if err := decode(event.Payload, &p); err != nil {
 		return fmt.Errorf("node.registered: decode payload: %w", err)
@@ -51,13 +61,17 @@ func applyRegisteredV1(ctx context.Context, tx pgx.Tx, event domain.Event) error
 	if p.Status == "" {
 		return fmt.Errorf("node.registered: status is required")
 	}
-	baseURL, err := canonicalOrigin("base_url", p.BaseURL)
-	if err != nil {
-		return fmt.Errorf("node.registered: %w", err)
-	}
-	directURL, err := canonicalOrigin("direct_url", p.DirectURL)
-	if err != nil {
-		return fmt.Errorf("node.registered: %w", err)
+	baseURL, directURL := p.BaseURL, p.DirectURL
+	if strictOrigins {
+		var err error
+		baseURL, err = canonicalOrigin("base_url", p.BaseURL)
+		if err != nil {
+			return fmt.Errorf("node.registered: %w", err)
+		}
+		directURL, err = canonicalOrigin("direct_url", p.DirectURL)
+		if err != nil {
+			return fmt.Errorf("node.registered: %w", err)
+		}
 	}
 	relay, err := normalizeRelayVia(p.RelayVia)
 	if err != nil {
@@ -96,12 +110,22 @@ func (routeUpdatedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 	switch v := payloadVersion(event.Payload); v {
 	case 1:
 		return applyRouteUpdatedV1(ctx, tx, event)
+	case 2:
+		return applyRouteUpdatedV2(ctx, tx, event)
 	default:
 		return fmt.Errorf("node.route_updated: unknown payload_version %d", v)
 	}
 }
 
 func applyRouteUpdatedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	return applyRouteUpdated(ctx, tx, event, false)
+}
+
+func applyRouteUpdatedV2(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	return applyRouteUpdated(ctx, tx, event, true)
+}
+
+func applyRouteUpdated(ctx context.Context, tx pgx.Tx, event domain.Event, strictOrigins bool) error {
 	var p routeUpdatedPayload
 	if err := decode(event.Payload, &p); err != nil {
 		return fmt.Errorf("node.route_updated: decode payload: %w", err)
@@ -112,9 +136,13 @@ func applyRouteUpdatedV1(ctx context.Context, tx pgx.Tx, event domain.Event) err
 	if p.Status == "" {
 		return fmt.Errorf("node.route_updated: status is required")
 	}
-	directURL, err := canonicalOrigin("direct_url", p.DirectURL)
-	if err != nil {
-		return fmt.Errorf("node.route_updated: %w", err)
+	directURL := p.DirectURL
+	if strictOrigins {
+		var err error
+		directURL, err = canonicalOrigin("direct_url", p.DirectURL)
+		if err != nil {
+			return fmt.Errorf("node.route_updated: %w", err)
+		}
 	}
 	relay, err := normalizeRelayVia(p.RelayVia)
 	if err != nil {

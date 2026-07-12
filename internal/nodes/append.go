@@ -25,7 +25,7 @@ type RegisterParams struct {
 	Status    string
 }
 
-// BuildRegisteredPayload validates params and returns the field-minimal v1
+// BuildRegisteredPayload validates params and returns the field-minimal v2
 // node.registered payload that registeredProjector folds. It is pure: the same
 // params always marshal to the same wire form, so the events writer's
 // deterministic id collapses an identical re-registration onto one row while a
@@ -49,11 +49,12 @@ func BuildRegisteredPayload(p RegisterParams) (any, error) {
 		return nil, err
 	}
 	return registeredPayload{
-		NodeID:    p.NodeID,
-		BaseURL:   baseURL,
-		DirectURL: directURL,
-		RelayVia:  p.RelayVia,
-		Status:    p.Status,
+		PayloadVersion: routePayloadVersion,
+		NodeID:         p.NodeID,
+		BaseURL:        baseURL,
+		DirectURL:      directURL,
+		RelayVia:       p.RelayVia,
+		Status:         p.Status,
 	}, nil
 }
 
@@ -68,7 +69,7 @@ type RouteParams struct {
 	Status    string
 }
 
-// BuildRouteUpdatedPayload validates params and returns the field-minimal v1
+// BuildRouteUpdatedPayload validates params and returns the field-minimal v2
 // node.route_updated payload. Pure, on the same terms as BuildRegisteredPayload.
 func BuildRouteUpdatedPayload(p RouteParams) (any, error) {
 	if err := validateNodeID(p.NodeID); err != nil {
@@ -85,10 +86,11 @@ func BuildRouteUpdatedPayload(p RouteParams) (any, error) {
 		return nil, err
 	}
 	return routeUpdatedPayload{
-		NodeID:    p.NodeID,
-		DirectURL: directURL,
-		RelayVia:  p.RelayVia,
-		Status:    p.Status,
+		PayloadVersion: routePayloadVersion,
+		NodeID:         p.NodeID,
+		DirectURL:      directURL,
+		RelayVia:       p.RelayVia,
+		Status:         p.Status,
 	}, nil
 }
 

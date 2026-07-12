@@ -32,10 +32,11 @@ func TestNodeProjectorsIntegration(t *testing.T) {
 
 	base := "https://ingress.example"
 	registeredPayload := map[string]any{
-		"node_id":   "m4",
-		"base_url":  base,
-		"status":    string(domain.NodeStatusActive),
-		"relay_via": []string{"den"},
+		"payload_version": routePayloadVersion,
+		"node_id":         "m4",
+		"base_url":        base,
+		"status":          string(domain.NodeStatusActive),
+		"relay_via":       []string{"den"},
 	}
 
 	appendEvent := func(kind string, payload any) {
@@ -111,10 +112,11 @@ func TestNodeProjectorsIntegration(t *testing.T) {
 	// created_at intact.
 	direct := "https://m4.peer.example"
 	appendEvent(domain.EventNodeRouteUpdated, map[string]any{
-		"node_id":    "m4",
-		"direct_url": direct,
-		"status":     string(domain.NodeStatusUnreachable),
-		"relay_via":  []string{},
+		"payload_version": routePayloadVersion,
+		"node_id":         "m4",
+		"direct_url":      direct,
+		"status":          string(domain.NodeStatusUnreachable),
+		"relay_via":       []string{},
 	})
 	after := read()
 	if after.directURL == nil || *after.directURL != direct {
@@ -131,5 +133,43 @@ func TestNodeProjectorsIntegration(t *testing.T) {
 	}
 	if !after.createdAt.Equal(created) {
 		t.Fatalf("route update changed created_at: %s -> %s", created, after.createdAt)
+	}
+}
+
+func TestLegacyNodeOriginsRemainReplayable(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t, "meristem_nodes_legacy_itest")
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	reg := projections.NewRegistry()
+	RegisterProjectors(reg)
+	writer := events.NewWriter(reg)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := "http://10.0.0.63:8080"
+	if _, _, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectNode,
+		SubjectID:   NodeSubjectID("m4"),
+		Kind:        domain.EventNodeRegistered,
+		Source:      domain.SourceSystem,
+		Payload: map[string]any{
+			"node_id": "m4", "base_url": legacy, "status": "active",
+		},
+	}); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("append legacy registration: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := pool.QueryRow(ctx, `SELECT base_url FROM nodes WHERE node_id='m4'`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != legacy {
+		t.Fatalf("legacy base_url = %q, want %q", got, legacy)
 	}
 }

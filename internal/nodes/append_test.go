@@ -51,9 +51,8 @@ func TestBuildRegisteredPayloadFull(t *testing.T) {
 	if !ok || len(relay) != 1 || relay[0] != "den" {
 		t.Errorf("relay_via = %v, want [den]", m["relay_via"])
 	}
-	// payload_version is omitted for v1 (absent == 1).
-	if _, present := m["payload_version"]; present {
-		t.Errorf("payload_version should be omitted for v1, got %v", m["payload_version"])
+	if m["payload_version"] != float64(routePayloadVersion) {
+		t.Errorf("payload_version = %v, want %d", m["payload_version"], routePayloadVersion)
 	}
 }
 
@@ -68,6 +67,9 @@ func TestBuildRegisteredPayloadOmitsAbsentURLs(t *testing.T) {
 		t.Fatalf("BuildRegisteredPayload: %v", err)
 	}
 	m := marshal(t, payload)
+	if m["payload_version"] != float64(routePayloadVersion) {
+		t.Errorf("payload_version = %v, want %d", m["payload_version"], routePayloadVersion)
+	}
 	if _, present := m["base_url"]; present {
 		t.Errorf("base_url should be omitted, got %v", m["base_url"])
 	}
@@ -167,6 +169,9 @@ func TestBuildRouteUpdatedPayloadOmitsBaseURL(t *testing.T) {
 		t.Fatalf("BuildRouteUpdatedPayload: %v", err)
 	}
 	m := marshal(t, payload)
+	if m["payload_version"] != float64(routePayloadVersion) {
+		t.Errorf("payload_version = %v, want %d", m["payload_version"], routePayloadVersion)
+	}
 	if _, present := m["base_url"]; present {
 		t.Errorf("route_updated must not carry base_url, got %v", m["base_url"])
 	}

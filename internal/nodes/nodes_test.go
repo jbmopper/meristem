@@ -79,13 +79,34 @@ func TestRegisteredProjectorRejectsBadRelayHop(t *testing.T) {
 
 func TestRegisteredProjectorFailsClosedOnUnknownVersion(t *testing.T) {
 	ev := registeredEvent(map[string]any{
-		"payload_version": 2,
+		"payload_version": 3,
 		"node_id":         "m4",
 		"status":          "active",
 	})
 	err := registeredProjector{}.Apply(context.Background(), nil, ev)
-	if err == nil || !strings.Contains(err.Error(), "unknown payload_version 2") {
+	if err == nil || !strings.Contains(err.Error(), "unknown payload_version 3") {
 		t.Fatalf("expected fail-closed on unknown version, got %v", err)
+	}
+}
+
+func TestStrictProjectorsRejectLegacyPrivateHTTPOrigins(t *testing.T) {
+	registered := registeredEvent(map[string]any{
+		"payload_version": routePayloadVersion,
+		"node_id":         "m4",
+		"base_url":        "http://10.0.0.63:8080",
+		"status":          "active",
+	})
+	if err := (registeredProjector{}).Apply(context.Background(), nil, registered); err == nil || !strings.Contains(err.Error(), "invalid node origin") {
+		t.Fatalf("v2 registration accepted private HTTP origin: %v", err)
+	}
+	route := routeUpdatedEvent(map[string]any{
+		"payload_version": routePayloadVersion,
+		"node_id":         "m4",
+		"direct_url":      "http://10.0.0.63:8080",
+		"status":          "active",
+	})
+	if err := (routeUpdatedProjector{}).Apply(context.Background(), nil, route); err == nil || !strings.Contains(err.Error(), "invalid node origin") {
+		t.Fatalf("v2 route update accepted private HTTP origin: %v", err)
 	}
 }
 
