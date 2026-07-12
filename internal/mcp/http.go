@@ -31,6 +31,10 @@ type HTTPResponse struct {
 // idempotency contract for HTTP MCP writes is finalized.
 type HTTPOptions struct {
 	AllowedTools map[string]bool
+	// Profile is the explicit transport policy for provider-facing HTTP MCP.
+	// When set it takes precedence over AllowedTools and may reject a call based
+	// on its arguments before the normal MCP dispatcher can run a handler.
+	Profile *HTTPToolProfile
 }
 
 func ReadOnlyHTTPTools() map[string]bool {
@@ -89,7 +93,7 @@ func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, a
 
 	if msg.isNotification() {
 		if msg.Method == "tools/call" {
-			if rerr := s.checkHTTPToolAllowed(msg.Params, opts.AllowedTools); rerr != nil {
+			if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
 				s.logger.Warn("mcp http notification rejected",
 					"method", msg.Method,
 					"error", rerr.Message)
@@ -105,11 +109,11 @@ func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, a
 	}
 
 	if msg.Method == "tools/list" {
-		result, rerr := s.handleListToolsFiltered(actor, opts.AllowedTools)
+		result, rerr := s.handleListToolsFiltered(actor, opts)
 		return s.httpRPCResult(msg, result, rerr)
 	}
 	if msg.Method == "tools/call" {
-		if rerr := s.checkHTTPToolAllowed(msg.Params, opts.AllowedTools); rerr != nil {
+		if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
 			return s.httpRPCResult(msg, nil, rerr)
 		}
 	}
@@ -133,8 +137,9 @@ func (s *Server) httpRPCResult(msg rpcMessage, result any, rerr *rpcError) HTTPR
 	return jsonRPCHTTPResponse(http.StatusOK, resp)
 }
 
-func (s *Server) handleListToolsFiltered(actor domain.Token, allowed map[string]bool) (any, *rpcError) {
+func (s *Server) handleListToolsFiltered(actor domain.Token, opts HTTPOptions) (any, *rpcError) {
 	result, rerr := s.handleListTools(actor)
+	allowed := opts.allowedTools()
 	if rerr != nil || len(allowed) == 0 {
 		return result, rerr
 	}
@@ -146,17 +151,21 @@ func (s *Server) handleListToolsFiltered(actor domain.Token, allowed map[string]
 	if !ok {
 		return result, nil
 	}
-	filtered := make([]toolDescriptor, 0, len(descs))
+	filtered := make([]httpToolDescriptor, 0, len(descs))
 	for _, desc := range descs {
 		canonical := s.canonicalToolName(desc.Name)
 		if allowed[canonical] {
-			filtered = append(filtered, desc)
+			filtered = append(filtered, httpToolDescriptor{
+				toolDescriptor: desc,
+				Annotations:    httpAnnotationsForTool(s.toolsByName[canonical]),
+			})
 		}
 	}
 	return map[string]any{"tools": filtered}, nil
 }
 
-func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, allowed map[string]bool) *rpcError {
+func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, opts HTTPOptions) *rpcError {
+	allowed := opts.allowedTools()
 	if len(allowed) == 0 {
 		return nil
 	}
@@ -167,10 +176,15 @@ func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, allowed map[string]bo
 		}
 	}
 	canonical := s.canonicalToolName(params.Name)
-	if allowed[canonical] {
-		return nil
+	if !allowed[canonical] {
+		return rpcErrorf(errCodeMethodNotFound, "tool not enabled on this HTTP MCP profile: "+params.Name)
 	}
-	return rpcErrorf(errCodeMethodNotFound, "tool not enabled on HTTP MCP transport until mutation idempotency is specified: "+params.Name)
+	if opts.Profile != nil {
+		if err := opts.Profile.validateCall(canonical, params.Arguments); err != nil {
+			return rpcErrorf(errCodeInvalidParams, err.Error())
+		}
+	}
+	return nil
 }
 
 func (s *Server) canonicalToolName(name string) string {
