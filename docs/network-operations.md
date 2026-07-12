@@ -1,14 +1,21 @@
-# Network operations: queue-first stage 1
+# Network operations: direct and queue stage 1
 
-This runbook covers the currently testable pull-only path between two meristem
-nodes. It does not claim that direct routing, relay routing, public TLS ingress,
-provider MCP, or OAuth is complete.
+This runbook covers the currently tested direct and pull-only paths between two
+meristem nodes. It does not claim that application relay routing, public TLS
+ingress, provider MCP, or OAuth is complete.
 
 ## Supported acceptance boundary
 
-A queue-first deployment has two independent Postgres databases and two
+A stage 1 deployment has two independent Postgres databases and two
 independent API processes:
 
+- A caller resolves an object's immutable home, loads one locally accepted
+  `nodes` projection snapshot, and uses the production `crossnode.Dispatcher`
+  to call the home node's canonical REST path. The home node authenticates a
+  token minted in its own database and checks the selected target node again.
+- Direct mutations carry the original `Idempotency-Key`. Retrying the same
+  mutation therefore returns the home node's cached response without appending
+  a duplicate domain event.
 - A reachable hub accepts a cross-node command, appends `command.queued`, and
   projects the command into its durable `command_queue`.
 - A pull-only node runs its API on a local/private listener and runs
@@ -21,11 +28,35 @@ independent API processes:
   the state change twice.
 - Loss of the hub stops cross-node drain and feed progress. It does not stop the
   pull-only node's local API, local event log, or local readiness.
+- Registry consumers run `meristem node sync-registry`; each accepted snapshot
+  is appended locally and atomically replaces the routing projection. Registry
+  home loss retains the last accepted revision.
 
-The queue read and acknowledgement endpoints are authenticated in the current
-slice. Per-target authorization and a command-path allowlist are separate
-hardening work; do not expose these endpoints to untrusted clients before that
-work lands.
+The queue write, read, attempt, and acknowledgement endpoints require their
+target-specific cross-node scopes. The queued executor also admits only the
+documented work-item mutation allowlist.
+
+## Direct routing call seam
+
+There is intentionally no second business-logic API or CLI for remote
+mutations. Code that has already resolved an immutable object home constructs a
+canonical `crossnode.Command` and calls `crossnode.Dispatcher.DispatchMutation`.
+The dispatcher reads the local event-backed `nodes` projection once, applies
+the deterministic direct-then-queue selector, and invokes the bounded delivery
+policy. Qualified work-item GETs use `Dispatcher.ReadWorkItem`; reads require a
+direct route and are never put in the durable mutation queue.
+
+Credential resolution is injected per destination node. Each returned bearer
+must have been minted by the node that terminates that attempt. The injected
+HTTP client must use `peerhttp.NewClient`, which resolves and pins the approved
+destination address class, disables proxies and redirects, and preserves TLS
+hostname verification. A nil dispatcher client selects that safe client by
+default. The dispatcher additionally validates the registered origin and binds
+origin and target node ids on every request.
+
+A direct `401`, `403`, `409`, `429`, or unclassified `500` is definitive and
+is returned to the caller. Only transport errors and `502`, `503`, or `504`
+consume the finite direct retry budget and permit durable queue fallback.
 
 ## Listener and TLS expectations
 
@@ -75,6 +106,24 @@ Use a distinct token row on each node. The hub bearer is authenticated by the
 hub database; the local bearer is authenticated by the pull-only node's
 database. Never reuse a root token for either role.
 
+## Reconcile the registry
+
+On each non-authoritative node, run the outbound reconciler under a supervisor:
+
+```bash
+export MERISTEM_REGISTRY_HOME_URL='https://registry.example.test'
+export MERISTEM_REGISTRY_HOME_NODE_ID='registry'
+export MERISTEM_REGISTRY_HOME_TOKEN='...registry-home read token...'
+export MERISTEM_TOKEN='...local snapshot-observer token...'
+go run ./cmd/meristem node sync-registry --interval=30s --request-timeout=5s
+```
+
+The home token needs `registry.snapshot.read:registry`; the local token needs
+`registry.snapshot.observe:registry`. Both must be dedicated non-root tokens.
+Use `--once` for deployment checks. Failed fetches, unsafe or mixed DNS
+answers, redirects, stale revisions, wrong sources, and malformed snapshots
+leave the last accepted local projection unchanged.
+
 ## Verify and operate
 
 Before starting the poller, verify local readiness and hub reachability from the
@@ -86,7 +135,7 @@ curl --fail --silent --show-error https://hub.example.test/readyz
 ```
 
 After enqueueing a test command, confirm the hub row moves from `pending` to
-`done` or `failed`. A command that remains `pending` after more than two poll
+`done`, `refused`, `failed`, or `expired`. A command that remains `pending` after more than two poll
 intervals requires checking, in order:
 
 1. spoke process health and its `hub_reachable` tick field;
@@ -96,9 +145,12 @@ intervals requires checking, in order:
 5. acknowledgement errors after a successful local response.
 
 Do not manually mutate `command_queue`. Retry by restoring connectivity and
-letting the spoke reuse the queued command's original idempotency key. Queue
-patience/escalation is not yet complete, so operators must currently alert on
-the age of pending rows rather than relying on an automatic terminal timeout.
+letting the spoke reuse the queued command's original idempotency key. The
+worker expires a row after 24 hours or five recorded local attempts. A proven
+local causing work item fails with `cross_node_delivery_expired`; a remotely
+homed cause is retained as `remote_notification_required` until the explicit
+outcome-return seam is implemented. Alert on a stopped worker or on pending
+rows older than the configured worker tick, not by rewriting queue state.
 
 During a hub outage, verify that the local node remains usable:
 
@@ -111,10 +163,20 @@ the process should not exit solely because the hub is unreachable.
 
 ## Automated acceptance
 
-The focused test creates two temporary Postgres databases, serves the real hub
-and local API handlers, injects one acknowledgement failure, proves the local
-retry collapses, and then proves local readiness after the hub listener is
-removed:
+The direct-route test creates two temporary Postgres databases, loads A's real
+registry projection through the production dispatcher, reads and mutates a
+B-homed work item through B's real API handler, proves idempotent replay has one
+B effect, and verifies accelerated direct-retry/queue ordering:
+
+```bash
+MERISTEM_INTEGRATION=1 \
+MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+go test ./internal/crossnode -run TestDirectRouteTwoNodeAcceptance -count=1 -v
+```
+
+The queue-route test serves the real hub and local API handlers, injects one
+acknowledgement failure, proves the local retry collapses, and then proves local
+readiness after the hub listener is removed:
 
 ```bash
 MERISTEM_INTEGRATION=1 \
@@ -122,6 +184,11 @@ MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem
 go test ./internal/spoke -run TestQueueFirstTwoNodeAcceptance -count=1 -v
 ```
 
-Direct-route acceptance remains pending production route wiring. Add that proof
-as a separate case once a canonical REST command is actually dispatched by the
-route selector; do not treat the direct-receipt placeholder as execution.
+The registry reconciliation test performs authenticated home-to-consumer sync,
+replay collapse, update, and outage retention across two databases:
+
+```bash
+MERISTEM_INTEGRATION=1 \
+MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+go test ./internal/nodes -run TestRegistrySyncTwoDatabaseReplayAndOutageRetention -count=1 -v
+```

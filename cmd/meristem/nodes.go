@@ -14,6 +14,7 @@
 //	meristem node update-route --node-id m4 [--direct-url URL]
 //	                           [--relay-via ID ...] [--status active]
 //	meristem node list
+//	meristem node sync-registry [--once] [--interval 30s]
 //
 // register appends a node.registered event whose payload carries the full
 // declared state; an identical re-run collapses onto the same event (the
@@ -45,7 +46,16 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/nodes"
+	"github.com/jbmopper/meristem/internal/peerhttp"
 	"github.com/jbmopper/meristem/internal/storage"
+)
+
+const (
+	envRegistryHomeNodeID         = "MERISTEM_REGISTRY_HOME_NODE_ID"
+	envRegistryHomeOrigin         = "MERISTEM_REGISTRY_HOME_URL"
+	envRegistryHomeToken          = "MERISTEM_REGISTRY_HOME_TOKEN"
+	defaultRegistrySyncInterval   = 30 * time.Second
+	defaultRegistryRequestTimeout = 5 * time.Second
 )
 
 func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
@@ -78,10 +88,94 @@ func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
 		return updateNodeRoute(ctx, pool, writer, actor, args[1:])
 	case "list":
 		return listNodes(ctx, pool, os.Stdout, args[1:])
+	case "sync-registry":
+		return syncRegistryNode(ctx, logger, pool, writer, auth.NewService(pool, writer), args[1:])
 	default:
 		logger.Error("unknown node subcommand", slog.String("subcommand", args[0]))
 		nodeUsage(os.Stderr)
 		return fmt.Errorf("node: unknown subcommand %q", args[0])
+	}
+}
+
+// syncRegistryNode reconciles the registry home into this node's own event log
+// using outbound-only authenticated REST. A failed tick leaves the most recent
+// observed snapshot untouched and the daemon retries after a finite interval.
+func syncRegistryNode(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, writer *events.Writer, authenticator tokenAuthenticator, args []string) error {
+	fs := flag.NewFlagSet("node sync-registry", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	once := fs.Bool("once", false, "perform one registry reconciliation tick and exit")
+	interval := fs.Duration("interval", defaultRegistrySyncInterval, "retry/poll interval")
+	requestTimeout := fs.Duration("request-timeout", defaultRegistryRequestTimeout, "timeout for one registry-home request")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("node sync-registry: unexpected argument %q", fs.Arg(0))
+	}
+	if *interval <= 0 {
+		return fmt.Errorf("node sync-registry: --interval must be positive")
+	}
+	if *requestTimeout <= 0 {
+		return fmt.Errorf("node sync-registry: --request-timeout must be positive")
+	}
+
+	expectedSource := strings.TrimSpace(os.Getenv(envRegistryHomeNodeID))
+	origin := strings.TrimSpace(os.Getenv(envRegistryHomeOrigin))
+	remoteToken := os.Getenv(envRegistryHomeToken)
+	localSecret := os.Getenv("MERISTEM_TOKEN")
+	if expectedSource == "" || origin == "" || remoteToken == "" || localSecret == "" {
+		return fmt.Errorf("node sync-registry: %s, %s, %s, and MERISTEM_TOKEN are required", envRegistryHomeNodeID, envRegistryHomeOrigin, envRegistryHomeToken)
+	}
+	actor, err := authenticator.Authenticate(ctx, localSecret)
+	if err != nil {
+		return fmt.Errorf("node sync-registry: authenticate local observer: %w", err)
+	}
+	service, err := nodes.NewRegistrySyncService(nodes.NewSnapshotService(pool, writer), nodes.RegistrySyncConfig{
+		RegistryHomeOrigin: origin,
+		ExpectedSource:     expectedSource,
+		RegistryHomeToken:  remoteToken,
+		LocalActor:         actor,
+		RequestTimeout:     *requestTimeout,
+	}, peerhttp.Options{})
+	if err != nil {
+		return fmt.Errorf("node sync-registry: %w", err)
+	}
+
+	tick := func() error {
+		result, err := service.Tick(ctx)
+		if err != nil {
+			return err
+		}
+		logger.Info("registry snapshot reconciliation complete",
+			slog.String("registry_home_node_id", expectedSource),
+			slog.Int64("source_revision", result.SourceRevision),
+			slog.Bool("observed", result.Observed),
+		)
+		return nil
+	}
+	if *once {
+		return tick()
+	}
+	for {
+		if err := tick(); err != nil {
+			logger.Warn("registry snapshot reconciliation failed; retaining last accepted snapshot",
+				slog.String("registry_home_node_id", expectedSource),
+				slog.String("retry_in", interval.String()),
+				slog.String("error", err.Error()),
+			)
+		}
+		timer := time.NewTimer(*interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -408,11 +502,21 @@ func nodeUsage(w io.Writer) {
   MERISTEM_TOKEN=mrs_<system> meristem node register --node-id ID [--base-url URL] [--direct-url URL] [--relay-via ID ...] [--status active]
   MERISTEM_TOKEN=mrs_<system> meristem node update-route --node-id ID [--direct-url URL] [--relay-via ID ...] [--status active]
   meristem node list
+  MERISTEM_REGISTRY_HOME_URL=https://registry.example \
+    MERISTEM_REGISTRY_HOME_NODE_ID=registry \
+    MERISTEM_REGISTRY_HOME_TOKEN=mrs_<home-read> \
+    MERISTEM_TOKEN=mrs_<local-observer> \
+    meristem node sync-registry [--once] [--interval=30s] [--request-timeout=5s]
 
 Appends node.registered / node.route_updated events to the fleet node registry
 and prints the resulting projection. Connects directly via MERISTEM_DATABASE_URL;
 writes require a system-source MERISTEM_TOKEN. Re-running an identical
 registration is a no-op; a changed field appends a new event. update-route fully
 replaces the route state (direct_url, relay_via, status) — omitted fields clear.
+
+sync-registry performs authenticated outbound GETs against the pinned registry
+home and appends validated snapshots to this node's own log. It never pushes to
+the consumer. Without --once it retries forever at the finite --interval; an
+outage retains the last accepted snapshot. Bearers are required and never logged.
 `)
 }

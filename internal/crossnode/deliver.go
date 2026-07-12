@@ -11,7 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/peerhttp"
 )
 
 // CommandPath is the durable queue ingress. Direct delivery calls the
@@ -32,6 +35,16 @@ const (
 	// HeaderOriginNode records the sending node as structural provenance. It
 	// never substitutes for the receiver-resolved actor token.
 	HeaderOriginNode = "X-Meristem-Origin-Node"
+	// HeaderOriginActorToken and HeaderOriginActorSource preserve remote
+	// provenance without replacing target-local request attribution.
+	HeaderOriginActorToken  = "X-Meristem-Origin-Actor-Token-ID"
+	HeaderOriginActorSource = "X-Meristem-Origin-Actor-Source"
+	// HeaderQueueCommand identifies the authenticated queue-host envelope being
+	// replayed; it is absent on direct delivery.
+	HeaderQueueCommand = "X-Meristem-Queue-Command-ID"
+	// HeaderCausingWorkItem identifies the origin-homed work item whose delivery
+	// patience owns the command.
+	HeaderCausingWorkItem = "X-Meristem-Causing-Work-Item-ID"
 	// HeaderRelayed marks a relay hop. §2b: a node never forwards an already
 	// relayed request, so loops are impossible structurally.
 	HeaderRelayed = "X-Meristem-Relayed"
@@ -44,8 +57,9 @@ const (
 // travel in headers, not the body, so the body is exactly the home-node call
 // to replay.
 type wireCommand struct {
-	CommandPath string          `json:"command_path"`
-	CommandBody json.RawMessage `json:"command_body"`
+	CommandPath       string          `json:"command_path"`
+	CommandBody       json.RawMessage `json:"command_body"`
+	CausingWorkItemID *uuid.UUID      `json:"causing_work_item_id,omitempty"`
 }
 
 const (
@@ -120,7 +134,7 @@ func DeliverWithPolicy(ctx context.Context, client *http.Client, credentials Bea
 		return Outcome{Cooldowns: copyCooldowns(cooldowns)}, ErrMissingCredential
 	}
 	if client == nil {
-		client = http.DefaultClient
+		client = peerhttp.NewClient(peerhttp.Options{})
 	}
 	policy = normalizeDeliveryPolicy(policy)
 	out := Outcome{Cooldowns: copyCooldowns(cooldowns)}
@@ -247,8 +261,9 @@ func post(ctx context.Context, client *http.Client, credentials BearerResolver, 
 	case KindQueue:
 		endpoint = strings.TrimRight(c.URL, "/") + CommandPath
 		body, err = json.Marshal(wireCommand{
-			CommandPath: req.Path,
-			CommandBody: normalizeBody(req.Body),
+			CommandPath:       req.Path,
+			CommandBody:       normalizeBody(req.Body),
+			CausingWorkItemID: req.CausingWorkItemID,
 		})
 		if err != nil {
 			return 0, nil, fmt.Errorf("crossnode: marshal command: %w", err)
@@ -271,6 +286,15 @@ func post(ctx context.Context, client *http.Client, credentials BearerResolver, 
 	// logical home target.
 	httpReq.Header.Set(HeaderTargetNode, c.NodeID)
 	httpReq.Header.Set(HeaderOriginNode, req.OriginNodeID)
+	if req.OriginActorTokenID != nil {
+		httpReq.Header.Set(HeaderOriginActorToken, req.OriginActorTokenID.String())
+	}
+	if req.OriginActorSource.Valid() {
+		httpReq.Header.Set(HeaderOriginActorSource, string(req.OriginActorSource))
+	}
+	if req.CausingWorkItemID != nil {
+		httpReq.Header.Set(HeaderCausingWorkItem, req.CausingWorkItemID.String())
+	}
 	switch c.Kind {
 	case KindQueue:
 		httpReq.Header.Set(HeaderQueueFor, req.TargetNodeID)

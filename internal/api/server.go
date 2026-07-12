@@ -280,6 +280,9 @@ func (s *Server) commandWithAccess(gate accessGate, next http.Handler) http.Hand
 	}
 	inner := s.idempotencyMiddleware.Wrap(next)
 	return s.authMiddleware.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.bindRemoteProvenance(w, r) {
+			return
+		}
 		if !gate(w, r) {
 			return
 		}

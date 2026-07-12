@@ -244,6 +244,18 @@ func (p *Poller) executeLocal(ctx context.Context, cmd crossnode.QueuedCommand) 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.cfg.LocalToken)
 	req.Header.Set("Idempotency-Key", cmd.OriginIdempotencyKey)
+	req.Header.Set(crossnode.HeaderTargetNode, p.cfg.NodeID)
+	req.Header.Set(crossnode.HeaderOriginNode, cmd.OriginNodeID)
+	req.Header.Set(crossnode.HeaderQueueCommand, cmd.EventID.String())
+	if cmd.OriginActorTokenID != nil {
+		req.Header.Set(crossnode.HeaderOriginActorToken, cmd.OriginActorTokenID.String())
+	}
+	if cmd.OriginActorSource.Valid() {
+		req.Header.Set(crossnode.HeaderOriginActorSource, string(cmd.OriginActorSource))
+	}
+	if cmd.CausingWorkItemID != nil {
+		req.Header.Set(crossnode.HeaderCausingWorkItem, cmd.CausingWorkItemID.String())
+	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/testutil/pgtest"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 func TestQueuePatienceIntegration(t *testing.T) {
@@ -26,6 +27,7 @@ func TestQueuePatienceIntegration(t *testing.T) {
 	reg := projections.NewRegistry()
 	auth.RegisterProjectors(reg)
 	RegisterProjectors(reg)
+	workitems.RegisterProjectors(reg)
 	writer := events.NewWriter(reg)
 	created, err := auth.NewService(pool, writer).CreateToken(ctx, auth.CreateTokenInput{
 		Name: "queue-patience", IsRoot: true, Source: domain.SourceHuman,
@@ -105,6 +107,78 @@ func TestQueuePatienceIntegration(t *testing.T) {
 		t.Fatalf("expire deadline = (%+v, %v)", expired, err)
 	}
 	assertPatienceRow(t, pool, deadlineBound.EventID, "expired", 0, ExpiryDeadline)
+
+	causing, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "owns remote delivery", Actor: actor, State: domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"remote_write_applied"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+	})
+	if err != nil {
+		t.Fatalf("create causing work item: %v", err)
+	}
+	owned, err := svc.Enqueue(ctx, EnqueueInput{
+		TargetNodeID: "m4", OriginNodeID: "hub",
+		CommandPath: "/v1/work-items/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/transition",
+		CommandBody: json.RawMessage(`{"to":"running"}`), OriginIdempotencyKey: "owned-expiry",
+		OriginActorTokenID: &actor.ID, Source: actor.Source, CausingWorkItemID: &causing.ID,
+	})
+	if err != nil {
+		t.Fatalf("enqueue owned command: %v", err)
+	}
+	var ownedDeadline time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM command_queue WHERE id=$1`, owned.EventID).Scan(&ownedDeadline); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := svc.ExpireDue(ctx, ExpireDueInput{Now: ownedDeadline, ActorTokenID: actor.ID, Source: actor.Source, LocalNodeID: "hub"})
+	if err != nil || len(resolved) != 1 || resolved[0].CauseResolution != CauseLocalFailed {
+		t.Fatalf("expire owned command = (%+v, %v)", resolved, err)
+	}
+	var state domain.WorkItemState
+	var reason *string
+	if err := pool.QueryRow(ctx, `SELECT state, state_reason FROM work_items WHERE id=$1`, causing.ID).Scan(&state, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != domain.WorkItemFailed || reason == nil || *reason != CrossNodeDeliveryExpiredReason {
+		t.Fatalf("causing item state=%s reason=%v", state, reason)
+	}
+	var resolution string
+	if err := pool.QueryRow(ctx, `SELECT payload->>'cause_resolution' FROM events WHERE id=$1`, resolved[0].EventID).Scan(&resolution); err != nil {
+		t.Fatal(err)
+	}
+	if resolution != string(CauseLocalFailed) {
+		t.Fatalf("expiry cause_resolution=%q", resolution)
+	}
+
+	noIdentity, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "must retain its home", Actor: actor, State: domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"remote_write_applied"}, HumanReviewStatus: domain.HumanReviewWavedThrough,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := svc.Enqueue(ctx, EnqueueInput{
+		TargetNodeID: "m4", OriginNodeID: "hub", CommandPath: "/v1/work-items/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/transition",
+		CommandBody: json.RawMessage(`{"to":"running"}`), OriginIdempotencyKey: "no-local-identity",
+		OriginActorTokenID: &actor.ID, Source: actor.Source, CausingWorkItemID: &noIdentity.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remoteDeadline time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM command_queue WHERE id=$1`, remote.EventID).Scan(&remoteDeadline); err != nil {
+		t.Fatal(err)
+	}
+	remoteResult, err := svc.ExpireDue(ctx, ExpireDueInput{Now: remoteDeadline, ActorTokenID: actor.ID, Source: actor.Source})
+	if err != nil || len(remoteResult) != 1 || remoteResult[0].CauseResolution != CauseRemoteNotification {
+		t.Fatalf("expiry without local node identity = (%+v, %v)", remoteResult, err)
+	}
+	var retained domain.WorkItemState
+	if err := pool.QueryRow(ctx, `SELECT state FROM work_items WHERE id=$1`, noIdentity.ID).Scan(&retained); err != nil {
+		t.Fatal(err)
+	}
+	if retained != domain.WorkItemRunning {
+		t.Fatalf("coincident local UUID mutated without proven home: %s", retained)
+	}
 }
 
 func assertPatienceRow(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, wantState string, wantAttempts int, wantReason ExpiryReason) {

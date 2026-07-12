@@ -41,6 +41,8 @@ type queuedPayload struct {
 	CommandBody          json.RawMessage `json:"command_body"`
 	OriginIdempotencyKey string          `json:"origin_idempotency_key"`
 	OriginActorTokenID   *uuid.UUID      `json:"origin_actor_token_id,omitempty"`
+	OriginActorSource    domain.Source   `json:"origin_actor_source"`
+	CausingWorkItemID    *uuid.UUID      `json:"causing_work_item_id,omitempty"`
 }
 
 // EnqueueInput is one request to durably park a command for an inbound-less
@@ -64,6 +66,9 @@ type EnqueueInput struct {
 	// callers; authenticated transports should pass their request-context
 	// token source.
 	Source domain.Source
+	// CausingWorkItemID is the origin-homed work item whose finite delivery
+	// policy owns this command.
+	CausingWorkItemID *uuid.UUID
 }
 
 // EnqueueResult reports the command.queued event id the enqueue produced.
@@ -105,7 +110,11 @@ type QueuedCommand struct {
 	CommandBody json.RawMessage `json:"command_body"`
 	// OriginIdempotencyKey is replayed as the Idempotency-Key of the local
 	// execution so a drained command collapses with any direct retry.
-	OriginIdempotencyKey string `json:"origin_idempotency_key"`
+	OriginIdempotencyKey string        `json:"origin_idempotency_key"`
+	OriginNodeID         string        `json:"origin_node_id"`
+	OriginActorTokenID   *uuid.UUID    `json:"origin_actor_token_id,omitempty"`
+	OriginActorSource    domain.Source `json:"origin_actor_source"`
+	CausingWorkItemID    *uuid.UUID    `json:"causing_work_item_id,omitempty"`
 	// QueuedAt is when the command was durably parked (oldest drained first).
 	QueuedAt time.Time `json:"queued_at"`
 	// ExpiresAt is the fixed 24-hour patience deadline projected from queued_at.
@@ -211,6 +220,8 @@ func (s *QueueService) Enqueue(ctx context.Context, in EnqueueInput) (EnqueueRes
 			CommandBody:          normalizeBody(in.CommandBody),
 			OriginIdempotencyKey: in.OriginIdempotencyKey,
 			OriginActorTokenID:   in.OriginActorTokenID,
+			OriginActorSource:    eventSource(in.Source),
+			CausingWorkItemID:    in.CausingWorkItemID,
 		},
 	})
 	if err != nil {
@@ -238,7 +249,9 @@ func (s *QueueService) PendingForTarget(ctx context.Context, target string, limi
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, target_node_id, command_path, command_body,
-		       origin_idempotency_key, queued_at, expires_at, attempt_count
+		       origin_idempotency_key, origin_node_id, origin_actor_token_id,
+		       origin_actor_source, causing_work_item_id,
+		       queued_at, expires_at, attempt_count
 		FROM command_queue
 		WHERE target_node_id = $1 AND state = 'pending'
 		ORDER BY queued_at, id
@@ -254,7 +267,9 @@ func (s *QueueService) PendingForTarget(ctx context.Context, target string, limi
 		var c QueuedCommand
 		var body []byte
 		if err := rows.Scan(&c.EventID, &c.TargetNodeID, &c.CommandPath, &body,
-			&c.OriginIdempotencyKey, &c.QueuedAt, &c.ExpiresAt, &c.AttemptCount); err != nil {
+			&c.OriginIdempotencyKey, &c.OriginNodeID, &c.OriginActorTokenID,
+			&c.OriginActorSource, &c.CausingWorkItemID,
+			&c.QueuedAt, &c.ExpiresAt, &c.AttemptCount); err != nil {
 			return nil, fmt.Errorf("crossnode: scan pending command: %w", err)
 		}
 		c.CommandBody = json.RawMessage(body)
