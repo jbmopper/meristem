@@ -57,3 +57,24 @@ func TestQueueDrainAndAckScopesAreDistinctAndTargetScoped(t *testing.T) {
 		t.Fatalf("ack exact scope: %v", err)
 	}
 }
+
+func TestOutcomeScopesAreOriginAndHostScopedAndRejectRoot(t *testing.T) {
+	remote := domain.Token{Scopes: []string{QueueOutcomeReadScope("origin-a")}}
+	if err := AuthorizeQueueOutcomeRead(remote, "origin-a"); err != nil {
+		t.Fatalf("exact outcome read scope: %v", err)
+	}
+	if err := AuthorizeQueueOutcomeRead(remote, "origin-b"); !errors.Is(err, ErrCommandScopeDenied) {
+		t.Fatalf("wrong origin read = %v, want scope denial", err)
+	}
+	local := domain.Token{Scopes: []string{OutcomeObserveScope("queue-a", "origin-a")}}
+	if err := AuthorizeOutcomeObserve(local, "queue-a", "origin-a"); err != nil {
+		t.Fatalf("exact observe scope: %v", err)
+	}
+	if err := AuthorizeOutcomeObserve(local, "queue-b", "origin-a"); !errors.Is(err, ErrCommandScopeDenied) {
+		t.Fatalf("wrong queue host = %v, want scope denial", err)
+	}
+	root := domain.Token{IsRoot: true, Scopes: []string{QueueOutcomeReadScope("origin-a")}}
+	if err := AuthorizeQueueOutcomeRead(root, "origin-a"); !errors.Is(err, ErrCommandRootForbidden) {
+		t.Fatalf("root outcome read = %v, want root forbidden", err)
+	}
+}

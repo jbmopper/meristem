@@ -62,6 +62,8 @@ var projectionTables = []string{
 	"nodes",
 	"registry_snapshot_state",
 	"command_queue",
+	"crossnode_outcome_observations",
+	"crossnode_outcome_cursors",
 	"spoke_state",
 }
 

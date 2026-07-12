@@ -148,8 +148,22 @@ Do not manually mutate `command_queue`. Retry by restoring connectivity and
 letting the spoke reuse the queued command's original idempotency key. The
 worker expires a row after 24 hours or five recorded local attempts. A proven
 local causing work item fails with `cross_node_delivery_expired`; a remotely
-homed cause is retained as `remote_notification_required` until the explicit
-outcome-return seam is implemented. Alert on a stopped worker or on pending
+homed cause is retained as `remote_notification_required` on the queue host
+until its origin polls the terminal outcome. Run the origin reconciler with:
+
+```bash
+MERISTEM_QUEUE_HOST_URL=https://queue.example \
+MERISTEM_QUEUE_HOST_NODE_ID=queue-host \
+MERISTEM_QUEUE_HOST_OUTCOME_TOKEN=mrs_origin_read \
+MERISTEM_NODE_ID=origin MERISTEM_TOKEN=mrs_local_observer \
+meristem node sync-outcomes --interval=30s
+```
+
+The queue-host token must have `crossnode.outcomes:<origin>` and the local
+observer token must have `crossnode.observe:<queue-host>:<origin>`. Neither may
+be root. The cursor and every observed terminal fact are event-backed, so a
+queue-host outage retains both sides' last durable state and replay resumes
+without duplicating the origin transition. Alert on a stopped reconciler or on pending
 rows older than the configured worker tick, not by rewriting queue state.
 
 During a hub outage, verify that the local node remains usable:
