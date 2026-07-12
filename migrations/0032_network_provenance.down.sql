@@ -3,4 +3,3 @@ ALTER TABLE command_queue
     DROP COLUMN IF EXISTS causing_work_item_id,
     DROP COLUMN IF EXISTS origin_actor_source,
     DROP COLUMN IF EXISTS origin_node_id;
-
