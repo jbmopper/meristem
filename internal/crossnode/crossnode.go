@@ -9,7 +9,7 @@
 //
 //   - Select: the pure §2b selection rule — given the registry snapshot, a
 //     target node id, and the sender's local cooldowns, produce the fixed
-//     ordered candidate list (direct, then relay hops, then durable queue).
+//     ordered candidate list (direct, then durable queue fallback).
 //   - Deliver: the client-side walk of that candidate list over HTTP,
 //     advancing on transport failure / 5xx (recording a cooldown) and stopping
 //     on a definitive 2xx or 4xx.
@@ -17,17 +17,24 @@
 //     a reachable node is asked to durably park a command for an inbound-less
 //     target, it appends command.queued and folds it into command_queue.
 //
-// Selection is deliberately boring: first success wins, an already-relayed
-// request is never forwarded again (loops are impossible structurally, not by
-// TTL), and the whole scheme collapses to hub-and-spoke by itself when exactly
-// one node registers a direct_url — the guaranteed fallback the fleet is built
-// on.
+// Selection is deliberately boring: first success wins, application-level
+// relay is deferred, and the whole scheme collapses to direct-or-queue when
+// exactly one node registers a direct_url — the guaranteed fallback the fleet
+// is built on.
 package crossnode
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"path"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // CooldownWindow is how long a route the sender observed failing is skipped by
@@ -35,17 +42,17 @@ import (
 // opinion — never shared state to reconcile.
 const CooldownWindow = 60 * time.Second
 
-// CandidateKind names the three delivery mechanisms §2b selects among, in the
-// fixed priority order Select emits them.
+// CandidateKind names direct and queue delivery plus the reserved historical
+// relay value. Select emits only direct and queue in Stage 1.
 type CandidateKind string
 
 const (
 	// KindDirect posts straight to the target's own registered direct_url.
 	KindDirect CandidateKind = "direct"
-	// KindRelay posts to a relay node's direct_url, marked X-Meristem-Relayed
-	// so the relay forwards it once to the home node and never re-relays.
+	// KindRelay is reserved for historical/prototype configuration. Select does
+	// not emit it until forwarding has a complete target/credential contract.
 	KindRelay CandidateKind = "relay"
-	// KindQueue posts to a reachable relay node's direct_url asking it to
+	// KindQueue posts to a reachable queue host's direct_url asking it to
 	// durably park the command (command.queued) for an inbound-less target,
 	// which drains it by outbound poll.
 	KindQueue CandidateKind = "queue"
@@ -58,13 +65,17 @@ const (
 type Candidate struct {
 	// Kind selects the headers Deliver attaches and how a failure is judged.
 	Kind CandidateKind
-	// URL is the base URL to POST to: the target's direct_url for KindDirect,
-	// or the relay node's direct_url for KindRelay/KindQueue. Deliver appends
-	// the crossnode command path to it.
+	// URL is the origin to POST to: the target's direct_url for KindDirect or
+	// the queue host's direct_url for KindQueue.
 	URL string
-	// Via is the relay node id for KindRelay/KindQueue; empty for KindDirect.
-	// It is informational (attribution/observability); the queue header uses
-	// the target node id, not Via.
+	// NodeID identifies the node that terminates this HTTP attempt and therefore
+	// the node whose bearer credential must be used. For a direct candidate it
+	// is the target node; for a durable queue candidate it is the reachable
+	// queue host in Via. Credential material never lives on Candidate itself.
+	NodeID string
+	// Via is the queue host node id for KindQueue (or reserved relay node for
+	// KindRelay); empty for KindDirect. The queue header uses the target node
+	// id, not Via.
 	Via string
 	// RouteKey uniquely and stably identifies this route across a Select /
 	// Deliver / cooldown cycle. A failed route is keyed by RouteKey in the
@@ -92,6 +103,12 @@ type Command struct {
 	// as command_body when queued.
 	Body json.RawMessage
 }
+
+// BearerResolver returns the target-node credential for one HTTP attempt.
+// Tokens are node-local, so a direct attempt and a queue fallback can require
+// different bearers. Implementations must not log or persist the returned
+// value.
+type BearerResolver func(ctx context.Context, nodeID string) (string, error)
 
 // Attempt records the outcome of one candidate Deliver tried, for tests and
 // observability. Err is set for a transport failure; StatusCode is set for an
@@ -138,4 +155,79 @@ var (
 	// the transport or 5xx level and the walk exhausted without a definitive
 	// 2xx or 4xx.
 	ErrAllRoutesFailed = errors.New("crossnode: all candidate routes failed")
+	// ErrMissingCredential is returned before an attempt when no node-specific
+	// bearer is available. Falling through to unauthenticated HTTP would destroy
+	// attribution and can never be a valid route attempt.
+	ErrMissingCredential = errors.New("crossnode: missing node credential")
+	// ErrUnsupportedRoute marks the deferred application-level relay route.
+	// Stage 1 supports direct canonical REST plus durable queue fallback only.
+	ErrUnsupportedRoute = errors.New("crossnode: application relay is not supported")
+	// ErrInvalidCommandPath protects the pull-only executor from becoming an
+	// arbitrary authenticated POST proxy.
+	ErrInvalidCommandPath = errors.New("crossnode: command path is not allowed")
+	// ErrInvalidOrigin marks malformed or unsafe registered route origins.
+	ErrInvalidOrigin = errors.New("crossnode: route origin is invalid")
 )
+
+// ValidateCommandPath permits only the narrow work-item mutation surface used
+// to progress a remotely-homed item. Approval decisions, connectors, token
+// administration, inbox capture, and arbitrary REST paths are deliberately
+// excluded from queued execution.
+func ValidateCommandPath(raw string) error {
+	if strings.TrimSpace(raw) != raw || raw == "" {
+		return ErrInvalidCommandPath
+	}
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || u.IsAbs() || u.Host != "" || u.RawQuery != "" || u.Fragment != "" {
+		return ErrInvalidCommandPath
+	}
+	if path.Clean(u.Path) != u.Path || strings.Contains(u.Path, "//") {
+		return ErrInvalidCommandPath
+	}
+	if u.Path == "/v1/work-items" {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "v1" || parts[1] != "work-items" {
+		return ErrInvalidCommandPath
+	}
+	if _, err := uuid.Parse(parts[2]); err != nil {
+		return ErrInvalidCommandPath
+	}
+	switch parts[3] {
+	case "children", "events", "metadata", "transition", "convergence-proposal":
+		return nil
+	default:
+		return ErrInvalidCommandPath
+	}
+}
+
+// ValidateOrigin accepts an origin-only HTTPS URL, plus plaintext loopback for
+// local development. Paths, userinfo, queries, and fragments are forbidden so
+// Deliver can append a canonical REST path without ambiguity or credential
+// leakage. Private/LAN HTTP requires TLS termination or an explicit future
+// policy; it is not silently trusted here.
+func ValidateOrigin(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return ErrInvalidOrigin
+	}
+	if u.Path != "" && u.Path != "/" {
+		return ErrInvalidOrigin
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme != "http" {
+		return ErrInvalidOrigin
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("%w: plaintext HTTP is loopback-only", ErrInvalidOrigin)
+	}
+	return nil
+}

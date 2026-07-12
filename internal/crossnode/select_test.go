@@ -24,13 +24,14 @@ func node(id string, direct *string, relay ...string) domain.Node {
 type candidateShape struct {
 	kind CandidateKind
 	url  string
+	node string
 	via  string
 }
 
 func shapes(cs []Candidate) []candidateShape {
 	out := make([]candidateShape, len(cs))
 	for i, c := range cs {
-		out[i] = candidateShape{c.Kind, c.URL, c.Via}
+		out[i] = candidateShape{c.Kind, c.URL, c.NodeID, c.Via}
 	}
 	return out
 }
@@ -58,10 +59,10 @@ func TestSelect(t *testing.T) {
 			name:   "direct only",
 			nodes:  []domain.Node{node("m4", ptr(m4direct))},
 			target: "m4",
-			want:   []candidateShape{{KindDirect, m4direct, ""}},
+			want:   []candidateShape{{KindDirect, m4direct, "m4", ""}},
 		},
 		{
-			name: "direct then relay then queue, relay order preserved",
+			name: "direct then queue, queue host order preserved",
 			nodes: []domain.Node{
 				node("m4", ptr(m4direct), "hub", "den"),
 				node("hub", ptr(hub)),
@@ -69,15 +70,13 @@ func TestSelect(t *testing.T) {
 			},
 			target: "m4",
 			want: []candidateShape{
-				{KindDirect, m4direct, ""},
-				{KindRelay, hub, "hub"},
-				{KindRelay, "https://den.example", "den"},
-				{KindQueue, hub, "hub"},
-				{KindQueue, "https://den.example", "den"},
+				{KindDirect, m4direct, "m4", ""},
+				{KindQueue, hub, "hub", "hub"},
+				{KindQueue, "https://den.example", "den", "den"},
 			},
 		},
 		{
-			name: "relay without direct_url is skipped for both relay and queue",
+			name: "queue host without direct_url is skipped",
 			nodes: []domain.Node{
 				node("m4", nil, "isolated", "hub"),
 				node("isolated", nil),
@@ -85,8 +84,7 @@ func TestSelect(t *testing.T) {
 			},
 			target: "m4",
 			want: []candidateShape{
-				{KindRelay, hub, "hub"},
-				{KindQueue, hub, "hub"},
+				{KindQueue, hub, "hub", "hub"},
 			},
 		},
 		{
@@ -98,8 +96,7 @@ func TestSelect(t *testing.T) {
 			},
 			target: "m4",
 			want: []candidateShape{
-				{KindRelay, hub, "hub"},
-				{KindQueue, hub, "hub"},
+				{KindQueue, hub, "hub", "hub"},
 			},
 		},
 		{
@@ -116,12 +113,11 @@ func TestSelect(t *testing.T) {
 			},
 			target: "m4",
 			want: []candidateShape{
-				{KindRelay, hub, "hub"},
-				{KindQueue, hub, "hub"},
+				{KindQueue, hub, "hub", "hub"},
 			},
 		},
 		{
-			name: "cooling direct route is skipped, relay survives",
+			name: "cooling direct route is skipped, queue survives",
 			nodes: []domain.Node{
 				node("m4", ptr(m4direct), "hub"),
 				node("hub", ptr(hub)),
@@ -131,8 +127,7 @@ func TestSelect(t *testing.T) {
 				routeKey(KindDirect, "m4", ""): now.Add(-30 * time.Second),
 			},
 			want: []candidateShape{
-				{KindRelay, hub, "hub"},
-				{KindQueue, hub, "hub"},
+				{KindQueue, hub, "hub", "hub"},
 			},
 		},
 		{
@@ -146,9 +141,8 @@ func TestSelect(t *testing.T) {
 				routeKey(KindDirect, "m4", ""): now.Add(-(CooldownWindow + time.Second)),
 			},
 			want: []candidateShape{
-				{KindDirect, m4direct, ""},
-				{KindRelay, hub, "hub"},
-				{KindQueue, hub, "hub"},
+				{KindDirect, m4direct, "m4", ""},
+				{KindQueue, hub, "hub", "hub"},
 			},
 		},
 		{
@@ -160,7 +154,6 @@ func TestSelect(t *testing.T) {
 			target: "m4",
 			cooldowns: map[string]time.Time{
 				routeKey(KindDirect, "m4", ""):   now,
-				routeKey(KindRelay, "m4", "hub"): now,
 				routeKey(KindQueue, "m4", "hub"): now,
 			},
 			wantErr: ErrNoRoute,
@@ -193,8 +186,8 @@ func TestSelect(t *testing.T) {
 }
 
 // TestSelectRouteKeysAreStableAndDistinct guards the cooldown contract: the
-// three candidates through one relay node must have distinct keys so cooling
-// one does not cool the others.
+// direct and queue candidates must have distinct keys so cooling one does not
+// cool the other.
 func TestSelectRouteKeysAreStableAndDistinct(t *testing.T) {
 	now := time.Unix(0, 0).UTC()
 	nodes := []domain.Node{
