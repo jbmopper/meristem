@@ -80,11 +80,12 @@ type EnqueueResult struct {
 //
 // payload_version is absent (== 1) per docs/payload-versioning.md.
 type ackedPayload struct {
-	PayloadVersion int       `json:"payload_version,omitempty"`
-	CommandQueueID uuid.UUID `json:"command_queue_id"`
-	TargetNodeID   string    `json:"target_node_id"`
-	StatusCode     int       `json:"status_code"`
-	OK             bool      `json:"ok"`
+	PayloadVersion int            `json:"payload_version,omitempty"`
+	CommandQueueID uuid.UUID      `json:"command_queue_id"`
+	TargetNodeID   string         `json:"target_node_id"`
+	StatusCode     int            `json:"status_code"`
+	OK             bool           `json:"ok"`
+	Outcome        CommandOutcome `json:"outcome,omitempty"`
 }
 
 // QueuedCommand is one pending row the drain read returns: the home-node call
@@ -103,6 +104,10 @@ type QueuedCommand struct {
 	OriginIdempotencyKey string `json:"origin_idempotency_key"`
 	// QueuedAt is when the command was durably parked (oldest drained first).
 	QueuedAt time.Time `json:"queued_at"`
+	// ExpiresAt is the fixed 24-hour patience deadline projected from queued_at.
+	ExpiresAt time.Time `json:"expires_at"`
+	// AttemptCount is the number of distinct local executions recorded so far.
+	AttemptCount int `json:"attempt_count"`
 }
 
 // AckInput is one acknowledgement of a drained command's structural outcome.
@@ -112,6 +117,9 @@ type AckInput struct {
 	// StatusCode and OK are the structural outcome of the local execution.
 	StatusCode int
 	OK         bool
+	// Outcome is done, refused, or failed. Empty preserves the legacy OK
+	// mapping (true -> done, false -> failed).
+	Outcome CommandOutcome
 	// ActorTokenID is the resolved token id of the acking (hub-side) actor.
 	ActorTokenID *uuid.UUID
 	// Source is the resolved source of the actor that caused the ack. A zero
@@ -132,6 +140,10 @@ var ErrInvalidTargetNodeID = errors.New("crossnode: target_node_id is not a DNS-
 // ErrUnknownCommand is returned when an ack references a command_queue id that
 // does not exist (unknown or already pruned queued command).
 var ErrUnknownCommand = errors.New("crossnode: unknown queued command")
+
+// ErrCommandTerminalConflict reports a non-identical acknowledgement after a
+// command already reached any terminal outcome. The winning event is immutable.
+var ErrCommandTerminalConflict = errors.New("crossnode: command already has a different terminal outcome")
 
 // defaultPendingLimit bounds a drain read that supplies no positive limit.
 const defaultPendingLimit = 100
@@ -210,7 +222,8 @@ func (s *QueueService) PendingForTarget(ctx context.Context, target string, limi
 		limit = maxPendingLimit
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, target_node_id, command_path, command_body, origin_idempotency_key, queued_at
+		SELECT id, target_node_id, command_path, command_body,
+		       origin_idempotency_key, queued_at, expires_at, attempt_count
 		FROM command_queue
 		WHERE target_node_id = $1 AND state = 'pending'
 		ORDER BY queued_at, id
@@ -225,7 +238,8 @@ func (s *QueueService) PendingForTarget(ctx context.Context, target string, limi
 	for rows.Next() {
 		var c QueuedCommand
 		var body []byte
-		if err := rows.Scan(&c.EventID, &c.TargetNodeID, &c.CommandPath, &body, &c.OriginIdempotencyKey, &c.QueuedAt); err != nil {
+		if err := rows.Scan(&c.EventID, &c.TargetNodeID, &c.CommandPath, &body,
+			&c.OriginIdempotencyKey, &c.QueuedAt, &c.ExpiresAt, &c.AttemptCount); err != nil {
 			return nil, fmt.Errorf("crossnode: scan pending command: %w", err)
 		}
 		c.CommandBody = json.RawMessage(body)
@@ -250,22 +264,38 @@ func (s *QueueService) Ack(ctx context.Context, in AckInput) (AckResult, error) 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var target string
+	desiredState, desiredOK, err := inputOutcome(in)
+	if err != nil {
+		return AckResult{}, err
+	}
+	var (
+		target          string
+		state           string
+		statusCode      *int
+		outcomeOK       *bool
+		terminalEventID *uuid.UUID
+	)
 	// Serialize acknowledgements on the queue row before appending their
 	// events. This makes the first row-lock winner also the first event in log
 	// order, so live projection and a seq-ordered rebuild choose the same
 	// terminal decision under concurrent, contradictory acks.
 	err = tx.QueryRow(ctx, `
-		SELECT target_node_id
+		SELECT target_node_id, state, outcome_status_code, outcome_ok, terminal_event_id
 		FROM command_queue
 		WHERE id = $1
 		FOR UPDATE
-	`, in.CommandQueueID).Scan(&target)
+	`, in.CommandQueueID).Scan(&target, &state, &statusCode, &outcomeOK, &terminalEventID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AckResult{}, ErrUnknownCommand
 	}
 	if err != nil {
 		return AckResult{}, fmt.Errorf("crossnode: resolve command target: %w", err)
+	}
+	if state != "pending" {
+		if state == string(desiredState) && statusCode != nil && *statusCode == in.StatusCode && outcomeOK != nil && *outcomeOK == desiredOK && terminalEventID != nil {
+			return AckResult{EventID: *terminalEventID, TargetNodeID: target}, nil
+		}
+		return AckResult{}, ErrCommandTerminalConflict
 	}
 
 	disc, _ := idempotency.EventDiscriminator(ctx)
@@ -280,7 +310,8 @@ func (s *QueueService) Ack(ctx context.Context, in AckInput) (AckResult, error) 
 			CommandQueueID: in.CommandQueueID,
 			TargetNodeID:   target,
 			StatusCode:     in.StatusCode,
-			OK:             in.OK,
+			OK:             desiredOK,
+			Outcome:        desiredState,
 		},
 	})
 	if err != nil {
@@ -290,6 +321,23 @@ func (s *QueueService) Ack(ctx context.Context, in AckInput) (AckResult, error) 
 		return AckResult{}, err
 	}
 	return AckResult{EventID: id, TargetNodeID: target}, nil
+}
+
+func inputOutcome(in AckInput) (CommandOutcome, bool, error) {
+	if in.Outcome == "" {
+		if in.OK {
+			return CommandDone, true, nil
+		}
+		return CommandFailed, false, nil
+	}
+	switch in.Outcome {
+	case CommandDone:
+		return in.Outcome, true, nil
+	case CommandRefused, CommandFailed:
+		return in.Outcome, false, nil
+	default:
+		return "", false, fmt.Errorf("crossnode: invalid acknowledgement outcome %q", in.Outcome)
+	}
 }
 
 // eventSource keeps existing internal callers source-compatible while giving

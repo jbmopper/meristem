@@ -77,25 +77,22 @@ func TestAckProjectorIntegration(t *testing.T) {
 	assertRow(t, pool, id1, "done", 200, true)
 	assertRow(t, pool, id2, "failed", 500, false)
 
-	// A later contradictory acknowledgement is still an audit event, but the
-	// first terminal decision is the deterministic projection winner.
-	secondAck, err := svc.Ack(ctx, AckInput{CommandQueueID: id1, StatusCode: 503, OK: false, Source: domain.SourceHuman})
-	if err != nil {
-		t.Fatalf("second ack: %v", err)
+	// An identical later acknowledgement is idempotent and returns the winning
+	// event. A contradictory acknowledgement conflicts and appends nothing.
+	replayAck, err := svc.Ack(ctx, AckInput{CommandQueueID: id1, StatusCode: 200, OK: true, Source: domain.SourceHuman})
+	if err != nil || replayAck.EventID != firstAck.EventID {
+		t.Fatalf("identical ack replay = (%+v, %v), want event %s", replayAck, err, firstAck.EventID)
 	}
-	if secondAck.EventID == firstAck.EventID {
-		t.Fatalf("distinct ack actions collapsed onto %s", firstAck.EventID)
+	if _, err := svc.Ack(ctx, AckInput{CommandQueueID: id1, StatusCode: 503, OK: false, Source: domain.SourceHuman}); err != ErrCommandTerminalConflict {
+		t.Fatalf("contradictory ack err = %v, want ErrCommandTerminalConflict", err)
 	}
 	assertRow(t, pool, id1, "done", 200, true)
-	var firstSource, secondSource string
+	var firstSource string
 	if err := pool.QueryRow(ctx, `SELECT source FROM events WHERE id = $1`, firstAck.EventID).Scan(&firstSource); err != nil {
 		t.Fatalf("read first ack source: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT source FROM events WHERE id = $1`, secondAck.EventID).Scan(&secondSource); err != nil {
-		t.Fatalf("read second ack source: %v", err)
-	}
-	if firstSource != string(domain.SourceAgent) || secondSource != string(domain.SourceHuman) {
-		t.Fatalf("ack sources = (%q, %q), want (agent, human)", firstSource, secondSource)
+	if firstSource != string(domain.SourceAgent) {
+		t.Fatalf("ack source = %q, want agent", firstSource)
 	}
 
 	// Concurrent contradictory acks serialize before their event append. The
@@ -120,10 +117,19 @@ func TestAckProjectorIntegration(t *testing.T) {
 	close(start)
 	wg.Wait()
 	close(errs)
+	var successes, conflicts int
 	for err := range errs {
-		if err != nil {
+		switch err {
+		case nil:
+			successes++
+		case ErrCommandTerminalConflict:
+			conflicts++
+		default:
 			t.Fatalf("concurrent ack: %v", err)
 		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent ack results successes=%d conflicts=%d, want 1/1", successes, conflicts)
 	}
 	var wantStatus int
 	var wantOK bool
@@ -141,6 +147,14 @@ func TestAckProjectorIntegration(t *testing.T) {
 		wantState = "done"
 	}
 	assertRow(t, pool, id3, wantState, wantStatus, wantOK)
+
+	// The expanded terminal vocabulary represents deterministic refusal
+	// separately from retryable/execution failure.
+	id4 := enqueue("k4")
+	if _, err := svc.Ack(ctx, AckInput{CommandQueueID: id4, StatusCode: 403, Outcome: CommandRefused}); err != nil {
+		t.Fatalf("ack refused: %v", err)
+	}
+	assertRow(t, pool, id4, "refused", 403, false)
 
 	// Both acked: m4's pending read is empty.
 	pending, err = svc.PendingForTarget(ctx, "m4", 10)

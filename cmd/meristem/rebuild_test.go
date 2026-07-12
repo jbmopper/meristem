@@ -77,6 +77,7 @@ func TestProjectionTables_Coverage(t *testing.T) {
 		"http_connector_actions": true,
 		"nodes":                  true,
 		"command_queue":          true,
+		"spoke_state":            true,
 	}
 	if len(projectionTables) != len(want) {
 		t.Errorf("projectionTables length drift: have %d, expected %d", len(projectionTables), len(want))

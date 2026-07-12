@@ -18,6 +18,8 @@ import (
 func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(commandQueuedProjector{})
 	registry.Register(commandAckedProjector{})
+	registry.Register(commandAttemptedProjector{})
+	registry.Register(commandExpiredProjector{})
 }
 
 type commandQueuedProjector struct{}
@@ -60,11 +62,11 @@ func applyQueuedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO command_queue (
 			id, target_node_id, command_path, command_body,
-			origin_idempotency_key, origin_actor_token_id, queued_at
+			origin_idempotency_key, origin_actor_token_id, queued_at, expires_at
 		)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
 		ON CONFLICT (id) DO NOTHING
-	`, event.ID, p.TargetNodeID, p.CommandPath, []byte(body), p.OriginIdempotencyKey, p.OriginActorTokenID, event.OccurredAt)
+	`, event.ID, p.TargetNodeID, p.CommandPath, []byte(body), p.OriginIdempotencyKey, p.OriginActorTokenID, event.OccurredAt, event.OccurredAt.Add(CommandQueuePatience))
 	if err != nil {
 		return fmt.Errorf("command.queued: insert projection: %w", err)
 	}
@@ -78,9 +80,9 @@ func (commandAckedProjector) Kind() string { return domain.EventCommandAcked }
 // Apply folds a command.acked event onto its command_queue row, advancing state
 // pending -> done (ok) / failed (not ok) and recording the structural outcome
 // the target observed. acked_at is the event clock (never wall time) so a
-// rebuild reproduces the row. Only pending rows advance: if distinct ack
-// actions disagree, the first terminal decision in event order wins and every
-// later ack is an audit fact that cannot rewrite the projection.
+// rebuild reproduces the row. Only pending rows advance; QueueService rejects
+// a later non-identical acknowledgement, while the projector guard preserves
+// first-terminal-wins during replay and against any other append path.
 func (commandAckedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	if event.SubjectKind != domain.SubjectNode {
 		return fmt.Errorf("command.acked: expected subject_kind %q, got %q", domain.SubjectNode, event.SubjectKind)
@@ -101,17 +103,95 @@ func applyAckedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	if p.CommandQueueID == uuid.Nil {
 		return fmt.Errorf("command.acked: command_queue_id is required")
 	}
-	state := "failed"
-	if p.OK {
-		state = "done"
+	state, ok, err := ackedOutcome(p)
+	if err != nil {
+		return fmt.Errorf("command.acked: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE command_queue
+		SET state = $2, outcome_status_code = $3, outcome_ok = $4,
+		    acked_at = $5, terminal_event_id = $6, terminal_reason = NULL
+		WHERE id = $1 AND target_node_id = $7 AND state = 'pending'
+	`, p.CommandQueueID, state, p.StatusCode, ok, event.OccurredAt, event.ID, p.TargetNodeID)
+	if err != nil {
+		return fmt.Errorf("command.acked: update projection: %w", err)
+	}
+	return nil
+}
+
+func ackedOutcome(p ackedPayload) (string, bool, error) {
+	if p.Outcome == "" {
+		if p.OK {
+			return string(CommandDone), true, nil
+		}
+		return string(CommandFailed), false, nil
+	}
+	switch p.Outcome {
+	case CommandDone:
+		return string(p.Outcome), true, nil
+	case CommandRefused, CommandFailed:
+		return string(p.Outcome), false, nil
+	default:
+		return "", false, fmt.Errorf("outcome %q is not an acknowledgement outcome", p.Outcome)
+	}
+}
+
+type commandAttemptedProjector struct{}
+
+func (commandAttemptedProjector) Kind() string { return domain.EventCommandAttempted }
+
+func (commandAttemptedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectNode {
+		return fmt.Errorf("command.attempted: expected subject_kind %q, got %q", domain.SubjectNode, event.SubjectKind)
+	}
+	if payloadVersion(event.Payload) != 1 {
+		return fmt.Errorf("command.attempted: unknown payload_version %d", payloadVersion(event.Payload))
+	}
+	var p attemptedPayload
+	if err := decode(event.Payload, &p); err != nil {
+		return fmt.Errorf("command.attempted: decode payload: %w", err)
+	}
+	if p.CommandQueueID == uuid.Nil || p.AttemptKey == "" || !domain.ValidNodeID(p.TargetNodeID) {
+		return fmt.Errorf("command.attempted: command_queue_id, target_node_id, and attempt_key are required")
 	}
 	_, err := tx.Exec(ctx, `
 		UPDATE command_queue
-		SET state = $2, outcome_status_code = $3, outcome_ok = $4, acked_at = $5
-		WHERE id = $1 AND target_node_id = $6 AND state = 'pending'
-	`, p.CommandQueueID, state, p.StatusCode, p.OK, event.OccurredAt, p.TargetNodeID)
+		SET attempt_count = attempt_count + 1, last_attempt_at = $3
+		WHERE id = $1 AND target_node_id = $2 AND state = 'pending'
+		  AND attempt_count < $4
+	`, p.CommandQueueID, p.TargetNodeID, event.OccurredAt, MaxCommandAttempts)
 	if err != nil {
-		return fmt.Errorf("command.acked: update projection: %w", err)
+		return fmt.Errorf("command.attempted: update projection: %w", err)
+	}
+	return nil
+}
+
+type commandExpiredProjector struct{}
+
+func (commandExpiredProjector) Kind() string { return domain.EventCommandExpired }
+
+func (commandExpiredProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectNode {
+		return fmt.Errorf("command.expired: expected subject_kind %q, got %q", domain.SubjectNode, event.SubjectKind)
+	}
+	if payloadVersion(event.Payload) != 1 {
+		return fmt.Errorf("command.expired: unknown payload_version %d", payloadVersion(event.Payload))
+	}
+	var p expiredPayload
+	if err := decode(event.Payload, &p); err != nil {
+		return fmt.Errorf("command.expired: decode payload: %w", err)
+	}
+	if p.CommandQueueID == uuid.Nil || !domain.ValidNodeID(p.TargetNodeID) || !p.Reason.Valid() {
+		return fmt.Errorf("command.expired: valid command_queue_id, target_node_id, and reason are required")
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE command_queue
+		SET state = 'expired', acked_at = $3, terminal_event_id = $4,
+		    terminal_reason = $5, outcome_status_code = NULL, outcome_ok = false
+		WHERE id = $1 AND target_node_id = $2 AND state = 'pending'
+	`, p.CommandQueueID, p.TargetNodeID, event.OccurredAt, event.ID, string(p.Reason))
+	if err != nil {
+		return fmt.Errorf("command.expired: update projection: %w", err)
 	}
 	return nil
 }
