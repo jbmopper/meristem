@@ -428,7 +428,7 @@ func (s *Server) toolInboxCapture() Tool {
 func (s *Server) toolFeedRead() Tool {
 	return Tool{
 		Name: "feed.read",
-		Description: "Read feed-visible events. Default: snapshot (newest first). " +
+		Description: "Read feed-visible events. Provider HTTP returns the provider_safe_feed.v1 structural projection without raw event payloads. Default: snapshot (newest first). " +
 			"Pass cursor and/or wait (Go duration, e.g. 30s) for watcher mode — same contract as GET /v1/feed (oldest-first page, next_cursor, has_more).",
 		InputSchema: schemaObject(nil, map[string]any{
 			"limit":      schemaInt("Max items (1-200). Defaults to 50."),
@@ -477,6 +477,12 @@ func (s *Server) toolFeedRead() Tool {
 				if err != nil {
 					return nil, err
 				}
+				if isProviderSafeContext(ctx) {
+					return map[string]any{
+						"contract": feed.ProviderSafeContract,
+						"items":    feed.ProjectProviderSafeItems(items),
+					}, nil
+				}
 				return map[string]any{"items": items}, nil
 			}
 			var wait time.Duration
@@ -518,11 +524,17 @@ func (s *Server) toolFeedRead() Tool {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{
-				"items":       page.Items,
+			responseItems := any(page.Items)
+			response := map[string]any{
+				"items":       responseItems,
 				"next_cursor": page.NextCursor,
 				"has_more":    page.HasMore,
-			}, nil
+			}
+			if isProviderSafeContext(ctx) {
+				response["contract"] = feed.ProviderSafeContract
+				response["items"] = feed.ProjectProviderSafeItems(page.Items)
+			}
+			return response, nil
 		},
 	}
 }
@@ -629,6 +641,16 @@ func (s *Server) toolWorkItemsList() Tool {
 				return nil, err
 			}
 			out := make([]workItemDTO, 0, len(items))
+			if isProviderSafeContext(ctx) {
+				safe := make([]providerSafeWorkItemDTO, 0, len(items))
+				for _, item := range items {
+					safe = append(safe, toProviderSafeWorkItemDTO(item))
+				}
+				return map[string]any{
+					"contract": ProviderSafeWorkItemsContract,
+					"items":    safe,
+				}, nil
+			}
 			for _, item := range items {
 				out = append(out, toWorkItemDTO(item))
 			}
@@ -667,6 +689,12 @@ func (s *Server) toolWorkItemsGet() Tool {
 					return nil, fmt.Errorf("work item %s not found", id)
 				}
 				return nil, err
+			}
+			if isProviderSafeContext(ctx) {
+				return map[string]any{
+					"contract":  ProviderSafeWorkItemsContract,
+					"work_item": toProviderSafeWorkItemDTO(item),
+				}, nil
 			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
@@ -1488,6 +1516,25 @@ type workItemDTO struct {
 	UpdatedAt                  string                   `json:"updated_at"`
 }
 
+// ProviderSafeWorkItemsContract names the reduced provider-facing work-item
+// shape. Body and convergence checks are the ordinary non-private tracker
+// instructions and remain useful to an owner connector. Free-form state reason
+// and creator token id are omitted; private/encrypted material belongs outside
+// work_item.body and is never joined into this DTO.
+const ProviderSafeWorkItemsContract = "provider_safe_work_items.v1"
+
+type providerSafeWorkItemDTO struct {
+	ID                         uuid.UUID                `json:"id"`
+	Title                      string                   `json:"title"`
+	Body                       string                   `json:"body"`
+	State                      domain.WorkItemState     `json:"state"`
+	SuggestedConvergenceChecks []string                 `json:"suggested_convergence_checks"`
+	HumanReviewStatus          domain.HumanReviewStatus `json:"human_review_status"`
+	CreatedAt                  string                   `json:"created_at"`
+	StateEnteredAt             string                   `json:"state_entered_at"`
+	UpdatedAt                  string                   `json:"updated_at"`
+}
+
 type deterministicErrorDTO struct {
 	ID         uuid.UUID                         `json:"id"`
 	Component  string                            `json:"component"`
@@ -1541,6 +1588,20 @@ func toWorkItemDTO(item domain.WorkItem) workItemDTO {
 		SuggestedConvergenceChecks: item.SuggestedConvergenceChecks,
 		HumanReviewStatus:          item.HumanReviewStatus,
 		CreatedBy:                  item.CreatedBy,
+		CreatedAt:                  item.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		StateEnteredAt:             item.StateEnteredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		UpdatedAt:                  item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+	}
+}
+
+func toProviderSafeWorkItemDTO(item domain.WorkItem) providerSafeWorkItemDTO {
+	return providerSafeWorkItemDTO{
+		ID:                         item.ID,
+		Title:                      item.Title,
+		Body:                       item.Body,
+		State:                      item.State,
+		SuggestedConvergenceChecks: item.SuggestedConvergenceChecks,
+		HumanReviewStatus:          item.HumanReviewStatus,
 		CreatedAt:                  item.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		StateEnteredAt:             item.StateEnteredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		UpdatedAt:                  item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
