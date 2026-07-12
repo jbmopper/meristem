@@ -24,6 +24,7 @@ Status date: 2026-07-12. Source of truth remains the implementation plus
 | Registry and projection writes | registry/projection POST routes | `registry.define_tropism`, `registry.define_cultivar`, `projections.define` | Rejected | HTTP MCP mutation idempotency if these are exposed over HTTP. |
 | Approval reads | approval GET/list routes | `approvals.get`, `approvals.list_for_work_item` | Visible | None for read-only parity. |
 | Approval request/decision | `POST /v1/work-items/{id}/approvals`, `POST /v1/approvals/{id}/decision` | `approvals.request`, `approvals.decide` | Rejected | HTTP MCP mutation policy only; stdio parity is closed. |
+| OAuth client bind/revoke | `POST /v1/oauth/clients/{client_id}/actor`, `POST /v1/oauth/clients/{client_id}/revoke` | `oauth_clients.bind_actor`, `oauth_clients.revoke` | Rejected | None for stdio parity. Both transports require explicit non-root human `oauth_clients.bind` / `oauth_clients.revoke` scopes; provider HTTP profiles hide and reject both tools. |
 | Approval-gated HTTP connector request | `POST /v1/work-items/{id}/http-connector/actions` | `connectors.http_request` | Rejected | Retries/dead-lettering remain connector substrate work; HTTP MCP exposure still waits on mutation idempotency. |
 | Artifact attachment | Not shipped | Not shipped | Not shipped | Open substrate and parity gap. Do not advertise placeholder tools. |
 | Signals ingress | `POST /v1/signals` | Intentionally absent | Intentionally absent | REST-only external-system ingress; not an MCP parity bug. |

@@ -79,6 +79,12 @@ func NewService(pool *pgxpool.Pool) *Service {
 // actor. It is a coarse capability filter; object-level tools still need
 // per-object checks when called.
 func ToolVisible(actor domain.Token, canonicalTool string) bool {
+	if canonicalTool == "oauth_clients.bind_actor" {
+		return CanBindOAuthClient(actor)
+	}
+	if canonicalTool == "oauth_clients.revoke" {
+		return CanRevokeOAuthClient(actor)
+	}
 	if canonicalTool == "policy_profile.switch" {
 		// Evaluated before the root/legacy shortcut: the switch tool is
 		// human-and-non-root regardless of scope breadth.

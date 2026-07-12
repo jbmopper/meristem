@@ -181,6 +181,7 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 			Access:              s.access,
 			Idempotency:         s.idempotencyMiddleware,
 			Inbox:               s.inbox,
+			OAuthClientAdmin:    s.oauthClientAdmin,
 			WorkItems:           s.workItems,
 			Approvals:           s.approvals,
 			HTTPConnector:       s.httpConnector,
