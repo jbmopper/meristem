@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/access"
@@ -108,6 +107,8 @@ type Server struct {
 	oauthAuthorization    *oauth.AuthorizationService
 	oauthTokens           *oauth.TokenService
 	oauthClientAdmin      *oauth.ClientAdminService
+	oauthRuntime          oauthRuntimeConfig
+	oauthActorLookup      oauthActorLookup
 	policy                safety.Policy
 }
 
@@ -127,14 +128,21 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 	if addr == "" {
 		addr = defaultAddr
 	}
+	rawPublicBaseURL := os.Getenv(EnvPublicBaseURL)
+	oauthRuntime := resolveOAuthRuntimeConfig(rawPublicBaseURL, os.Getenv(EnvOAuthSystemActorID))
+	publicBaseURL := normalizePublicBaseURL(rawPublicBaseURL)
+	if oauthRuntime.mode == oauthRuntimeEnabled {
+		publicBaseURL = oauthRuntime.publicBaseURL
+	}
 	s := &Server{
 		pool:               pool,
 		logger:             logger,
 		addr:               addr,
 		nodeID:             strings.TrimSpace(os.Getenv(EnvNodeID)),
 		registryHomeNodeID: strings.TrimSpace(os.Getenv(EnvRegistryHomeNodeID)),
-		publicBaseURL:      normalizePublicBaseURL(os.Getenv(EnvPublicBaseURL)),
+		publicBaseURL:      publicBaseURL,
 		mux:                http.NewServeMux(),
+		oauthRuntime:       oauthRuntime,
 		policy:             policy,
 	}
 	if pool != nil {
@@ -160,11 +168,14 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		s.registry = registry.NewService(pool, s.writer)
 		s.crossnode = crossnode.NewQueueService(pool, s.writer)
 		s.nodeSnapshots = nodes.NewSnapshotService(pool, s.writer)
-		systemActorID, _ := uuid.Parse(strings.TrimSpace(os.Getenv(EnvOAuthSystemActorID)))
-		s.oauthClients = oauth.NewRegistrationServiceWithSystemActor(pool, s.writer, systemActorID)
-		s.oauthAuthorization = oauth.NewAuthorizationService(pool, s.writer, s.workItems, s.approvals, systemActorID)
-		s.oauthTokens = oauth.NewTokenService(pool, s.writer, systemActorID)
+		systemActorID := oauthRuntime.systemActorID
+		if oauthRuntime.mode == oauthRuntimeEnabled {
+			s.oauthClients = oauth.NewRegistrationServiceWithSystemActor(pool, s.writer, systemActorID)
+			s.oauthAuthorization = oauth.NewAuthorizationService(pool, s.writer, s.workItems, s.approvals, systemActorID)
+			s.oauthTokens = oauth.NewTokenService(pool, s.writer, systemActorID)
+		}
 		s.oauthClientAdmin = oauth.NewClientAdminService(pool, s.writer)
+		s.oauthActorLookup = s.authService.Get
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
@@ -197,15 +208,15 @@ func (s *Server) Handler() http.Handler { return s.targetBound(s.mux) }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleLiveness)
 	s.mux.HandleFunc("GET /readyz", s.handleReadiness)
-	s.mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleOAuthProtectedResourceMetadata)
-	s.mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthAuthorizationServerMetadata)
-	s.mux.HandleFunc("POST /oauth/register", s.handleOAuthClientRegistration)
-	s.mux.HandleFunc("GET /oauth/authorize", s.handleOAuthAuthorize)
-	s.mux.HandleFunc("POST /oauth/token", s.handleOAuthToken)
+	s.mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.oauthPublicRoute(s.handleOAuthProtectedResourceMetadata))
+	s.mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.oauthPublicRoute(s.handleOAuthAuthorizationServerMetadata))
+	s.mux.HandleFunc("POST /oauth/register", s.oauthPublicRoute(s.handleOAuthClientRegistration))
+	s.mux.HandleFunc("GET /oauth/authorize", s.oauthPublicRoute(s.handleOAuthAuthorize))
+	s.mux.HandleFunc("POST /oauth/token", s.oauthPublicRoute(s.handleOAuthToken))
 	s.mux.Handle("POST /v1/oauth/clients/{client_id}/actor", s.command(http.HandlerFunc(s.handleOAuthBindActor)))
 	s.mux.Handle("POST /v1/oauth/clients/{client_id}/revoke", s.command(http.HandlerFunc(s.handleOAuthRevokeClient)))
-	s.mux.Handle("GET /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
-	s.mux.Handle("POST /mcp", s.mcpProtected(http.HandlerFunc(s.handleMCP)))
+	s.mux.Handle("GET /mcp", s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP))))
+	s.mux.Handle("POST /mcp", s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP))))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("POST /v1/crossnode/commands", s.crossnodeQueueCommand(http.HandlerFunc(s.handleCrossnodeCommand)))
@@ -356,6 +367,13 @@ func (s *Server) handleLiveness(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), readinessPingTimeout)
 	defer cancel()
+	if s.oauthRuntime.mode == oauthRuntimeInvalid {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "unavailable",
+			"reason": "oauth_configuration",
+		})
+		return
+	}
 
 	if s.pool == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
@@ -372,6 +390,16 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if s.oauthRuntime.mode == oauthRuntimeEnabled {
+		if err := s.checkOAuthRuntime(ctx); err != nil {
+			s.logger.Warn("oauth readiness check failed", slog.String("error", err.Error()))
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "unavailable",
+				"reason": "oauth_system_actor",
+			})
+			return
+		}
+	}
 	profileName := safety.ProfileSteady
 	policyID, _ := s.policy.Fingerprint()
 	if s.policyProfiles != nil {
@@ -382,9 +410,14 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("resolve active policy profile failed", slog.String("error", err.Error()))
 		}
 	}
+	oauthStatus := "disabled"
+	if s.oauthRuntime.mode == oauthRuntimeEnabled {
+		oauthStatus = "ok"
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":         "ok",
 		"database":       "ok",
+		"oauth":          oauthStatus,
 		"safety":         "ok",
 		"safety_policy":  policyID,
 		"policy_profile": profileName,
