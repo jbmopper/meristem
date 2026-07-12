@@ -63,8 +63,8 @@ func TestRegistrationRoundTrip(t *testing.T) {
 	if !client.AllowsRedirectURI("https://claude.ai/api/mcp/auth_callback") {
 		t.Fatalf("registered redirect_uri not in allowlist: %v", client.RedirectURIs)
 	}
-	if len(client.GrantTypes) != 1 || client.GrantTypes[0] != GrantAuthorizationCode {
-		t.Fatalf("grant_types = %v, want [authorization_code]", client.GrantTypes)
+	if len(client.GrantTypes) != 2 || client.GrantTypes[0] != GrantAuthorizationCode || client.GrantTypes[1] != GrantRefreshToken {
+		t.Fatalf("grant_types = %v, want [authorization_code refresh_token]", client.GrantTypes)
 	}
 	writeClient, err := svc.Register(ctx, RegisterInput{
 		ClientName:   "Tracker writer",

@@ -99,7 +99,7 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 		ClientID:                clientID,
 		ClientName:              strings.TrimSpace(in.ClientName),
 		RedirectURIs:            redirectURIs,
-		GrantTypes:              []string{GrantAuthorizationCode},
+		GrantTypes:              []string{GrantAuthorizationCode, GrantRefreshToken},
 		ResponseTypes:           []string{ResponseTypeCode},
 		TokenEndpointAuthMethod: AuthMethodNone,
 		Scope:                   scope,

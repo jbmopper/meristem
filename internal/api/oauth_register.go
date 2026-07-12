@@ -97,15 +97,20 @@ func (s *Server) handleOAuthClientRegistration(w http.ResponseWriter, r *http.Re
 	})
 }
 
-// grantTypesSupported accepts an omitted list (defaults to authorization_code)
-// or a list containing only authorization_code.
+// grantTypesSupported accepts an omitted list (the server returns its
+// authorization_code + refresh_token contract) or that exact supported set.
 func grantTypesSupported(grants []string) bool {
+	if len(grants) == 0 {
+		return true
+	}
+	seen := make(map[string]bool, len(grants))
 	for _, g := range grants {
-		if g != oauth.GrantAuthorizationCode {
+		if seen[g] || (g != oauth.GrantAuthorizationCode && g != oauth.GrantRefreshToken) {
 			return false
 		}
+		seen[g] = true
 	}
-	return true
+	return seen[oauth.GrantAuthorizationCode] && seen[oauth.GrantRefreshToken]
 }
 
 func responseTypesSupported(responses []string) bool {

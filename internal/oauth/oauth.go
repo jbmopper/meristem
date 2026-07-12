@@ -42,6 +42,7 @@ const AuthMethodNone = "none"
 // types the gateway supports, matching the advertised metadata.
 const (
 	GrantAuthorizationCode = "authorization_code"
+	GrantRefreshToken      = "refresh_token"
 	ResponseTypeCode       = "code"
 )
 

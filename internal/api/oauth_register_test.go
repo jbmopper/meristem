@@ -75,3 +75,12 @@ func TestOAuthRegistrationRejectsBadRequests(t *testing.T) {
 		})
 	}
 }
+
+func TestGrantTypesSupportedAcceptsAuthorizationAndRefresh(t *testing.T) {
+	if !grantTypesSupported([]string{oauth.GrantAuthorizationCode, oauth.GrantRefreshToken}) {
+		t.Fatal("authorization_code + refresh_token should be accepted")
+	}
+	if grantTypesSupported([]string{oauth.GrantRefreshToken}) {
+		t.Fatal("refresh_token without authorization_code should be rejected")
+	}
+}
