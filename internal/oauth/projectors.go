@@ -37,6 +37,9 @@ func (clientActorBindingRequestedProjector) Kind() string {
 	return domain.EventOAuthClientActorBindingRequested
 }
 func (clientActorBindingRequestedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectOAuthClient || payloadVersion(event.Payload) != 1 {
+		return errors.New("oauth_client.actor_binding_requested: invalid subject or payload version")
+	}
 	var p struct {
 		ClientID   string    `json:"client_id"`
 		WorkItemID uuid.UUID `json:"work_item_id"`
@@ -52,6 +55,9 @@ type grantIssuedProjector struct{}
 
 func (grantIssuedProjector) Kind() string { return domain.EventOAuthGrantIssued }
 func (grantIssuedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event) error {
+	if e.SubjectKind != domain.SubjectOAuthGrant || payloadVersion(e.Payload) != 1 {
+		return errors.New("oauth_grant.issued: invalid subject or payload version")
+	}
 	var p struct {
 		GrantID              uuid.UUID `json:"grant_id"`
 		ActorTokenID         uuid.UUID `json:"actor_token_id"`
@@ -97,6 +103,9 @@ type grantRefreshedProjector struct{}
 
 func (grantRefreshedProjector) Kind() string { return domain.EventOAuthGrantRefreshed }
 func (grantRefreshedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event) error {
+	if e.SubjectKind != domain.SubjectOAuthGrant || payloadVersion(e.Payload) != 1 {
+		return errors.New("oauth_grant.refreshed: invalid subject or payload version")
+	}
 	var p struct {
 		OldRefreshTokenID      string `json:"old_refresh_token_id"`
 		NewRefreshTokenID      string `json:"new_refresh_token_id"`
@@ -135,6 +144,9 @@ type grantRevokedProjector struct{}
 
 func (grantRevokedProjector) Kind() string { return domain.EventOAuthGrantRevoked }
 func (grantRevokedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event) error {
+	if e.SubjectKind != domain.SubjectOAuthGrant || payloadVersion(e.Payload) != 1 {
+		return errors.New("oauth_grant.revoked: invalid subject or payload version")
+	}
 	var p struct {
 		RevokedAtUnix int64  `json:"revoked_at_unix"`
 		Reason        string `json:"reason"`
@@ -149,8 +161,13 @@ func (grantRevokedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Even
 
 type refreshReuseProjector struct{}
 
-func (refreshReuseProjector) Kind() string                                      { return domain.EventOAuthRefreshReuseDetected }
-func (refreshReuseProjector) Apply(context.Context, pgx.Tx, domain.Event) error { return nil }
+func (refreshReuseProjector) Kind() string { return domain.EventOAuthRefreshReuseDetected }
+func (refreshReuseProjector) Apply(_ context.Context, _ pgx.Tx, e domain.Event) error {
+	if e.SubjectKind != domain.SubjectOAuthGrant || payloadVersion(e.Payload) != 1 {
+		return errors.New("oauth_grant.refresh_reuse_detected: invalid subject or payload version")
+	}
+	return nil
+}
 
 type authorizationRequestCreatedProjector struct{}
 
@@ -158,6 +175,9 @@ func (authorizationRequestCreatedProjector) Kind() string {
 	return domain.EventOAuthAuthorizationRequestCreated
 }
 func (authorizationRequestCreatedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectOAuthAuthorizationRequest || payloadVersion(event.Payload) != 1 {
+		return errors.New("oauth_authorization_request.created: invalid subject or payload version")
+	}
 	var p struct {
 		WorkItemID          uuid.UUID `json:"work_item_id"`
 		ApprovalID          uuid.UUID `json:"approval_id"`
@@ -189,6 +209,9 @@ func (authorizationRequestCompletedProjector) Kind() string {
 	return domain.EventOAuthAuthorizationRequestCompleted
 }
 func (authorizationRequestCompletedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectOAuthAuthorizationRequest || payloadVersion(event.Payload) != 1 {
+		return errors.New("oauth_authorization_request.completed: invalid subject or payload version")
+	}
 	var p struct {
 		Outcome         string `json:"outcome"`
 		CompletedAtUnix int64  `json:"completed_at_unix"`
@@ -205,6 +228,9 @@ type clientActorBoundProjector struct{}
 
 func (clientActorBoundProjector) Kind() string { return domain.EventOAuthClientActorBound }
 func (clientActorBoundProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectOAuthClient || payloadVersion(event.Payload) != 1 {
+		return errors.New("oauth_client.actor_bound: invalid subject or payload version")
+	}
 	var p struct {
 		ClientID         string    `json:"client_id"`
 		ActorTokenID     uuid.UUID `json:"actor_token_id"`
@@ -224,6 +250,9 @@ type clientRevokedProjector struct{}
 
 func (clientRevokedProjector) Kind() string { return domain.EventOAuthClientRevoked }
 func (clientRevokedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectOAuthClient || payloadVersion(event.Payload) != 1 {
+		return errors.New("oauth_client.revoked: invalid subject or payload version")
+	}
 	var p struct {
 		ClientID      string `json:"client_id"`
 		RevokedAtUnix int64  `json:"revoked_at_unix"`
