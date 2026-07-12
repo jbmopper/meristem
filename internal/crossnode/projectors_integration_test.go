@@ -38,7 +38,8 @@ func TestCommandQueuedProjectorIntegration(t *testing.T) {
 	// attributed path with a real token.
 	in := EnqueueInput{
 		TargetNodeID:         "m4",
-		CommandPath:          "/v1/work-items/abc/transition",
+		OriginNodeID:         "hub",
+		CommandPath:          "/v1/work-items/7b1fc532-14f2-4be5-81a5-4719dd11d453/transition",
 		CommandBody:          json.RawMessage(`{"to":"running"}`),
 		OriginIdempotencyKey: "idem-xyz",
 		Source:               domain.SourceAgent,
