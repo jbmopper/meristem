@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -129,8 +130,63 @@ func (s *Server) handleCrossnodeCommandsList(w http.ResponseWriter, r *http.Requ
 // POST /v1/crossnode/commands/{event_id}/ack after executing the command
 // locally: the HTTP status its local api returned and whether it succeeded.
 type crossnodeAckRequest struct {
-	StatusCode int   `json:"status_code"`
-	OK         *bool `json:"ok"`
+	StatusCode int    `json:"status_code"`
+	OK         *bool  `json:"ok,omitempty"`
+	Outcome    string `json:"outcome,omitempty"`
+}
+
+type crossnodeAttemptRequest struct {
+	AttemptKey string `json:"attempt_key"`
+}
+
+// handleCrossnodeCommandAttempt records one logical local execution before a
+// spoke calls its local API. The attributed queue-host event is the durable
+// five-attempt budget; a refusal here means the spoke must not execute.
+func (s *Server) handleCrossnodeCommandAttempt(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	eventID, err := uuid.Parse(strings.TrimSpace(r.PathValue("event_id")))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_event_id", "event_id must be a UUID")
+		return
+	}
+	var req crossnodeAttemptRequest
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.AttemptKey) == "" {
+		writeAPIError(w, http.StatusBadRequest, "attempt_key_required", "attempt_key is required")
+		return
+	}
+	result, err := s.crossnode.RecordAttempt(r.Context(), crossnode.RecordAttemptInput{
+		CommandQueueID: eventID,
+		AttemptKey:     req.AttemptKey,
+		Now:            time.Now().UTC(),
+		ActorTokenID:   actor.ID,
+		Source:         actor.Source,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, crossnode.ErrUnknownCommand):
+			writeAPIError(w, http.StatusNotFound, "unknown_command", "no queued command with that event_id")
+		case errors.Is(err, crossnode.ErrCommandNotPending):
+			writeAPIError(w, http.StatusConflict, "command_not_pending", err.Error())
+		case errors.Is(err, crossnode.ErrCommandPatienceExhausted):
+			writeAPIError(w, http.StatusConflict, "command_patience_exhausted", err.Error())
+		case errors.Is(err, crossnode.ErrInvalidAttemptInput):
+			writeAPIError(w, http.StatusBadRequest, "invalid_attempt", err.Error())
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "command_attempt_failed", "could not record cross-node command attempt")
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"event_id":      result.EventID,
+		"attempt_count": result.AttemptCount,
+		"recorded":      result.Fresh,
+	})
 }
 
 // handleCrossnodeCommandAck receives a target's acknowledgement of a drained
@@ -156,16 +212,33 @@ func (s *Server) handleCrossnodeCommandAck(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if req.StatusCode < 100 || req.StatusCode > 599 {
+		writeAPIError(w, http.StatusBadRequest, "invalid_status_code", "status_code must be an HTTP status")
+		return
+	}
+	if req.Outcome != "" {
+		switch crossnode.CommandOutcome(req.Outcome) {
+		case crossnode.CommandDone, crossnode.CommandRefused, crossnode.CommandFailed:
+		default:
+			writeAPIError(w, http.StatusBadRequest, "invalid_outcome", "outcome must be done, refused, or failed")
+			return
+		}
+	}
 	result, err := s.crossnode.Ack(r.Context(), crossnode.AckInput{
 		CommandQueueID: eventID,
 		StatusCode:     req.StatusCode,
-		OK:             *req.OK,
+		OK:             req.OK != nil && *req.OK,
+		Outcome:        crossnode.CommandOutcome(req.Outcome),
 		ActorTokenID:   &actor.ID,
 		Source:         actor.Source,
 	})
 	if err != nil {
 		if errors.Is(err, crossnode.ErrUnknownCommand) {
 			writeAPIError(w, http.StatusNotFound, "unknown_command", "no queued command with that event_id")
+			return
+		}
+		if errors.Is(err, crossnode.ErrCommandTerminalConflict) {
+			writeAPIError(w, http.StatusConflict, "command_terminal_conflict", err.Error())
 			return
 		}
 		writeAPIError(w, http.StatusInternalServerError, "command_ack_failed",
@@ -334,8 +407,8 @@ func decodeCrossnodeAckRequest(w http.ResponseWriter, r *http.Request) (crossnod
 		writeAPIError(w, http.StatusBadRequest, "invalid_json", "request body must contain a single JSON object")
 		return crossnodeAckRequest{}, false
 	}
-	if req.OK == nil {
-		writeAPIError(w, http.StatusBadRequest, "ok_required", "ok is required")
+	if req.OK == nil && strings.TrimSpace(req.Outcome) == "" {
+		writeAPIError(w, http.StatusBadRequest, "outcome_required", "outcome or legacy ok is required")
 		return crossnodeAckRequest{}, false
 	}
 	return req, true

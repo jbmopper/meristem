@@ -48,6 +48,10 @@ func New(cfg Config, client *http.Client, cursor CursorStore, logger *slog.Logge
 type TickResult struct {
 	// Drained is how many pending commands the hub returned.
 	Drained int
+	// AttemptsRecorded is how many queue-host attempt events were accepted
+	// before local execution. A command never executes without this budget
+	// reservation.
+	AttemptsRecorded int
 	// Executed is how many of those produced a definitive local HTTP response
 	// (and were therefore acked). A local transport failure is neither executed
 	// nor acked — the row stays pending for the next tick.
@@ -89,6 +93,7 @@ func (p *Poller) Tick(ctx context.Context) TickResult {
 	p.logger.Debug("spoke tick complete",
 		slog.String("node_id", p.cfg.NodeID),
 		slog.Int("drained", res.Drained),
+		slog.Int("attempts_recorded", res.AttemptsRecorded),
 		slog.Int("executed", res.Executed),
 		slog.Int("failed", res.Failed),
 		slog.Int("acked", res.Acked),
@@ -110,6 +115,15 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 	res.Drained = len(commands)
 
 	for _, cmd := range commands {
+		if err := p.recordAttempt(ctx, cmd); err != nil {
+			p.logger.Warn("spoke attempt refused, skipping local execution",
+				slog.String("node_id", p.cfg.NodeID),
+				slog.String("event_id", cmd.EventID.String()),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		res.AttemptsRecorded++
 		status, err := p.executeLocal(ctx, cmd)
 		if err != nil {
 			// A local transport failure is not a structural outcome: we cannot
@@ -128,7 +142,16 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 		if !ok {
 			res.Failed++
 		}
-		if err := p.ackHub(ctx, cmd.EventID, status, ok); err != nil {
+		if status >= http.StatusInternalServerError {
+			// A retryable local/server failure consumes this attempt but remains
+			// pending. The queue reconciler expires it after five attempts.
+			continue
+		}
+		outcome := crossnode.CommandRefused
+		if ok {
+			outcome = crossnode.CommandDone
+		}
+		if err := p.ackHub(ctx, cmd.EventID, status, outcome); err != nil {
 			p.logger.Warn("spoke ack failed, will re-ack next tick",
 				slog.String("node_id", p.cfg.NodeID),
 				slog.String("event_id", cmd.EventID.String()),
@@ -137,6 +160,36 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 			continue
 		}
 		res.Acked++
+	}
+	return nil
+}
+
+type attemptPayload struct {
+	AttemptKey string `json:"attempt_key"`
+}
+
+func (p *Poller) recordAttempt(ctx context.Context, cmd crossnode.QueuedCommand) error {
+	attemptKey := fmt.Sprintf("%s:%d", cmd.EventID, cmd.AttemptCount+1)
+	body, err := json.Marshal(attemptPayload{AttemptKey: attemptKey})
+	if err != nil {
+		return err
+	}
+	endpoint := p.hubURL("/v1/crossnode/commands/" + cmd.EventID.String() + "/attempt")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
+	req.Header.Set("Idempotency-Key", "attempt:"+attemptKey)
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub attempt: status %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	return nil
 }
@@ -203,15 +256,16 @@ func (p *Poller) executeLocal(ctx context.Context, cmd crossnode.QueuedCommand) 
 
 // ackPayload is the structural outcome posted to the hub ack endpoint.
 type ackPayload struct {
-	StatusCode int  `json:"status_code"`
-	OK         bool `json:"ok"`
+	StatusCode int                      `json:"status_code"`
+	OK         bool                     `json:"ok"`
+	Outcome    crossnode.CommandOutcome `json:"outcome"`
 }
 
 // ackHub posts the structural outcome to
 // POST /v1/crossnode/commands/{event_id}/ack under the hub bearer, keyed by the
 // command's event id so a re-ack collapses at the hub's idempotency middleware.
-func (p *Poller) ackHub(ctx context.Context, eventID uuid.UUID, status int, ok bool) error {
-	body, err := json.Marshal(ackPayload{StatusCode: status, OK: ok})
+func (p *Poller) ackHub(ctx context.Context, eventID uuid.UUID, status int, outcome crossnode.CommandOutcome) error {
+	body, err := json.Marshal(ackPayload{StatusCode: status, OK: outcome == crossnode.CommandDone, Outcome: outcome})
 	if err != nil {
 		return err
 	}

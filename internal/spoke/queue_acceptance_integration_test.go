@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/api"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
@@ -41,8 +42,13 @@ func TestQueueFirstTwoNodeAcceptance(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	hubPool, hubToken := newAcceptanceNode(t, ctx, "hub", logger)
-	localPool, localToken := newAcceptanceNode(t, ctx, "spoke-a", logger)
+	hubPool, hubToken := newAcceptanceNode(t, ctx, "hub", logger, []string{
+		crossnode.QueueWriteScope("spoke-a", crossnode.OperationClassWorkItemsWrite),
+		crossnode.QueueDrainScope("spoke-a"),
+		crossnode.QueueAckScope("spoke-a"),
+		access.ScopeFeedRead,
+	})
+	localPool, localToken := newAcceptanceNode(t, ctx, "spoke-a", logger, []string{access.ScopeWorkItemsCreate})
 
 	// Server constructors capture MERISTEM_NODE_ID, so the two handlers keep
 	// independent identities even though this test process has one environment.
@@ -80,6 +86,8 @@ func TestQueueFirstTwoNodeAcceptance(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(crossnode.HeaderIdempotencyKey, originKey)
 	req.Header.Set(crossnode.HeaderQueueFor, "spoke-a")
+	req.Header.Set(crossnode.HeaderTargetNode, "hub")
+	req.Header.Set(crossnode.HeaderOriginNode, "hub")
 	resp, err := hubHTTP.Client().Do(req)
 	if err != nil {
 		t.Fatalf("enqueue request: %v", err)
@@ -141,7 +149,7 @@ func TestQueueFirstTwoNodeAcceptance(t *testing.T) {
 	}
 }
 
-func newAcceptanceNode(t *testing.T, ctx context.Context, nodeID string, logger *slog.Logger) (*pgxpool.Pool, string) {
+func newAcceptanceNode(t *testing.T, ctx context.Context, nodeID string, logger *slog.Logger, scopes []string) (*pgxpool.Pool, string) {
 	t.Helper()
 	pool := pgtest.NewPool(t, "meristem_network_"+strings.ReplaceAll(nodeID, "-", "_"))
 	if err := storage.Migrate(ctx, pool, logger); err != nil {
@@ -158,6 +166,7 @@ func newAcceptanceNode(t *testing.T, ctx context.Context, nodeID string, logger 
 	}
 	agent, err := authService.CreateToken(ctx, auth.CreateTokenInput{
 		Name:   nodeID + "-acceptance-agent",
+		Scopes: scopes,
 		Source: domain.SourceAgent,
 		Actor:  &root.Token,
 	})

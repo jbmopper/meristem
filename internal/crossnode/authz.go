@@ -9,16 +9,6 @@ import (
 
 const OperationClassWorkItemsWrite = "work_items.write"
 
-const (
-	// HeaderTargetNode binds a peer REST request to its expected terminating
-	// node. It is structural routing metadata, not actor identity.
-	HeaderTargetNode = "X-Meristem-Target-Node"
-	// HeaderOriginNode names the peer that originated a request. Receivers
-	// validate and record it as provenance but never treat it as local actor
-	// identity.
-	HeaderOriginNode = "X-Meristem-Origin-Node"
-)
-
 var (
 	ErrCommandRootForbidden = errors.New("crossnode: root token cannot authorize peer delivery")
 	ErrCommandScopeDenied   = errors.New("crossnode: token lacks required peer-delivery scope")

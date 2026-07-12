@@ -170,8 +170,6 @@ var (
 	// ErrInvalidCommandPath protects the pull-only executor from becoming an
 	// arbitrary authenticated POST proxy.
 	ErrInvalidCommandPath = errors.New("crossnode: command path is not allowed")
-	// ErrInvalidOriginNodeID marks missing or malformed structural provenance.
-	ErrInvalidOriginNodeID = errors.New("crossnode: origin node id is not a DNS-safe node id")
 	// ErrInvalidOrigin marks malformed or unsafe registered route origins.
 	ErrInvalidOrigin = errors.New("crossnode: route origin is invalid")
 )

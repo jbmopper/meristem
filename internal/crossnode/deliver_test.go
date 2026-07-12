@@ -138,7 +138,7 @@ func TestDeliverQueueUsesEnvelopeAndQueueHostBearer(t *testing.T) {
 	if cap.wireBody.CommandPath != sampleCommand().Path || string(cap.wireBody.CommandBody) != `{"to":"running"}` {
 		t.Fatalf("queue envelope = %+v", cap.wireBody)
 	}
-	if cap.target != "m4" || cap.origin != "den" {
+	if cap.target != "hub" || cap.origin != "den" {
 		t.Fatalf("queue provenance headers = %q/%q", cap.target, cap.origin)
 	}
 }

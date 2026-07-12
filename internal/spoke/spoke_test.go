@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/jbmopper/meristem/internal/crossnode"
 )
 
 // memCursor is an in-memory CursorStore for unit tests.
@@ -42,6 +44,11 @@ type ackCall struct {
 	Payload ackPayload
 }
 
+type attemptCall struct {
+	EventID string
+	Payload attemptPayload
+}
+
 // fakeFleet is a hub + local api pair backed by httptest servers, recording the
 // spoke's outbound calls so a test can assert order, headers, and payloads.
 type fakeFleet struct {
@@ -51,6 +58,7 @@ type fakeFleet struct {
 	mu          sync.Mutex
 	pending     []map[string]any // commands the hub GET returns
 	localCalls  []localCall
+	attempts    []attemptCall
 	acks        []ackCall
 	feedCursor  string
 	feedItems   int
@@ -93,6 +101,15 @@ func newFakeFleet(t *testing.T) *fakeFleet {
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"acked":true}`))
+	})
+	hubMux.HandleFunc("POST /v1/crossnode/commands/{event_id}/attempt", func(w http.ResponseWriter, r *http.Request) {
+		var p attemptPayload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		f.mu.Lock()
+		f.attempts = append(f.attempts, attemptCall{EventID: r.PathValue("event_id"), Payload: p})
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"recorded":true}`))
 	})
 	hubMux.HandleFunc("GET /v1/feed", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -139,6 +156,8 @@ func cmd(eventID, path, key string, body any) map[string]any {
 		"command_body":           body,
 		"origin_idempotency_key": key,
 		"queued_at":              "2026-07-07T00:00:00Z",
+		"expires_at":             "2026-07-08T00:00:00Z",
+		"attempt_count":          0,
 	}
 }
 
@@ -157,13 +176,16 @@ func TestTickDrainExecuteAck(t *testing.T) {
 	if !res.HubReachable {
 		t.Fatal("hub should be reachable")
 	}
-	if res.Drained != 2 || res.Executed != 2 || res.Acked != 2 || res.Failed != 0 {
+	if res.Drained != 2 || res.AttemptsRecorded != 2 || res.Executed != 2 || res.Acked != 2 || res.Failed != 0 {
 		t.Fatalf("result = %+v, want drained/executed/acked=2 failed=0", res)
 	}
 
 	// Execute order matches queue order.
 	if len(f.localCalls) != 2 {
 		t.Fatalf("local calls = %d, want 2", len(f.localCalls))
+	}
+	if len(f.attempts) != 2 || f.attempts[0].Payload.AttemptKey != id1+":1" {
+		t.Fatalf("attempt budget records = %+v", f.attempts)
 	}
 	if f.localCalls[0].Path != "/v1/work-items/a/transition" || f.localCalls[1].Path != "/v1/work-items/b/transition" {
 		t.Fatalf("execute order wrong: %+v", f.localCalls)
@@ -180,7 +202,7 @@ func TestTickDrainExecuteAck(t *testing.T) {
 	if len(f.acks) != 2 {
 		t.Fatalf("acks = %d, want 2", len(f.acks))
 	}
-	if f.acks[0].EventID != id1 || f.acks[0].Payload.StatusCode != 200 || !f.acks[0].Payload.OK {
+	if f.acks[0].EventID != id1 || f.acks[0].Payload.StatusCode != 200 || !f.acks[0].Payload.OK || f.acks[0].Payload.Outcome != crossnode.CommandDone {
 		t.Fatalf("ack[0] = %+v, want id1 status 200 ok true", f.acks[0])
 	}
 }
@@ -200,8 +222,25 @@ func TestTickFailureFailedAck(t *testing.T) {
 	if len(f.acks) != 1 {
 		t.Fatalf("acks = %d, want 1", len(f.acks))
 	}
-	if f.acks[0].Payload.OK || f.acks[0].Payload.StatusCode != 409 {
+	if f.acks[0].Payload.OK || f.acks[0].Payload.StatusCode != 409 || f.acks[0].Payload.Outcome != crossnode.CommandRefused {
 		t.Fatalf("failed ack = %+v, want status 409 ok false", f.acks[0].Payload)
+	}
+}
+
+func TestTickRetryable5xxConsumesAttemptWithoutAck(t *testing.T) {
+	f := newFakeFleet(t)
+	f.localStatus = http.StatusServiceUnavailable
+	id := "77777777-7777-4777-8777-777777777777"
+	f.setPending(cmd(id, "/v1/work-items/c/transition", "orig-key-7", map[string]any{"to": "done"}))
+
+	p := New(f.config(), f.hub.Client(), &memCursor{}, nil)
+	res := p.Tick(context.Background())
+
+	if res.AttemptsRecorded != 1 || res.Executed != 1 || res.Failed != 1 || res.Acked != 0 {
+		t.Fatalf("result = %+v, want one retryable unacked attempt", res)
+	}
+	if len(f.acks) != 0 {
+		t.Fatalf("retryable 5xx was acknowledged: %+v", f.acks)
 	}
 }
 

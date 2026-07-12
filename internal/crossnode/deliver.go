@@ -266,7 +266,10 @@ func post(ctx context.Context, client *http.Client, credentials BearerResolver, 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set(HeaderIdempotencyKey, req.IdempotencyKey)
 	httpReq.Header.Set("Authorization", "Bearer "+bearer)
-	httpReq.Header.Set(HeaderTargetNode, req.TargetNodeID)
+	// Bind the HTTP request to the node terminating this attempt. For a queue
+	// fallback that is the queue host; HeaderQueueFor separately names the
+	// logical home target.
+	httpReq.Header.Set(HeaderTargetNode, c.NodeID)
 	httpReq.Header.Set(HeaderOriginNode, req.OriginNodeID)
 	switch c.Kind {
 	case KindQueue:
