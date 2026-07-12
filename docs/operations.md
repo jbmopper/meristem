@@ -127,6 +127,8 @@ docker compose down
 ## See also
 
 - [`docs/safety.md`](safety.md) — resource limits and `meristem safety check`
+- [`docs/network-operations.md`](network-operations.md) — queue-first two-node
+  bring-up, partition behavior, and the focused networking acceptance test
 - [`README.md`](../README.md) — topologies, compose profiles, integration smoke tests
 - [`docs/m4-seed.md`](m4-seed.md) — resource-conscious bring-up variant for a
   16GB Apple Silicon M4 Mac (Colima sizing, Postgres resource limits, worker
