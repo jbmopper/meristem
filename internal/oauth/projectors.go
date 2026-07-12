@@ -88,7 +88,7 @@ func (grantIssuedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event
 	if err := decode(e.Payload, &p); err != nil {
 		return fmt.Errorf("%s: decode payload: %w", kind, err)
 	}
-	if p.GrantID == uuid.Nil || e.SubjectID != p.GrantID || p.ActorTokenID == uuid.Nil || p.ClientID == "" || !validAuthorityProfile(p.AuthorityProfile) || p.Scope != ScopeMCPRead || p.Resource == "" || p.AccessTokenID == "" || p.RefreshTokenID == "" || p.AccessExpiresAtUnix <= 0 || p.RefreshExpiresAtUnix <= 0 || p.AccessExpiresAtUnix > p.RefreshExpiresAtUnix || p.Generation != 1 {
+	if p.GrantID == uuid.Nil || e.SubjectID != p.GrantID || p.ActorTokenID == uuid.Nil || p.ClientID == "" || !validProfileOAuthScope(p.AuthorityProfile, p.Scope) || p.Resource == "" || p.AccessTokenID == "" || p.RefreshTokenID == "" || p.AccessExpiresAtUnix <= 0 || p.RefreshExpiresAtUnix <= 0 || p.AccessExpiresAtUnix > p.RefreshExpiresAtUnix || p.Generation != 1 {
 		return fmt.Errorf("%s: required field missing, invalid, or subject_id does not match grant_id", kind)
 	}
 	ah, err := decodeSHA256(kind, "access_token_hash_b64", p.AccessTokenHashB64)
@@ -243,7 +243,7 @@ func (authorizationRequestCreatedProjector) Apply(ctx context.Context, tx pgx.Tx
 	if err := decode(event.Payload, &p); err != nil {
 		return fmt.Errorf("%s: decode payload: %w", kind, err)
 	}
-	if p.AuthorizationRequestID == uuid.Nil || p.AuthorizationRequestID != event.SubjectID || p.WorkItemID == uuid.Nil || p.ApprovalID == uuid.Nil || p.ClientID == "" || p.RedirectURI == "" || p.ResponseType != ResponseTypeCode || p.ActorTokenID == uuid.Nil || !validAuthorityProfile(p.AuthorityProfile) || p.Scope != ScopeMCPRead || p.Resource == "" || p.ExpiresAtUnix <= 0 {
+	if p.AuthorizationRequestID == uuid.Nil || p.AuthorizationRequestID != event.SubjectID || p.WorkItemID == uuid.Nil || p.ApprovalID == uuid.Nil || p.ClientID == "" || p.RedirectURI == "" || p.ResponseType != ResponseTypeCode || p.ActorTokenID == uuid.Nil || !validProfileOAuthScope(p.AuthorityProfile, p.Scope) || p.Resource == "" || p.ExpiresAtUnix <= 0 {
 		return fmt.Errorf("%s: required field missing, enum invalid, or subject_id does not match authorization_request_id", kind)
 	}
 	if err := ValidateCodeChallenge(p.CodeChallenge, p.CodeChallengeMethod); err != nil {
@@ -368,10 +368,13 @@ func applyRegisteredV1(ctx context.Context, tx pgx.Tx, event domain.Event) error
 	if p.TokenEndpointAuthMethod != AuthMethodNone {
 		return fmt.Errorf("oauth_client.registered: token_endpoint_auth_method must be %q", AuthMethodNone)
 	}
-	if p.Scope != ScopeMCPRead {
-		return fmt.Errorf("oauth_client.registered: scope must be %q", ScopeMCPRead)
+	normalizedScope, err := normalizeRegistrationScope(p.Scope)
+	if err != nil || normalizedScope != p.Scope {
+		return fmt.Errorf("oauth_client.registered: invalid or non-canonical scope %q", p.Scope)
 	}
-	if len(p.RedirectURIs) == 0 || len(p.RedirectURIs) > MaxRedirectURIs || len(p.GrantTypes) != 1 || p.GrantTypes[0] != GrantAuthorizationCode || len(p.ResponseTypes) != 1 || p.ResponseTypes[0] != ResponseTypeCode {
+	legacyGrantSet := len(p.GrantTypes) == 1 && p.GrantTypes[0] == GrantAuthorizationCode
+	currentGrantSet := len(p.GrantTypes) == 2 && p.GrantTypes[0] == GrantAuthorizationCode && p.GrantTypes[1] == GrantRefreshToken
+	if len(p.RedirectURIs) == 0 || len(p.RedirectURIs) > MaxRedirectURIs || (!legacyGrantSet && !currentGrantSet) || len(p.ResponseTypes) != 1 || p.ResponseTypes[0] != ResponseTypeCode {
 		return fmt.Errorf("oauth_client.registered: invalid redirect, grant, or response metadata")
 	}
 	if _, err := validateRedirectURIs(p.RedirectURIs); err != nil {
@@ -441,7 +444,7 @@ func applyCodeIssuedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error
 	if err := decode(event.Payload, &p); err != nil {
 		return fmt.Errorf("oauth_authorization_code.issued: decode payload: %w", err)
 	}
-	if p.CodeID == "" || event.SubjectID != CodeSubjectID(p.CodeID) || p.ClientID == "" || p.RedirectURI == "" || !validAuthorityProfile(p.AuthorityProfile) || p.Scope != ScopeMCPRead || p.ExpiresAtUnix <= 0 {
+	if p.CodeID == "" || event.SubjectID != CodeSubjectID(p.CodeID) || p.ClientID == "" || p.RedirectURI == "" || !validProfileOAuthScope(p.AuthorityProfile, p.Scope) || p.ExpiresAtUnix <= 0 {
 		return fmt.Errorf("oauth_authorization_code.issued: required field missing or subject_id does not match code_id")
 	}
 	hash, err := decodeSHA256(domain.EventOAuthAuthorizationCodeIssued, "code_hash_b64", p.CodeHashB64)
@@ -539,6 +542,11 @@ func validAuthorityProfile(profile string) bool {
 	default:
 		return false
 	}
+}
+
+func validProfileOAuthScope(profile, scope string) bool {
+	expected, err := OAuthScopeForAuthorityProfile(access.ProviderAuthorityProfile(profile))
+	return err == nil && scope == expected
 }
 
 func requireOneRow(kind, dependency string, tag pgconn.CommandTag, err error) error {
