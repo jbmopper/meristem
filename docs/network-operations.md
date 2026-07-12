@@ -1,14 +1,21 @@
-# Network operations: queue-first stage 1
+# Network operations: direct and queue stage 1
 
-This runbook covers the currently testable pull-only path between two meristem
-nodes. It does not claim that direct routing, relay routing, public TLS ingress,
-provider MCP, or OAuth is complete.
+This runbook covers the currently tested direct and pull-only paths between two
+meristem nodes. It does not claim that application relay routing, public TLS
+ingress, provider MCP, or OAuth is complete.
 
 ## Supported acceptance boundary
 
-A queue-first deployment has two independent Postgres databases and two
+A stage 1 deployment has two independent Postgres databases and two
 independent API processes:
 
+- A caller resolves an object's immutable home, loads one locally accepted
+  `nodes` projection snapshot, and uses the production `crossnode.Dispatcher`
+  to call the home node's canonical REST path. The home node authenticates a
+  token minted in its own database and checks the selected target node again.
+- Direct mutations carry the original `Idempotency-Key`. Retrying the same
+  mutation therefore returns the home node's cached response without appending
+  a duplicate domain event.
 - A reachable hub accepts a cross-node command, appends `command.queued`, and
   projects the command into its durable `command_queue`.
 - A pull-only node runs its API on a local/private listener and runs
@@ -22,10 +29,30 @@ independent API processes:
 - Loss of the hub stops cross-node drain and feed progress. It does not stop the
   pull-only node's local API, local event log, or local readiness.
 
-The queue read and acknowledgement endpoints are authenticated in the current
-slice. Per-target authorization and a command-path allowlist are separate
-hardening work; do not expose these endpoints to untrusted clients before that
-work lands.
+The queue write, read, attempt, and acknowledgement endpoints require their
+target-specific cross-node scopes. The queued executor also admits only the
+documented work-item mutation allowlist.
+
+## Direct routing call seam
+
+There is intentionally no second business-logic API or CLI for remote
+mutations. Code that has already resolved an immutable object home constructs a
+canonical `crossnode.Command` and calls `crossnode.Dispatcher.DispatchMutation`.
+The dispatcher reads the local event-backed `nodes` projection once, applies
+the deterministic direct-then-queue selector, and invokes the bounded delivery
+policy. Qualified work-item GETs use `Dispatcher.ReadWorkItem`; reads require a
+direct route and are never put in the durable mutation queue.
+
+Credential resolution is injected per destination node. Each returned bearer
+must have been minted by the node that terminates that attempt. The injected
+HTTP client must use the peer-safe transport that validates and pins the
+approved destination address class; the dispatcher additionally validates the
+registered origin, refuses redirect handling by calling the transport directly,
+and binds origin and target node ids on every request.
+
+A direct `401`, `403`, `409`, `429`, or unclassified `500` is definitive and
+is returned to the caller. Only transport errors and `502`, `503`, or `504`
+consume the finite direct retry budget and permit durable queue fallback.
 
 ## Listener and TLS expectations
 
@@ -111,17 +138,23 @@ the process should not exit solely because the hub is unreachable.
 
 ## Automated acceptance
 
-The focused test creates two temporary Postgres databases, serves the real hub
-and local API handlers, injects one acknowledgement failure, proves the local
-retry collapses, and then proves local readiness after the hub listener is
-removed:
+The direct-route test creates two temporary Postgres databases, loads A's real
+registry projection through the production dispatcher, reads and mutates a
+B-homed work item through B's real API handler, proves idempotent replay has one
+B effect, and verifies accelerated direct-retry/queue ordering:
+
+```bash
+MERISTEM_INTEGRATION=1 \
+MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+go test ./internal/crossnode -run TestDirectRouteTwoNodeAcceptance -count=1 -v
+```
+
+The queue-route test serves the real hub and local API handlers, injects one
+acknowledgement failure, proves the local retry collapses, and then proves local
+readiness after the hub listener is removed:
 
 ```bash
 MERISTEM_INTEGRATION=1 \
 MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
 go test ./internal/spoke -run TestQueueFirstTwoNodeAcceptance -count=1 -v
 ```
-
-Direct-route acceptance remains pending production route wiring. Add that proof
-as a separate case once a canonical REST command is actually dispatched by the
-route selector; do not treat the direct-receipt placeholder as execution.

@@ -249,6 +249,39 @@ func TestDeliverDoesNotBypassUnclassified500ThroughQueue(t *testing.T) {
 	}
 }
 
+func TestDeliverNeverFallsBackOnDefinitiveDirectResponses(t *testing.T) {
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusConflict,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			direct := stub(t, status, nil)
+			queueCapture := &capture{}
+			queue := stub(t, http.StatusAccepted, queueCapture)
+			candidates := []Candidate{
+				{Kind: KindDirect, URL: direct.URL, NodeID: "m4", RouteKey: "direct|m4"},
+				{Kind: KindQueue, URL: queue.URL, NodeID: "hub", Via: "hub", RouteKey: "queue|m4|hub"},
+			}
+
+			out, err := DeliverWithPolicy(context.Background(), http.DefaultClient, resolver(map[string]string{
+				"m4": "m4-token", "hub": "hub-token",
+			}), candidates, sampleCommand(), nil, time.Now(), fastDeliveryPolicy())
+			if err != nil {
+				t.Fatalf("DeliverWithPolicy: %v", err)
+			}
+			if out.Delivered || out.StatusCode != status || out.Terminal.Kind != KindDirect {
+				t.Fatalf("out = %+v, want terminal direct %d", out, status)
+			}
+			if len(out.Attempts) != 1 || queueCapture.hits != 0 || len(out.Cooldowns) != 0 {
+				t.Fatalf("definitive response retried/fell back: attempts=%d queue=%d cooldowns=%v", len(out.Attempts), queueCapture.hits, out.Cooldowns)
+			}
+		})
+	}
+}
+
 func TestDeliverAllRoutesFail(t *testing.T) {
 	a := stub(t, http.StatusBadGateway, nil)
 	b := stub(t, http.StatusServiceUnavailable, nil)
