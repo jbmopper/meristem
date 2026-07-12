@@ -61,6 +61,7 @@ var projectionTables = []string{
 	"http_connector_actions",
 	"nodes",
 	"command_queue",
+	"spoke_state",
 }
 
 // rebuildScratchTables are event-caused operational tables that projectors

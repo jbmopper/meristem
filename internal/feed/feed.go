@@ -89,6 +89,11 @@ var ExcludedKinds = []string{
 	// A command ack is the matching drain-side plumbing: it records the
 	// transport outcome onto the queue row, not human activity.
 	domain.EventCommandAcked,
+	// Attempts, terminal expiry, and poll-cursor advancement are transport
+	// coordination facts. The human feed surfaces effects on home objects.
+	domain.EventCommandAttempted,
+	domain.EventCommandExpired,
+	domain.EventSpokeCursorAdvanced,
 	// Provider OAuth client registration is auth-surface audit (RFC 7591
 	// dynamic registration), not the human activity narrative; it belongs to
 	// the log, not /v1/feed.

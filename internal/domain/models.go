@@ -110,6 +110,18 @@ const (
 	// docs/network-layer-spec.md §2 "Commands to nodes without inbound
 	// reachability" (the target "acknowledges by POSTing the outcome back").
 	EventCommandAcked = "command.acked"
+	// EventCommandAttempted records one bounded local execution attempt for a
+	// queued command. Its projector increments command_queue.attempt_count up
+	// to the Stage 1 maximum of five while the command remains pending.
+	EventCommandAttempted = "command.attempted"
+	// EventCommandExpired records deterministic exhaustion of queue patience,
+	// either at the 24-hour deadline or after five local execution attempts.
+	// It is terminal and competes with command.acked under first-event-wins.
+	EventCommandExpired = "command.expired"
+	// EventSpokeCursorAdvanced records a spoke's durable outbound-poll
+	// bookmark. The spoke_state row is a projection of this event, so restart
+	// recovery no longer relies on an unaudited direct table mutation.
+	EventSpokeCursorAdvanced = "spoke_cursor.advanced"
 	// EventOAuthClientRegistered records a provider OAuth client registering
 	// dynamically (RFC 7591) with its redirect_uri allowlist and public-client
 	// auth method. The subject is the client aggregate (SubjectOAuthClient); the
@@ -169,6 +181,9 @@ var AllEventKinds = []string{
 	EventNodeRouteUpdated,
 	EventCommandQueued,
 	EventCommandAcked,
+	EventCommandAttempted,
+	EventCommandExpired,
+	EventSpokeCursorAdvanced,
 	EventOAuthClientRegistered,
 }
 
@@ -201,6 +216,9 @@ const (
 	// internal/nodes.NodeSubjectID) so every event about one node shares a
 	// subject while the projection keys on the DNS-safe node_id text.
 	SubjectNode = "node"
+	// SubjectSpokeCursor identifies one durable spoke poll cursor. Its subject
+	// id is deterministically derived from the cursor key in internal/spoke.
+	SubjectSpokeCursor = "spoke_cursor"
 	// SubjectOAuthClient is the subject kind for a dynamically-registered
 	// provider OAuth client (RFC 7591). The subject_id is a deterministic UUID
 	// derived from the client_id (see internal/oauth.ClientSubjectID) so every
