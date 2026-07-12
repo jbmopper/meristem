@@ -63,6 +63,17 @@ func TestVerifyPKCE(t *testing.T) {
 	}
 }
 
+func TestVerifyStoredS256FailsClosedOnMethodDrift(t *testing.T) {
+	verifier := strings.Repeat("v", 60)
+	challenge := s256Challenge(verifier)
+	if err := verifyStoredS256(verifier, challenge, PKCEMethodS256); err != nil {
+		t.Fatalf("valid stored S256 binding: %v", err)
+	}
+	if err := verifyStoredS256(verifier, challenge, "plain"); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("stored non-S256 method accepted: %v", err)
+	}
+}
+
 func TestCodeIDAndHashAreDerived(t *testing.T) {
 	secret, codeID, hash, err := generateCode()
 	if err != nil {

@@ -58,6 +58,7 @@ func TestAuthCodeIssueRedeemRoundTrip(t *testing.T) {
 		Scope:               "mcp:read",
 		Resource:            "https://mcp.example.com/mcp",
 		ActorTokenID:        actor,
+		AuthorityProfile:    "owner_tracker_read_v1",
 	})
 	if err != nil {
 		t.Fatalf("issue: %v", err)
@@ -101,8 +102,10 @@ func TestAuthCodeRedeemRejectsBadInputs(t *testing.T) {
 			RedirectURI:         "https://claude.ai/cb",
 			CodeChallenge:       s256Challenge(verifier),
 			CodeChallengeMethod: "S256",
+			Scope:               ScopeMCPRead,
 			Resource:            "https://mcp.example.com/mcp",
 			ActorTokenID:        actor,
+			AuthorityProfile:    "owner_tracker_read_v1",
 		})
 		if err != nil {
 			t.Fatalf("issue: %v", err)
@@ -157,15 +160,17 @@ func TestAuthCodeExpiry(t *testing.T) {
 		RedirectURI:         "https://claude.ai/cb",
 		CodeChallenge:       s256Challenge(verifier),
 		CodeChallengeMethod: "S256",
+		Scope:               ScopeMCPRead,
 		Resource:            "https://mcp.example.com/mcp",
 		ActorTokenID:        uuid.New(),
+		AuthorityProfile:    "owner_tracker_read_v1",
 	})
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
 
-	// Advance past the code TTL.
-	clock = base.Add((CodeTTLSeconds + 5) * time.Second)
+	// The exact expiry instant is expired, not one final usable tick.
+	clock = base.Add(CodeTTLSeconds * time.Second)
 	if _, err := svc.Redeem(ctx, RedeemInput{Code: code, ClientID: "mcpc_abc", RedirectURI: "https://claude.ai/cb", CodeVerifier: verifier}); !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("expired redeem err = %v, want ErrInvalidGrant", err)
 	}

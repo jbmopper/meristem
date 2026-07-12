@@ -118,7 +118,7 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 		return AuthorizationRequest{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationRequest, SubjectID: reqID, Kind: domain.EventOAuthAuthorizationRequestCreated, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "work_item_id": item.ID, "approval_id": approvalID, "client_id": client.ClientID, "redirect_uri": in.RedirectURI, "response_type": in.ResponseType, "state": in.State, "code_challenge": in.CodeChallenge, "code_challenge_method": in.CodeChallengeMethod, "scope": scope, "resource": in.Resource, "actor_token_id": providerActor.ID, "authority_profile": client.AuthorityProfile, "expires_at_unix": expires.Unix()}})
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationRequest, SubjectID: reqID, Kind: domain.EventOAuthAuthorizationRequestCreated, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "authorization_request_id": reqID, "work_item_id": item.ID, "approval_id": approvalID, "client_id": client.ClientID, "redirect_uri": in.RedirectURI, "response_type": in.ResponseType, "state": in.State, "code_challenge": in.CodeChallenge, "code_challenge_method": in.CodeChallengeMethod, "scope": scope, "resource": in.Resource, "actor_token_id": providerActor.ID, "authority_profile": client.AuthorityProfile, "expires_at_unix": expires.Unix()}})
 	if err != nil {
 		return AuthorizationRequest{}, err
 	}
@@ -229,7 +229,7 @@ func (s *AuthorizationService) Continue(ctx context.Context, id uuid.UUID) (Cont
 		oauthErr = "temporarily_unavailable"
 		outcome = "expired"
 	}
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationRequest, SubjectID: id, Kind: domain.EventOAuthAuthorizationRequestCompleted, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "outcome": outcome, "completed_at_unix": s.now().UTC().Unix()}})
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationRequest, SubjectID: id, Kind: domain.EventOAuthAuthorizationRequestCompleted, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "authorization_request_id": id, "outcome": outcome, "completed_at_unix": s.now().UTC().Unix()}})
 	if err != nil {
 		return ContinuationResult{}, err
 	}
