@@ -88,12 +88,15 @@ Both direct attempts and queued commands have finite retry/expiry budgets and
 deterministic escalation; an unreachable node cannot leave a non-terminal
 command waiting forever.
 
-The provider-facing MCP ingress is a separate gateway concern. It may expose
-the existing API's `/mcp` route through public TLS, with mandatory standard
-provider authentication and per-client attribution. It is neither the fleet's
-event-log authority nor required for peer networking. REST remains canonical,
-and HTTP MCP writes remain disabled until their own mutation and idempotency
-contract is complete.
+The provider-facing MCP ingress is a separate gateway concern. It exposes the
+existing API's `/mcp` route through public TLS, with OAuth 2.1 authorization,
+per-client attribution, resource-bound access tokens, rotating refresh tokens,
+and owner approval for each grant/authority change. It is neither the fleet's
+event-log authority nor required for peer networking. REST remains canonical.
+Sealed read profiles expose only provider-safe work-item/feed projections;
+sealed tracker-write profiles additionally expose narrowly validated,
+idempotent work-item coordination mutations. They never expose approval,
+connector, inbox, registry/policy, private payload, or execution authority.
 
 `docs/network-layer-spec.md` gives the detailed registry, origin-validation,
 queue, patience, staging, and acceptance contract. In particular, Stage 1 is
@@ -265,12 +268,16 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
 - New client tokens may carry scopes; scope-less legacy tokens retain broad v0
   access until rotated. The shipped policy scopes include work-item scopes
   (`work_items.read`, `work_items.write`, `work_items.read_all`,
-  `work_items.write_all`, `work_items.create`, `work_items.tree:<uuid>`), feed
+  `work_items.write_all`, `work_items.tracker_write`,
+  `work_items.tracker_write_all`, `work_items.create`,
+  `work_items.tree:<uuid>`), feed
   scopes (`feed.read`, `feed.read_assigned`), owner posture scopes such as
   `policy_profile.switch`, registry write scope `registry.write`, log scopes,
-  and `approvals.decide`. Write-request authority comes from the relevant
-  work-item/connector write scope; approval decision authority requires a human
-  non-root token with `approvals.decide`.
+  `oauth_clients.bind`, `oauth_clients.revoke`, and `approvals.decide`.
+  OAuth-client administration requires an explicitly scoped non-root human;
+  the root token remains mint/revoke-only. Write-request authority comes from
+  the relevant work-item/connector write scope; approval decision authority
+  requires a human non-root token with `approvals.decide`.
   - A token that requested an approval cannot decide that same approval, even if
     it also has `approvals.decide` (separation of duties).
 - Scoped agent MCP access is a deterministic reducer over token scopes and
@@ -281,6 +288,13 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
   services. Denied writes append no events. Scope-less legacy tokens retain
   broad v0 access until explicitly rotated; any non-empty scope set is
   policy-bearing and fails closed on unknown or incomplete scopes.
+- Provider OAuth actors carry exactly one versioned `provider.profile:*`
+  marker plus its sealed Meristem scope set. Their coarse OAuth scope is
+  `mcp:read` or `mcp:read mcp:tracker_write`. Dynamic registration records an
+  allowed scope ceiling, not authority; the bound profile and owner-approved
+  request select one exact effective scope within it. Profile, effective-scope,
+  or ceiling mismatches fail at binding, authorization, token exchange,
+  refresh, and access.
 - Token revocation is instant; the next request fails. A panic-revoke endpoint reachable from the iPhone invalidates every non-root token.
 - Tokens are recorded on every event. Audit answers "who, via what client, when, with what authority."
 
@@ -472,7 +486,8 @@ v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the 
 - 🚧 MCP server with REST parity ✅ for read/triage paths, feed projections,
   registry/projection reads, substrate `work_item` mutations, and approval
   request/decision tools plus approval-gated HTTP connector requests over
-  stdio; HTTP MCP is read-only until mutation idempotency is specified.
+  stdio; provider HTTP MCP has provider-safe reads plus a sealed tracker-only
+  mutation profile with durable replay and no execution/external-write tools.
   Artifact attachment remains open.
 - ◻︎ Nightly Postgres dumps to object storage; documented and rehearsed restore.
 - 🚧 Single-VM deploy with TLS, disk encryption, and object overflow.

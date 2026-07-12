@@ -1,9 +1,8 @@
 # Provider MCP gateway contract
 
-Status: contract for work item `7b506bce`, under gateway umbrella
-`a03f644e`, recorded 2026-07-07. This document is provider-registration
-contract only; it does not implement OAuth, change transports, or add write
-tools. If this document conflicts with `docs/spec.md`, `docs/spec.md` wins.
+Status: implemented gateway contract under umbrella `a03f644e`, updated
+2026-07-12. If this document conflicts with `docs/spec.md`, `docs/spec.md`
+wins.
 
 ## Scope and dependencies
 
@@ -16,15 +15,15 @@ This contract narrows four existing threads:
   ChatGPT registration.
 - `66eb0aed` - network-layer spec. Provides the registered ingress seat and
   confirms that the DNS/MCP box is ingress, not the durable topology center.
-- `beac80e1` - HTTP MCP mutation idempotency/write gate dependency. Until this
-  is closed, provider-facing HTTP MCP stays read-only.
+- `beac80e1` - HTTP MCP mutation idempotency/write gate dependency. Its durable
+  replay contract now backs the sealed tracker-only mutation surface.
 
-Non-goals for this slice:
+Remaining rollout work:
 
-- no OAuth implementation;
-- no Cloudflare, tunnel, or reverse-proxy implementation;
-- no change to stdio MCP;
-- no HTTP MCP write enablement.
+- configure public TLS ingress and the documented perimeter rate limits;
+- complete a real Claude or ChatGPT registration/read/write smoke;
+- add provider-specific transport compatibility only if that smoke proves the
+  existing Streamable HTTP implementation insufficient.
 
 ## Endpoint contract
 
@@ -51,10 +50,10 @@ from forwarded proxy headers in that mode. The provider endpoint is
 [`provider-oauth-operations.md`](provider-oauth-operations.md) for the complete
 bring-up and smoke runbook.
 
-Transport compatibility for a first vanilla provider registration is tracked
-separately. If the provider requires server-initiated `GET /mcp` SSE behavior
-before it will register, that transport work must land before the smoke test.
-This contract still names `/mcp` as the provider endpoint either way.
+Transport compatibility for a first vanilla provider registration remains an
+acceptance question. If a provider requires server-initiated `GET /mcp` SSE
+behavior before it will register, record and implement that concrete gap. This
+contract still names `/mcp` as the provider endpoint either way.
 
 ## Auth contract
 
@@ -95,22 +94,24 @@ resolved meristem auth context, never from `Cf-Access-*` headers.
 
 ## Tool surface contract
 
-HTTP MCP is read-only first. The provider-facing gateway may advertise and
-serve read tools needed for registration and smoke verification, such as
-initialization, tool listing, feed reads, backlog/readiness reads, registry or
-projection reads, and work-item reads, subject to token policy.
+The provider-facing gateway always reduces reads to versioned provider-safe
+work-item and structural feed DTOs. Raw event payloads, private messages,
+approvals, connectors, registry/policy state, credentials, and encrypted
+private content are excluded.
 
-HTTP MCP must not advertise or execute mutation tools for provider clients
-until both conditions are true:
+Read profiles advertise only `feed.read`, `work_items.list`, and
+`work_items.get`. Tracker-write profiles add five idempotent work-item tools:
+create, spawn child, append a tracker-safe note/progress event, update blocked
+metadata, and block or terminalize. New items must be
+`human_review_status=blocked`; no cultivar or execution-shaped transition is
+accepted. The worker independently excludes human-review-blocked work from
+scribe, dispatch, review, and convergence lanes.
 
-1. HTTP MCP mutation idempotency is specified and implemented with durable
-   replay behavior equivalent to the stdio MCP `idempotency_key` contract.
-2. Write policy is approval-gated end to end: external writes create an
-   approval, perform no outbound write before an approval decision, preserve
-   separation of duties, and keep actor attribution from request context.
-
-Until then, write-shaped provider requests are rejected or hidden, not
-best-effort executed.
+Approval decisions, connector actions, inbox capture, registry/policy writes,
+convergence proposals/signals, and job execution remain hidden and rejected
+before dispatch. A read grant cannot acquire tracker writes when new tools are
+added because the exact versioned authority profile and OAuth scope are stored
+and revalidated throughout the grant lifecycle.
 
 ## Evidence event
 

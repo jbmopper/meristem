@@ -118,6 +118,13 @@ provider-looking hostname does not establish provider identity or owner
 consent. PKCE binds the authorization code exchange; the owner-side actor
 binding supplies Meristem authority.
 
+If DCR omits `scope`, registration records the server's supported ceiling
+(`mcp:read mcp:tracker_write`) for compatibility with vanilla clients. That
+ceiling grants nothing by itself. The bound actor's sealed profile and the
+owner-approved authorization request select the exact effective scope. A
+client that explicitly registers only `mcp:read` cannot later receive tracker
+writes.
+
 On the first provider registration, let the provider dynamically register. If
 it immediately attempts authorization before binding, a temporary failure is
 expected; retry after binding. Obtain the new `client_id` from the DCR response

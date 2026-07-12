@@ -157,6 +157,16 @@ A projection writer turns appended events into derived rows. It is the *only* co
   scope-less tokens keep legacy broad access until rotated; any non-empty scope
   set is treated as policy-bearing and must fail closed on unknown or incomplete
   scopes.
+- Provider OAuth actors use one exact versioned authority marker plus its
+  sealed scopes. Owner profiles may read the portfolio-wide provider-safe
+  work-item/feed projections; delegated profiles remain tree-scoped. Tracker
+  write profiles use `work_items.tracker_write*` and may only create
+  human-review-blocked work, append tracker-safe note/progress payloads, update
+  blocked metadata, block, or terminalize. They never imply approval,
+  connector, inbox, registry/policy, convergence-signal, or execution access.
+- OAuth client binding/revocation requires an explicitly scoped non-root human
+  token (`oauth_clients.bind` / `oauth_clients.revoke`). The root token remains
+  mint/revoke-only. Unknown or inexact provider profiles fail closed.
 
 ## Prompt-level data controls for external agents
 
