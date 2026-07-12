@@ -32,6 +32,18 @@ func QueueAckScope(targetNodeID string) string {
 	return "crossnode.ack:" + targetNodeID
 }
 
+// QueueOutcomeReadScope authorizes an origin to read only terminal queue
+// outcomes whose immutable origin_node_id matches that origin.
+func QueueOutcomeReadScope(originNodeID string) string {
+	return "crossnode.outcomes:" + originNodeID
+}
+
+// OutcomeObserveScope authorizes one origin-local actor to observe outcomes
+// from one pinned queue host. It grants no remote mutation authority.
+func OutcomeObserveScope(queueHostNodeID, originNodeID string) string {
+	return fmt.Sprintf("crossnode.observe:%s:%s", queueHostNodeID, originNodeID)
+}
+
 // OriginScope binds a peer-delivery credential to the origin node it may
 // assert. Syntax validation alone is not an authentication boundary.
 func OriginScope(originNodeID string) string { return "crossnode.origin:" + originNodeID }
@@ -70,6 +82,14 @@ func AuthorizeQueueDrain(actor domain.Token, targetNodeID string) error {
 
 func AuthorizeQueueAck(actor domain.Token, targetNodeID string) error {
 	return authorizeExactScope(actor, QueueAckScope(targetNodeID))
+}
+
+func AuthorizeQueueOutcomeRead(actor domain.Token, originNodeID string) error {
+	return authorizeExactScope(actor, QueueOutcomeReadScope(originNodeID))
+}
+
+func AuthorizeOutcomeObserve(actor domain.Token, queueHostNodeID, originNodeID string) error {
+	return authorizeExactScope(actor, OutcomeObserveScope(queueHostNodeID, originNodeID))
 }
 
 func AuthorizeTargetExecution(actor domain.Token, targetNodeID, originNodeID string) error {

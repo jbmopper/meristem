@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/nodes"
 	"github.com/jbmopper/meristem/internal/projections"
 )
 
@@ -20,6 +21,7 @@ func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(commandAckedProjector{})
 	registry.Register(commandAttemptedProjector{})
 	registry.Register(commandExpiredProjector{})
+	registry.Register(commandOutcomeObservedProjector{})
 }
 
 type commandQueuedProjector struct{}
@@ -208,6 +210,66 @@ func (commandExpiredProjector) Apply(ctx context.Context, tx pgx.Tx, event domai
 	`, p.CommandQueueID, p.TargetNodeID, event.OccurredAt, event.ID, string(p.Reason))
 	if err != nil {
 		return fmt.Errorf("command.expired: update projection: %w", err)
+	}
+	return nil
+}
+
+type commandOutcomeObservedProjector struct{}
+
+func (commandOutcomeObservedProjector) Kind() string { return domain.EventCommandOutcomeObserved }
+
+func (commandOutcomeObservedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if event.SubjectKind != domain.SubjectNode {
+		return fmt.Errorf("command_outcome.observed: expected subject_kind %q, got %q", domain.SubjectNode, event.SubjectKind)
+	}
+	if payloadVersion(event.Payload) != 1 {
+		return fmt.Errorf("command_outcome.observed: unknown payload_version %d", payloadVersion(event.Payload))
+	}
+	var p outcomeObservedPayload
+	if err := decode(event.Payload, &p); err != nil {
+		return fmt.Errorf("command_outcome.observed: decode payload: %w", err)
+	}
+	if !domain.ValidNodeID(p.QueueHostNodeID) || nodes.NodeSubjectID(p.QueueHostNodeID) != event.SubjectID {
+		return fmt.Errorf("command_outcome.observed: queue host does not match subject")
+	}
+	if err := validateQueueOutcome(p.QueueOutcome); err != nil {
+		return fmt.Errorf("command_outcome.observed: %w", err)
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO crossnode_outcome_observations (
+			queue_host_node_id, origin_node_id, command_queue_id,
+			target_node_id, causing_work_item_id, remote_event_seq,
+			remote_terminal_event_id, outcome, status_code, terminal_reason,
+			cause_resolution, remote_occurred_at, observed_event_id, observed_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (queue_host_node_id, command_queue_id) DO NOTHING
+	`, p.QueueHostNodeID, p.OriginNodeID, p.CommandQueueID, p.TargetNodeID,
+		p.CausingWorkItemID, p.RemoteEventSeq, p.RemoteTerminalEventID,
+		p.Outcome, p.StatusCode, p.TerminalReason, p.CauseResolution, p.RemoteOccurredAt,
+		event.ID, event.OccurredAt)
+	if err != nil {
+		return fmt.Errorf("command_outcome.observed: insert observation: %w", err)
+	}
+	exact, exists, resolution, err := matchingObservation(ctx, tx, p.QueueHostNodeID, p.QueueOutcome)
+	if err != nil {
+		return fmt.Errorf("command_outcome.observed: verify observation: %w", err)
+	}
+	if !exists || !exact || resolution != p.CauseResolution {
+		return ErrOutcomeConflict
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO crossnode_outcome_cursors (
+			queue_host_node_id, origin_node_id, remote_event_seq, updated_at
+		)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (queue_host_node_id, origin_node_id) DO UPDATE
+		SET remote_event_seq = EXCLUDED.remote_event_seq,
+		    updated_at = EXCLUDED.updated_at
+		WHERE crossnode_outcome_cursors.remote_event_seq < EXCLUDED.remote_event_seq
+	`, p.QueueHostNodeID, p.OriginNodeID, p.RemoteEventSeq, event.OccurredAt)
+	if err != nil {
+		return fmt.Errorf("command_outcome.observed: advance cursor: %w", err)
 	}
 	return nil
 }

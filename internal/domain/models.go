@@ -122,6 +122,11 @@ const (
 	// either at the 24-hour deadline or after five local execution attempts.
 	// It is terminal and competes with command.acked under first-event-wins.
 	EventCommandExpired = "command.expired"
+	// EventCommandOutcomeObserved records a terminal queue-host outcome pulled
+	// by the command's origin node. It is evidence about delivery, not a shadow
+	// projection of the target-homed object. The origin may use an observed
+	// expiry to fail its own non-terminal causing work item.
+	EventCommandOutcomeObserved = "command_outcome.observed"
 	// EventSpokeCursorAdvanced records a spoke's durable outbound-poll
 	// bookmark. The spoke_state row is a projection of this event, so restart
 	// recovery no longer relies on an unaudited direct table mutation.
@@ -188,6 +193,7 @@ var AllEventKinds = []string{
 	EventCommandAcked,
 	EventCommandAttempted,
 	EventCommandExpired,
+	EventCommandOutcomeObserved,
 	EventSpokeCursorAdvanced,
 	EventOAuthClientRegistered,
 }

@@ -94,6 +94,7 @@ var ExcludedKinds = []string{
 	// coordination facts. The human feed surfaces effects on home objects.
 	domain.EventCommandAttempted,
 	domain.EventCommandExpired,
+	domain.EventCommandOutcomeObserved,
 	domain.EventSpokeCursorAdvanced,
 	// Provider OAuth client registration is auth-surface audit (RFC 7591
 	// dynamic registration), not the human activity narrative; it belongs to
