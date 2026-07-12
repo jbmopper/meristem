@@ -21,17 +21,23 @@ import (
 )
 
 const (
-	ScopeWorkItemsRead       = "work_items.read"
-	ScopeWorkItemsReadAll    = "work_items.read_all"
-	ScopeWorkItemsWrite      = "work_items.write"
-	ScopeWorkItemsWriteAll   = "work_items.write_all"
-	ScopeWorkItemsCreate     = "work_items.create"
-	ScopeFeedRead            = "feed.read"
-	ScopeFeedReadAssigned    = "feed.read_assigned"
-	ScopeInboxCapture        = "inbox.capture"
-	ScopePolicyProfileSwitch = "policy_profile.switch"
-	ScopeRegistryWrite       = "registry.write"
-	ScopeApprovalsDecide     = "approvals.decide"
+	ScopeWorkItemsRead     = "work_items.read"
+	ScopeWorkItemsReadAll  = "work_items.read_all"
+	ScopeWorkItemsWrite    = "work_items.write"
+	ScopeWorkItemsWriteAll = "work_items.write_all"
+	// Tracker-write scopes grant only the four ordinary coordination
+	// mutations (spawn child, append event, update metadata, transition).
+	// They deliberately do not imply approvals, connectors, convergence,
+	// registry, policy, or execution authority.
+	ScopeWorkItemsTrackerWrite    = "work_items.tracker_write"
+	ScopeWorkItemsTrackerWriteAll = "work_items.tracker_write_all"
+	ScopeWorkItemsCreate          = "work_items.create"
+	ScopeFeedRead                 = "feed.read"
+	ScopeFeedReadAssigned         = "feed.read_assigned"
+	ScopeInboxCapture             = "inbox.capture"
+	ScopePolicyProfileSwitch      = "policy_profile.switch"
+	ScopeRegistryWrite            = "registry.write"
+	ScopeApprovalsDecide          = "approvals.decide"
 
 	scopeWorkItemsTreePrefix = "work_items.tree:"
 )
@@ -96,12 +102,15 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 	case "registry.list", "registry.get", "projections.list", "projections.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.list", "work_items.get":
-		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
+		return canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor))
 	case "approvals.get", "approvals.list_for_work_item":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "work_items.create":
-		return scopes[ScopeWorkItemsCreate] || scopes[ScopeWorkItemsWriteAll]
-	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition", "convergence.propose_checks", "registry.activate_cultivar", "approvals.request", "connectors.http_request":
+		return scopes[ScopeWorkItemsCreate] || scopes[ScopeWorkItemsWriteAll] || scopes[ScopeWorkItemsTrackerWriteAll]
+	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition":
+		return scopes[ScopeWorkItemsWriteAll] || scopes[ScopeWorkItemsTrackerWriteAll] ||
+			((scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsTrackerWrite]) && hasWorkItemTreeScope(actor))
+	case "convergence.propose_checks", "registry.activate_cultivar", "approvals.request", "connectors.http_request":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:
 		return false
@@ -113,7 +122,7 @@ func RequiresScopedPolicy(actor domain.Token) bool {
 }
 
 func (s *Service) FilterWorkItems(ctx context.Context, actor domain.Token, items []domain.WorkItem) ([]domain.WorkItem, error) {
-	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsReadAll) || hasScope(actor, ScopeWorkItemsWriteAll) {
+	if actor.IsRoot || legacyUnscoped(actor) || hasPortfolioWorkItemAccess(scopeSet(actor.Scopes)) {
 		return items, nil
 	}
 	if !canReadWorkItems(scopeSet(actor.Scopes)) {
@@ -137,7 +146,7 @@ func (s *Service) FilterWorkItems(ctx context.Context, actor domain.Token, items
 }
 
 func (s *Service) CanReadWorkItem(ctx context.Context, actor domain.Token, id uuid.UUID) error {
-	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsReadAll) || hasScope(actor, ScopeWorkItemsWriteAll) {
+	if actor.IsRoot || legacyUnscoped(actor) || hasPortfolioWorkItemAccess(scopeSet(actor.Scopes)) {
 		return nil
 	}
 	if !canReadWorkItems(scopeSet(actor.Scopes)) {
@@ -154,14 +163,14 @@ func (s *Service) CanReadWorkItem(ctx context.Context, actor domain.Token, id uu
 }
 
 func (s *Service) CanCreateWorkItem(_ context.Context, actor domain.Token) error {
-	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsCreate) || hasScope(actor, ScopeWorkItemsWriteAll) {
+	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsCreate) || hasScope(actor, ScopeWorkItemsWriteAll) || hasScope(actor, ScopeWorkItemsTrackerWriteAll) {
 		return nil
 	}
 	return ErrDenied
 }
 
 func (s *Service) CanWriteWorkItem(ctx context.Context, actor domain.Token, id uuid.UUID) error {
-	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsWriteAll) {
+	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsWriteAll) || hasScope(actor, ScopeWorkItemsTrackerWriteAll) {
 		return nil
 	}
 	if !canWriteWorkItems(scopeSet(actor.Scopes)) {
@@ -392,11 +401,17 @@ func hasWorkItemTreeScope(actor domain.Token) bool {
 }
 
 func canReadWorkItems(scopes map[string]bool) bool {
-	return scopes[ScopeWorkItemsRead] || scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsWriteAll]
+	return scopes[ScopeWorkItemsRead] || scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsWriteAll] ||
+		scopes[ScopeWorkItemsTrackerWrite] || scopes[ScopeWorkItemsTrackerWriteAll]
 }
 
 func canWriteWorkItems(scopes map[string]bool) bool {
-	return scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsWriteAll]
+	return scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsWriteAll] ||
+		scopes[ScopeWorkItemsTrackerWrite] || scopes[ScopeWorkItemsTrackerWriteAll]
+}
+
+func hasPortfolioWorkItemAccess(scopes map[string]bool) bool {
+	return scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || scopes[ScopeWorkItemsTrackerWriteAll]
 }
 
 func hasScope(actor domain.Token, scope string) bool {
