@@ -33,9 +33,14 @@ func (m *memCursor) Save(_ context.Context, cursor string) error {
 
 // localCall records one command replay the spoke posted to the local api.
 type localCall struct {
-	Path    string
-	IdemKey string
-	Body    string
+	Path            string
+	IdemKey         string
+	Body            string
+	OriginNode      string
+	OriginActor     string
+	OriginSource    string
+	QueueCommand    string
+	CausingWorkItem string
 }
 
 // ackCall records one ack the spoke posted to the hub.
@@ -74,9 +79,14 @@ func newFakeFleet(t *testing.T) *fakeFleet {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.localCalls = append(f.localCalls, localCall{
-			Path:    r.URL.Path,
-			IdemKey: r.Header.Get("Idempotency-Key"),
-			Body:    string(body),
+			Path:            r.URL.Path,
+			IdemKey:         r.Header.Get("Idempotency-Key"),
+			Body:            string(body),
+			OriginNode:      r.Header.Get(crossnode.HeaderOriginNode),
+			OriginActor:     r.Header.Get(crossnode.HeaderOriginActorToken),
+			OriginSource:    r.Header.Get(crossnode.HeaderOriginActorSource),
+			QueueCommand:    r.Header.Get(crossnode.HeaderQueueCommand),
+			CausingWorkItem: r.Header.Get(crossnode.HeaderCausingWorkItem),
 		})
 		status := f.localStatus
 		f.mu.Unlock()
@@ -149,6 +159,8 @@ func (f *fakeFleet) setPending(cmds ...map[string]any) {
 }
 
 func cmd(eventID, path, key string, body any) map[string]any {
+	originActor := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	cause := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	return map[string]any{
 		"event_id":               eventID,
 		"target_node_id":         "m4",
@@ -158,6 +170,10 @@ func cmd(eventID, path, key string, body any) map[string]any {
 		"queued_at":              "2026-07-07T00:00:00Z",
 		"expires_at":             "2026-07-08T00:00:00Z",
 		"attempt_count":          0,
+		"origin_node_id":         "hub",
+		"origin_actor_token_id":  originActor,
+		"origin_actor_source":    "agent",
+		"causing_work_item_id":   cause,
 	}
 }
 
@@ -193,6 +209,9 @@ func TestTickDrainExecuteAck(t *testing.T) {
 	// Original idempotency key is reused verbatim as the local Idempotency-Key.
 	if f.localCalls[0].IdemKey != "orig-key-1" || f.localCalls[1].IdemKey != "orig-key-2" {
 		t.Fatalf("idempotency key not reused: %+v", f.localCalls)
+	}
+	if call := f.localCalls[0]; call.OriginNode != "hub" || call.OriginActor != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" || call.OriginSource != "agent" || call.QueueCommand != id1 || call.CausingWorkItem != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" {
+		t.Fatalf("remote provenance headers = %+v", call)
 	}
 	// Command body is replayed verbatim.
 	if f.localCalls[0].Body != `{"to":"running"}` {

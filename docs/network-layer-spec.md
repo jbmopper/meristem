@@ -218,10 +218,13 @@ private message body, `.meristem/*.token` content, or `.env*` content.
 
 Queue authority is deliberately narrow and implementable. The queue host
 requires the enqueueing token to have target-specific queue-write scope for the
-operation class and records that resolved actor id. The target polls with its
+operation class plus an exact origin-node scope; a syntactically valid
+`origin_node_id` without that scope is only an assertion and is refused. The
+queue host records the resolved actor id. The target polls with its
 own queue-read token, authenticates the configured queue host, validates the
 target id and operation allowlist, and executes under one target-local non-root
-spoke token scoped only to the permitted queued operations. No remote token
+spoke token scoped only to the permitted queued operations, target execution,
+and the authenticated origin. No remote token
 material crosses the boundary. The target's events record both the originating
 actor id supplied by the authenticated queue host as structural provenance and
 the local spoke token id that actually authorized the mutation. The event's

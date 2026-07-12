@@ -53,7 +53,7 @@ func TestCrossnodeCommandEndpointIntegration(t *testing.T) {
 	}
 
 	_, queueToken := createCrossnodeToken(t, ctx, pool, "crossnode-queue-m4",
-		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite)})
+		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite), crossnode.OriginScope("sender")})
 
 	t.Setenv(EnvNodeID, "hub")
 	server := New(pool, nil)
@@ -154,7 +154,7 @@ func TestCrossnodeQueueAuthorizationDenialsAppendNoEvents(t *testing.T) {
 	}
 	root, _ := createCrossnodeToken(t, ctx, pool, "crossnode-root", nil)
 	_, wrongTarget := createCrossnodeToken(t, ctx, pool, "crossnode-queue-peer",
-		[]string{crossnode.QueueWriteScope("peer", crossnode.OperationClassWorkItemsWrite)})
+		[]string{crossnode.QueueWriteScope("peer", crossnode.OperationClassWorkItemsWrite), crossnode.OriginScope("sender")})
 	t.Setenv(EnvNodeID, "hub")
 	handler := New(pool, nil).Handler()
 	body := []byte(`{"command_path":"/v1/work-items","command_body":{"title":"remote"}}`)
@@ -200,7 +200,7 @@ func TestCrossnodeDrainEndpointsIntegration(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	_, queueToken := createCrossnodeToken(t, ctx, pool, "crossnode-queue-m4-drain",
-		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite)})
+		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite), crossnode.OriginScope("sender")})
 	_, drainToken := createCrossnodeToken(t, ctx, pool, "crossnode-drain-m4",
 		[]string{crossnode.QueueDrainScope("m4")})
 	_, ackToken := createCrossnodeToken(t, ctx, pool, "crossnode-ack-m4",
@@ -292,7 +292,7 @@ func TestCrossnodeDrainAndAckAuthorizationDenialsAppendNoEvents(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	_, queueToken := createCrossnodeToken(t, ctx, pool, "queue-authz-m4",
-		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite)})
+		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite), crossnode.OriginScope("sender")})
 	_, wrongTarget := createCrossnodeToken(t, ctx, pool, "drain-authz-peer",
 		[]string{crossnode.QueueDrainScope("peer"), crossnode.QueueAckScope("peer")})
 	t.Setenv(EnvNodeID, "hub")
@@ -375,7 +375,7 @@ func TestCrossnodeCommandRequiresCommandPath(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	_, queueToken := createCrossnodeToken(t, ctx, pool, "crossnode-path-m4",
-		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite)})
+		[]string{crossnode.QueueWriteScope("m4", crossnode.OperationClassWorkItemsWrite), crossnode.OriginScope("sender")})
 	t.Setenv(EnvNodeID, "hub")
 	handler := New(pool, nil).Handler()
 

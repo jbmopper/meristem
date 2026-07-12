@@ -105,6 +105,7 @@ func (r *workerRuntime) ScanOnce(ctx context.Context) (worker.Result, error) {
 		Now:          time.Now().UTC(),
 		ActorTokenID: r.systemTok.ID,
 		Source:       r.systemTok.Source,
+		LocalNodeID:  os.Getenv("MERISTEM_NODE_ID"),
 	})
 	if err != nil {
 		return worker.Result{}, fmt.Errorf("worker: expire cross-node commands: %w", err)

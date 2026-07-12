@@ -10,15 +10,18 @@ import (
 
 func TestCrossnodeAuthorizationIsTargetAndOperationScoped(t *testing.T) {
 	path := "/v1/work-items/7b1fc532-14f2-4be5-81a5-4719dd11d453/transition"
-	actor := domain.Token{Scopes: []string{QueueWriteScope("m4", OperationClassWorkItemsWrite)}}
-	if err := AuthorizeQueueWrite(actor, "m4", path); err != nil {
+	actor := domain.Token{Scopes: []string{QueueWriteScope("m4", OperationClassWorkItemsWrite), OriginScope("sender")}}
+	if err := AuthorizeQueueWrite(actor, "m4", "sender", path); err != nil {
 		t.Fatalf("expected exact queue scope to authorize: %v", err)
 	}
-	if err := AuthorizeQueueWrite(actor, "peer", path); !errors.Is(err, ErrCommandScopeDenied) {
+	if err := AuthorizeQueueWrite(actor, "peer", "sender", path); !errors.Is(err, ErrCommandScopeDenied) {
 		t.Fatalf("wrong target error = %v, want scope denial", err)
 	}
-	if err := AuthorizeQueueWrite(actor, "m4", "/v1/approvals/7b1fc532-14f2-4be5-81a5-4719dd11d453/decide"); !errors.Is(err, ErrInvalidCommandPath) {
+	if err := AuthorizeQueueWrite(actor, "m4", "sender", "/v1/approvals/7b1fc532-14f2-4be5-81a5-4719dd11d453/decide"); !errors.Is(err, ErrInvalidCommandPath) {
 		t.Fatalf("disallowed path error = %v, want invalid command path", err)
+	}
+	if err := AuthorizeQueueWrite(actor, "m4", "impostor", path); !errors.Is(err, ErrCommandScopeDenied) {
+		t.Fatalf("unbound origin error = %v, want scope denial", err)
 	}
 }
 
@@ -31,7 +34,7 @@ func TestCrossnodeAuthorizationRejectsRootLegacyAndRevokedTokens(t *testing.T) {
 		{Scopes: []string{QueueWriteScope("m4", OperationClassWorkItemsWrite)}, RevokedAt: &revokedAt},
 	}
 	for _, actor := range tests {
-		if err := AuthorizeQueueWrite(actor, "m4", path); err == nil {
+		if err := AuthorizeQueueWrite(actor, "m4", "sender", path); err == nil {
 			t.Fatalf("AuthorizeQueueWrite(%+v) succeeded, want denial", actor)
 		}
 	}

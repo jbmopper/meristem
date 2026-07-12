@@ -1,6 +1,8 @@
 package events
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -17,6 +19,36 @@ func mkSpec(payload any) Spec {
 		Kind:        "work_item.created",
 		Source:      domain.SourceHuman,
 		Payload:     payload,
+	}
+}
+
+func TestRemoteProvenanceEnrichesPayloadWithoutChangingLocalAttribution(t *testing.T) {
+	originActor := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	queueID := uuid.MustParse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+	ctx := WithRemoteProvenance(context.Background(), RemoteProvenance{
+		OriginNodeID: "hub", OriginActorTokenID: &originActor,
+		OriginActorSource: domain.SourceAgent, QueueCommandID: &queueID,
+	})
+	spec := mkSpec(map[string]any{"to": "done"})
+	localActor := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	spec.ActorTokenID = &localActor
+	spec.Source = domain.SourceSystem
+	enriched, err := enrichSpecWithRemoteProvenance(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enriched.ActorTokenID == nil || *enriched.ActorTokenID != localActor || enriched.Source != domain.SourceSystem {
+		t.Fatalf("local attribution changed: %+v", enriched)
+	}
+	raw, _ := json.Marshal(enriched.Payload)
+	var payload struct {
+		Remote RemoteProvenance `json:"remote_provenance"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Remote.OriginNodeID != "hub" || payload.Remote.OriginActorTokenID == nil || *payload.Remote.OriginActorTokenID != originActor || payload.Remote.QueueCommandID == nil || *payload.Remote.QueueCommandID != queueID {
+		t.Fatalf("remote provenance = %+v", payload.Remote)
 	}
 }
 
