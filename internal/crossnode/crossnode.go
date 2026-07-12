@@ -89,6 +89,10 @@ type Candidate struct {
 // records: the home-node REST call to replay, plus the attribution that must
 // cross the boundary with it.
 type Command struct {
+	// OriginNodeID is the DNS-safe node issuing the command. It is transported
+	// only as structural provenance; the receiver still derives actor identity
+	// and source exclusively from its locally authenticated bearer.
+	OriginNodeID string
 	// TargetNodeID is the DNS-safe home node id the command is bound for. It
 	// is the X-Meristem-Queue-For value for KindQueue candidates.
 	TargetNodeID string
@@ -166,6 +170,8 @@ var (
 	// ErrInvalidCommandPath protects the pull-only executor from becoming an
 	// arbitrary authenticated POST proxy.
 	ErrInvalidCommandPath = errors.New("crossnode: command path is not allowed")
+	// ErrInvalidOriginNodeID marks missing or malformed structural provenance.
+	ErrInvalidOriginNodeID = errors.New("crossnode: origin node id is not a DNS-safe node id")
 	// ErrInvalidOrigin marks malformed or unsafe registered route origins.
 	ErrInvalidOrigin = errors.New("crossnode: route origin is invalid")
 )

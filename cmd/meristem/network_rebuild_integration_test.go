@@ -24,7 +24,7 @@ func TestNetworkProjectionsRebuildFromEvents(t *testing.T) {
 	writer := app.NewEventWriter()
 	actor := createCmdSystemToken(t, ctx, pool, writer, "network-rebuild")
 	if err := registerNode(ctx, pool, writer, actor, []string{
-		"--node-id", "m4", "--base-url", "https://m4.example/mcp", "--status", "active",
+		"--node-id", "m4", "--base-url", "https://m4.example", "--status", "active",
 	}); err != nil {
 		t.Fatalf("register node: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestNetworkProjectionsRebuildFromEvents(t *testing.T) {
 	queue := crossnode.NewQueueService(pool, writer)
 	queued, err := queue.Enqueue(ctx, crossnode.EnqueueInput{
 		TargetNodeID:         "m4",
-		CommandPath:          "/v1/work-items/abc/transition",
+		CommandPath:          "/v1/work-items/11111111-1111-4111-8111-111111111111/transition",
 		CommandBody:          json.RawMessage(`{"to":"running"}`),
 		OriginIdempotencyKey: "network-rebuild-command",
 		Source:               domain.SourceAgent,
