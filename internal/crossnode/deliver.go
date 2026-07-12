@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/peerhttp"
 )
 
 // CommandPath is the durable queue ingress. Direct delivery calls the
@@ -133,7 +134,7 @@ func DeliverWithPolicy(ctx context.Context, client *http.Client, credentials Bea
 		return Outcome{Cooldowns: copyCooldowns(cooldowns)}, ErrMissingCredential
 	}
 	if client == nil {
-		client = http.DefaultClient
+		client = peerhttp.NewClient(peerhttp.Options{})
 	}
 	policy = normalizeDeliveryPolicy(policy)
 	out := Outcome{Cooldowns: copyCooldowns(cooldowns)}

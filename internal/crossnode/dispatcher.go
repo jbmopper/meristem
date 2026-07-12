@@ -13,6 +13,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/nodes"
+	"github.com/jbmopper/meristem/internal/peerhttp"
 )
 
 var (
@@ -80,7 +81,7 @@ func NewDispatcher(pool *pgxpool.Pool, client *http.Client, credentials BearerRe
 // event-log adapters without changing routing or delivery semantics.
 func NewDispatcherWithRegistry(registry RegistrySnapshot, client *http.Client, credentials BearerResolver, policy DeliveryPolicy) *Dispatcher {
 	if client == nil {
-		client = http.DefaultClient
+		client = peerhttp.NewClient(peerhttp.Options{})
 	}
 	return &Dispatcher{
 		registry:    registry,
