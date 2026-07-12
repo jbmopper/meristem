@@ -88,6 +88,7 @@ func (s *Server) handleOAuthClientRegistration(w http.ResponseWriter, r *http.Re
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  registered.ClientID,
+		"client_id_issued_at":        registered.ClientIDIssuedAt,
 		"client_name":                registered.ClientName,
 		"redirect_uris":              registered.RedirectURIs,
 		"grant_types":                registered.GrantTypes,

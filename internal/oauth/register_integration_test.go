@@ -49,6 +49,9 @@ func TestRegistrationRoundTrip(t *testing.T) {
 	if got.ClientID == "" {
 		t.Fatal("expected a client_id")
 	}
+	if got.ClientIDIssuedAt <= 0 {
+		t.Fatalf("client_id_issued_at = %d", got.ClientIDIssuedAt)
+	}
 	if got.TokenEndpointAuthMethod != AuthMethodNone {
 		t.Fatalf("auth method = %q, want none", got.TokenEndpointAuthMethod)
 	}

@@ -50,6 +50,7 @@ type RegisterInput struct {
 // non-secret. client_id_issued_at is the event occurred_at at the projection.
 type RegisteredClient struct {
 	ClientID                string
+	ClientIDIssuedAt        int64
 	ClientName              string
 	RedirectURIs            []string
 	GrantTypes              []string
@@ -124,9 +125,14 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 	if err := tx.Commit(ctx); err != nil {
 		return RegisteredClient{}, err
 	}
+	projected, err := GetClient(ctx, s.pool, clientID)
+	if err != nil {
+		return RegisteredClient{}, err
+	}
 
 	return RegisteredClient{
 		ClientID:                clientID,
+		ClientIDIssuedAt:        projected.CreatedAt.UTC().Unix(),
 		ClientName:              payload.ClientName,
 		RedirectURIs:            redirectURIs,
 		GrantTypes:              payload.GrantTypes,
