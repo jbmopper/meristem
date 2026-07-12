@@ -75,9 +75,9 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 	if authMethod != AuthMethodNone {
 		return RegisteredClient{}, fmt.Errorf("%w: token_endpoint_auth_method %q is unsupported; provider clients must be public (none) and use PKCE", ErrInvalidRegistration, authMethod)
 	}
-	scope, err := normalizeScope(in.Scope)
+	scope, err := normalizeRegistrationScope(in.Scope)
 	if err != nil {
-		return RegisteredClient{}, fmt.Errorf("%w: only scope %s is supported", ErrInvalidRegistration, ScopeMCPRead)
+		return RegisteredClient{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
 	}
 
 	redirectURIs, err := validateRedirectURIs(in.RedirectURIs)

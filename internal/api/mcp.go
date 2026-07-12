@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/mcp"
@@ -84,9 +85,12 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request, actor dom
 		writeAPIError(w, http.StatusBadRequest, "request_read_failed", "could not read request body")
 		return
 	}
-	resp := s.mcpServer.HandleHTTPMessageWithOptions(r.Context(), raw, actor, mcp.HTTPOptions{
-		AllowedTools: mcp.ReadOnlyHTTPTools(),
-	})
+	profile, err := providerHTTPProfile(actor)
+	if err != nil {
+		writeAPIError(w, http.StatusForbidden, "provider_authority_denied", "bearer token does not carry one exact sealed provider authority profile")
+		return
+	}
+	resp := s.mcpServer.HandleHTTPMessageWithOptions(r.Context(), raw, actor, mcp.HTTPOptions{Profile: profile})
 	w.Header().Set(mcp.HeaderProtocolVersion, "2025-06-18")
 	if resp.ContentType != "" {
 		w.Header().Set("Content-Type", resp.ContentType)
@@ -94,5 +98,20 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request, actor dom
 	w.WriteHeader(resp.Status)
 	if len(resp.Body) > 0 {
 		_, _ = w.Write(resp.Body)
+	}
+}
+
+func providerHTTPProfile(actor domain.Token) (*mcp.HTTPToolProfile, error) {
+	profile, err := access.ProviderAuthorityProfileFromScopes(actor.Scopes)
+	if err != nil {
+		return nil, err
+	}
+	switch profile {
+	case access.ProviderOwnerTrackerReadV1, access.ProviderDelegatedTreeReadV1:
+		return mcp.ProviderSafeReadHTTPProfile(), nil
+	case access.ProviderOwnerTrackerWriteV1, access.ProviderDelegatedTreeWriteV1:
+		return mcp.ProviderTrackerHTTPProfile(), nil
+	default:
+		return nil, access.ErrInvalidProviderAuthority
 	}
 }

@@ -22,7 +22,6 @@ import (
 )
 
 const AuthorizationRequestTTL = 10 * time.Minute
-const ScopeMCPRead = "mcp:read"
 
 var ErrInvalidAuthorizationRequest = errors.New("oauth: invalid authorization request")
 
@@ -37,7 +36,14 @@ type AuthorizationService struct {
 }
 
 func NewAuthorizationService(pool *pgxpool.Pool, writer *events.Writer, wi *workitems.Service, ap *approvals.Service, systemActorID uuid.UUID) *AuthorizationService {
-	return &AuthorizationService{pool: pool, writer: writer, workItems: wi, approvals: ap, systemActorID: systemActorID, codes: NewAuthCodeService(pool, writer), now: time.Now}
+	return NewAuthorizationServiceWithClock(pool, writer, wi, ap, systemActorID, nil)
+}
+
+func NewAuthorizationServiceWithClock(pool *pgxpool.Pool, writer *events.Writer, wi *workitems.Service, ap *approvals.Service, systemActorID uuid.UUID, clock func() time.Time) *AuthorizationService {
+	if clock == nil {
+		clock = time.Now
+	}
+	return &AuthorizationService{pool: pool, writer: writer, workItems: wi, approvals: ap, systemActorID: systemActorID, codes: NewAuthCodeService(pool, writer), now: clock}
 }
 
 type AuthorizationInput struct{ ClientID, RedirectURI, ResponseType, State, CodeChallenge, CodeChallengeMethod, Scope, Resource, ExpectedResource string }
@@ -57,7 +63,10 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	}
 	client, err := GetClient(ctx, s.pool, strings.TrimSpace(in.ClientID))
 	if err != nil {
-		return AuthorizationRequest{}, fmt.Errorf("%w: unknown client_id", ErrInvalidAuthorizationRequest)
+		if errors.Is(err, ErrClientNotFound) {
+			return AuthorizationRequest{}, fmt.Errorf("%w: unknown client_id", ErrInvalidAuthorizationRequest)
+		}
+		return AuthorizationRequest{}, err
 	}
 	if client.RevokedAt != nil {
 		return AuthorizationRequest{}, fmt.Errorf("%w: client revoked", ErrInvalidAuthorizationRequest)
@@ -71,12 +80,8 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	if in.Resource == "" || in.Resource != in.ExpectedResource {
 		return AuthorizationRequest{}, fmt.Errorf("%w: resource must exactly match %s", ErrInvalidAuthorizationRequest, in.ExpectedResource)
 	}
-	scope, err := normalizeScope(in.Scope)
-	if err != nil {
-		return AuthorizationRequest{}, err
-	}
 	if err := ValidateCodeChallenge(in.CodeChallenge, in.CodeChallengeMethod); err != nil {
-		return AuthorizationRequest{}, err
+		return AuthorizationRequest{}, fmt.Errorf("%w: %v", ErrInvalidAuthorizationRequest, err)
 	}
 	if client.ActorTokenID == nil {
 		bindingID, bindErr := s.ensureBindingWorkItem(ctx, client, systemActor)
@@ -92,6 +97,14 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	sealedProfile, err := access.ProviderAuthorityProfileFromScopes(providerActor.Scopes)
 	if err != nil || string(sealedProfile) != client.AuthorityProfile {
 		return AuthorizationRequest{}, ErrProviderActorUnavailable
+	}
+	expectedScope, err := OAuthScopeForAuthorityProfile(sealedProfile)
+	if err != nil || client.Scope != expectedScope {
+		return AuthorizationRequest{}, ErrProviderActorUnavailable
+	}
+	scope, err := normalizeScopeForProfile(in.Scope, sealedProfile)
+	if err != nil {
+		return AuthorizationRequest{}, err
 	}
 	identity := strings.Join([]string{in.ClientID, in.RedirectURI, in.ResponseType, in.State, in.CodeChallenge, in.CodeChallengeMethod, scope, in.Resource}, "\x00")
 	hash := sha256.Sum256([]byte(identity))
@@ -141,7 +154,7 @@ func (s *AuthorizationService) ensureBindingWorkItem(ctx context.Context, client
 	}
 	hash := sha256.Sum256([]byte(client.ClientID))
 	ctx = idempotency.WithRequest(ctx, idempotency.Request{TokenID: systemActor.ID, Scope: "oauth.bind_provider_actor", Key: client.ClientID, RequestHash: hash[:]})
-	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "Bind OAuth provider actor: " + client.ClientID, Body: fmt.Sprintf("Root action required. Client name %q is UNTRUSTED self-asserted metadata. Registered redirect URIs: %s. Bind this client to a pre-provisioned source=agent token whose exact scopes match one sealed authority profile, then retry authorization.", client.ClientName, strings.Join(client.RedirectURIs, ", ")), Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewBlocked, PatienceBudgetSeconds: 86400, EscalationRule: domain.EscalationRuleHandToHuman})
+	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "Bind OAuth provider actor: " + client.ClientID, Body: fmt.Sprintf("Scoped human administration required (oauth_clients.bind). Client name %q is UNTRUSTED self-asserted metadata. Registered redirect URIs: %s. Bind this client to a pre-provisioned source=agent token whose exact scopes match one sealed authority profile, then retry authorization.", client.ClientName, strings.Join(client.RedirectURIs, ", ")), Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewBlocked, PatienceBudgetSeconds: 86400, EscalationRule: domain.EscalationRuleHandToHuman})
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -158,17 +171,6 @@ func (s *AuthorizationService) ensureBindingWorkItem(ctx context.Context, client
 		return uuid.Nil, err
 	}
 	return item.ID, nil
-}
-
-func normalizeScope(raw string) (string, error) {
-	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return ScopeMCPRead, nil
-	}
-	if len(fields) != 1 || fields[0] != ScopeMCPRead {
-		return "", fmt.Errorf("%w: only scope %s is supported", ErrInvalidAuthorizationRequest, ScopeMCPRead)
-	}
-	return ScopeMCPRead, nil
 }
 
 type ContinuationResult struct {
@@ -198,6 +200,9 @@ func (s *AuthorizationService) Continue(ctx context.Context, id uuid.UUID) (Cont
 		completed                                                        *time.Time
 	}
 	err = tx.QueryRow(ctx, `SELECT work_item_id,approval_id,client_id,redirect_uri,state,code_challenge,code_challenge_method,scope,resource,actor_token_id,authority_profile,expires_at,completed_at FROM oauth_authorization_requests WHERE id=$1 FOR UPDATE`, id).Scan(&req.workItemID, &req.approvalID, &req.clientID, &req.redirectURI, &req.state, &req.challenge, &req.method, &req.scope, &req.resource, &req.actorID, &req.authorityProfile, &req.expires, &req.completed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ContinuationResult{}, fmt.Errorf("%w: authorization request not found", ErrInvalidAuthorizationRequest)
+	}
 	if err != nil {
 		return ContinuationResult{}, err
 	}
@@ -216,30 +221,61 @@ func (s *AuthorizationService) Continue(ctx context.Context, id uuid.UUID) (Cont
 	outcome := status
 	oauthErr := ""
 	code := ""
+	desiredWorkItemState := domain.WorkItemFailed
 	if status == string(approvals.StatusApproved) && now.Before(req.expires) {
 		code, err = s.codes.issueInTx(ctx, tx, IssueInput{ClientID: req.clientID, RedirectURI: req.redirectURI, CodeChallenge: req.challenge, CodeChallengeMethod: req.method, Scope: req.scope, Resource: req.resource, ActorTokenID: req.actorID, SystemActorTokenID: systemActor.ID, AuthorityProfile: req.authorityProfile})
 		if err != nil {
 			return ContinuationResult{}, err
 		}
 		outcome = "approved"
+		desiredWorkItemState = domain.WorkItemDone
 	} else if status == string(approvals.StatusDenied) {
 		oauthErr = "access_denied"
 		outcome = "denied"
 	} else {
 		oauthErr = "temporarily_unavailable"
 		outcome = "expired"
+		if status == string(approvals.StatusPending) {
+			_, _, err = s.writer.Append(ctx, tx, events.Spec{
+				SubjectKind: domain.SubjectApproval, SubjectID: req.approvalID,
+				Kind: domain.EventApprovalExpired, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID,
+				Discriminator: id.String(),
+				Payload:       map[string]any{"work_item_id": req.workItemID, "reason": "oauth_authorization_expired"},
+			})
+			if err != nil {
+				return ContinuationResult{}, err
+			}
+		}
 	}
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationRequest, SubjectID: id, Kind: domain.EventOAuthAuthorizationRequestCompleted, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "authorization_request_id": id, "outcome": outcome, "completed_at_unix": s.now().UTC().Unix()}})
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationRequest, SubjectID: id, Kind: domain.EventOAuthAuthorizationRequestCompleted, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "authorization_request_id": id, "outcome": outcome, "completed_at_unix": now.Unix()}})
 	if err != nil {
+		return ContinuationResult{}, err
+	}
+	if err := s.appendWorkItemTransitionInTx(ctx, tx, req.workItemID, desiredWorkItemState, "oauth_authorization_"+outcome, systemActor, id.String()); err != nil {
 		return ContinuationResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ContinuationResult{}, err
 	}
-	if outcome == "approved" {
-		_, _ = s.workItems.Transition(ctx, req.workItemID, domain.WorkItemDone, "oauth authorization completed", systemActor)
-	} else if outcome == "expired" {
-		_, _ = s.workItems.Transition(ctx, req.workItemID, domain.WorkItemFailed, "oauth authorization expired", systemActor)
-	}
 	return ContinuationResult{RedirectURI: req.redirectURI, State: req.state, Code: code, OAuthError: oauthErr, WorkItemID: req.workItemID}, nil
+}
+
+func (s *AuthorizationService) appendWorkItemTransitionInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, to domain.WorkItemState, reason string, actor domain.Token, discriminator string) error {
+	var from domain.WorkItemState
+	if err := tx.QueryRow(ctx, `SELECT state FROM work_items WHERE id=$1 FOR UPDATE`, id).Scan(&from); err != nil {
+		return err
+	}
+	if from == to {
+		return nil
+	}
+	if !domain.CanTransition(from, to) {
+		return fmt.Errorf("oauth: invalid authorization work item transition from %s to %s", from, to)
+	}
+	_, _, err := s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: id,
+		Kind: domain.EventWorkItemTransitioned, Source: actor.Source, ActorTokenID: &actor.ID,
+		Discriminator: discriminator,
+		Payload:       map[string]any{"from": from, "to": to, "reason": reason},
+	})
+	return err
 }

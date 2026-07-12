@@ -66,6 +66,17 @@ func TestRegistrationRoundTrip(t *testing.T) {
 	if len(client.GrantTypes) != 1 || client.GrantTypes[0] != GrantAuthorizationCode {
 		t.Fatalf("grant_types = %v, want [authorization_code]", client.GrantTypes)
 	}
+	writeClient, err := svc.Register(ctx, RegisterInput{
+		ClientName:   "Tracker writer",
+		RedirectURIs: []string{"https://tracker.example/callback"},
+		Scope:        ScopeMCPRead + " " + ScopeMCPTrackerWrite,
+	})
+	if err != nil || writeClient.Scope != ScopeMCPRead+" "+ScopeMCPTrackerWrite {
+		t.Fatalf("write-scope registration=%+v err=%v", writeClient, err)
+	}
+	if _, err := svc.Register(ctx, RegisterInput{RedirectURIs: []string{"https://tracker.example/other"}, Scope: ScopeMCPTrackerWrite}); !errors.Is(err, ErrInvalidRegistration) {
+		t.Fatalf("tracker-write without read accepted: %v", err)
+	}
 
 	// Unknown client resolves to ErrClientNotFound.
 	if _, err := GetClient(ctx, pool, "mcpc_missing"); !errors.Is(err, ErrClientNotFound) {
