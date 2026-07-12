@@ -3,11 +3,13 @@ package crossnode
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/projections"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -64,7 +66,8 @@ func TestAckProjectorIntegration(t *testing.T) {
 	}
 
 	// Ack id1 success -> done; ack id2 failure -> failed.
-	if _, err := svc.Ack(ctx, AckInput{CommandQueueID: id1, StatusCode: 200, OK: true}); err != nil {
+	firstAck, err := svc.Ack(ctx, AckInput{CommandQueueID: id1, StatusCode: 200, OK: true, Source: domain.SourceAgent})
+	if err != nil {
 		t.Fatalf("ack success: %v", err)
 	}
 	if _, err := svc.Ack(ctx, AckInput{CommandQueueID: id2, StatusCode: 500, OK: false}); err != nil {
@@ -73,6 +76,71 @@ func TestAckProjectorIntegration(t *testing.T) {
 
 	assertRow(t, pool, id1, "done", 200, true)
 	assertRow(t, pool, id2, "failed", 500, false)
+
+	// A later contradictory acknowledgement is still an audit event, but the
+	// first terminal decision is the deterministic projection winner.
+	secondAck, err := svc.Ack(ctx, AckInput{CommandQueueID: id1, StatusCode: 503, OK: false, Source: domain.SourceHuman})
+	if err != nil {
+		t.Fatalf("second ack: %v", err)
+	}
+	if secondAck.EventID == firstAck.EventID {
+		t.Fatalf("distinct ack actions collapsed onto %s", firstAck.EventID)
+	}
+	assertRow(t, pool, id1, "done", 200, true)
+	var firstSource, secondSource string
+	if err := pool.QueryRow(ctx, `SELECT source FROM events WHERE id = $1`, firstAck.EventID).Scan(&firstSource); err != nil {
+		t.Fatalf("read first ack source: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT source FROM events WHERE id = $1`, secondAck.EventID).Scan(&secondSource); err != nil {
+		t.Fatalf("read second ack source: %v", err)
+	}
+	if firstSource != string(domain.SourceAgent) || secondSource != string(domain.SourceHuman) {
+		t.Fatalf("ack sources = (%q, %q), want (agent, human)", firstSource, secondSource)
+	}
+
+	// Concurrent contradictory acks serialize before their event append. The
+	// earliest event in seq order must therefore be the live projection winner,
+	// which is also what a rebuild will deterministically reproduce.
+	id3 := enqueue("k3")
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, ack := range []AckInput{
+		{CommandQueueID: id3, StatusCode: 202, OK: true},
+		{CommandQueueID: id3, StatusCode: 409, OK: false},
+	} {
+		wg.Add(1)
+		go func(in AckInput) {
+			defer wg.Done()
+			<-start
+			_, err := svc.Ack(ctx, in)
+			errs <- err
+		}(ack)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ack: %v", err)
+		}
+	}
+	var wantStatus int
+	var wantOK bool
+	if err := pool.QueryRow(ctx, `
+		SELECT (payload->>'status_code')::integer, (payload->>'ok')::boolean
+		FROM events
+		WHERE kind = $1 AND payload->>'command_queue_id' = $2
+		ORDER BY seq
+		LIMIT 1
+	`, domain.EventCommandAcked, id3.String()).Scan(&wantStatus, &wantOK); err != nil {
+		t.Fatalf("read first concurrent ack event: %v", err)
+	}
+	wantState := "failed"
+	if wantOK {
+		wantState = "done"
+	}
+	assertRow(t, pool, id3, wantState, wantStatus, wantOK)
 
 	// Both acked: m4's pending read is empty.
 	pending, err = svc.PendingForTarget(ctx, "m4", 10)
