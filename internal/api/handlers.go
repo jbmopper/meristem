@@ -337,11 +337,11 @@ func (s *Server) handleBacklogReadiness(w http.ResponseWriter, r *http.Request) 
 	if !s.canListWorkItems(w, r, actor) {
 		return
 	}
-	limit, ok := parseReadinessLimit(w, r)
+	_, ok = parseReadinessLimit(w, r)
 	if !ok {
 		return
 	}
-	items, err := s.workItems.List(r.Context(), "", limit)
+	items, err := s.workItems.ListAll(r.Context(), "")
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "backlog_readiness_failed", "could not read backlog readiness")
 		return
@@ -352,7 +352,7 @@ func (s *Server) handleBacklogReadiness(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, backlog.Summarize(items, backlog.Options{
-		Limit: limit,
+		Limit: 0,
 		AsOf:  time.Now().UTC(),
 	}))
 }

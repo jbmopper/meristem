@@ -85,9 +85,9 @@ func (s *Server) buildTools() []Tool {
 func (s *Server) toolBacklogReadiness() Tool {
 	return Tool{
 		Name:        "backlog.readiness",
-		Description: "Summarize visible backlog readiness groups from the work_items projection.",
+		Description: "Summarize the complete visible backlog from the work_items projection.",
 		InputSchema: schemaObject(nil, map[string]any{
-			"limit": schemaInt("Max visible work items to classify (0-200). Defaults to 200."),
+			"limit": schemaInt("Deprecated compatibility argument (0-200); readiness always scans the complete visible backlog."),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
@@ -106,7 +106,7 @@ func (s *Server) toolBacklogReadiness() Tool {
 			if limit < 0 || limit > 200 {
 				return nil, replayableToolErr(errors.New("limit must be between 0 and 200"))
 			}
-			items, err := s.deps.WorkItems.List(ctx, "", limit)
+			items, err := s.deps.WorkItems.ListAll(ctx, "")
 			if err != nil {
 				return nil, err
 			}
@@ -115,7 +115,7 @@ func (s *Server) toolBacklogReadiness() Tool {
 				return nil, err
 			}
 			return backlog.Summarize(items, backlog.Options{
-				Limit: limit,
+				Limit: 0,
 				AsOf:  time.Now().UTC(),
 			}), nil
 		},

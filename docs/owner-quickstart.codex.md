@@ -63,7 +63,7 @@ Use a separate source=`system` worker token later for split audit identity.
 
 ## 6. Read readiness and feeds
 ```bash
-curl -fsS "$API/v1/backlog/readiness?limit=200" \
+curl -fsS "$API/v1/backlog/readiness" \
   -H "Authorization: Bearer $(tr -d '\n' < .meristem/operator.token)"
 curl -fsS "$API/v1/feed?projection=owner-attention&limit=20" \
   -H "Authorization: Bearer $(tr -d '\n' < .meristem/operator.token)"

@@ -99,6 +99,23 @@ func TestRESTScopedWorkItemTreeAccessIntegration(t *testing.T) {
 		t.Fatalf("scoped list leaked out-of-tree B: %s", listRec.Body.String())
 	}
 
+	// Readiness accepts the old limit argument for compatibility, but scans the
+	// complete projection before applying the same tree filter. A limit of one
+	// must therefore neither hide A/A1 nor expose out-of-tree B.
+	readinessRec := doREST(t, server.Handler(), http.MethodGet, "/v1/backlog/readiness?limit=1", scopedResult.Secret, "", nil)
+	if readinessRec.Code != http.StatusOK {
+		t.Fatalf("scoped backlog readiness: %d %s", readinessRec.Code, readinessRec.Body.String())
+	}
+	if !strings.Contains(readinessRec.Body.String(), a.ID.String()) || !strings.Contains(readinessRec.Body.String(), a1.ID.String()) {
+		t.Fatalf("scoped readiness omitted assigned tree items: %s", readinessRec.Body.String())
+	}
+	if strings.Contains(readinessRec.Body.String(), b.ID.String()) || strings.Contains(readinessRec.Body.String(), `"title":"B"`) {
+		t.Fatalf("scoped readiness leaked out-of-tree B: %s", readinessRec.Body.String())
+	}
+	if !strings.Contains(readinessRec.Body.String(), `"limit":0`) {
+		t.Fatalf("scoped readiness did not report an unbounded scan: %s", readinessRec.Body.String())
+	}
+
 	assertRESTStatus(t, doREST(t, server.Handler(), http.MethodGet, "/v1/work-items/"+a.ID.String(), scopedResult.Secret, "", nil), http.StatusOK)
 	assertRESTStatus(t, doREST(t, server.Handler(), http.MethodGet, "/v1/work-items/"+a1.ID.String(), scopedResult.Secret, "", nil), http.StatusOK)
 	assertRESTStatus(t, doREST(t, server.Handler(), http.MethodGet, "/v1/work-items/"+b.ID.String(), scopedResult.Secret, "", nil), http.StatusNotFound)

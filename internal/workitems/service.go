@@ -1169,13 +1169,28 @@ func (s *Service) List(ctx context.Context, state string, limit int) ([]domain.W
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	args := []any{limit}
+	return s.list(ctx, state, limit)
+}
+
+// ListAll returns the complete work_items projection, newest first. It is
+// intentionally separate from List so ordinary list surfaces retain their
+// bounded response contract while aggregate views can compute honest totals.
+func (s *Service) ListAll(ctx context.Context, state string) ([]domain.WorkItem, error) {
+	return s.list(ctx, state, 0)
+}
+
+func (s *Service) list(ctx context.Context, state string, limit int) ([]domain.WorkItem, error) {
+	args := []any{}
 	query := `SELECT id, title, body, state, state_reason, suggested_convergence_checks, human_review_status, created_by, created_at, state_entered_at, updated_at FROM work_items`
 	if state != "" {
-		query += ` WHERE state = $2`
+		query += ` WHERE state = $1`
 		args = append(args, state)
 	}
-	query += ` ORDER BY updated_at DESC LIMIT $1`
+	query += ` ORDER BY updated_at DESC`
+	if limit > 0 {
+		query += fmt.Sprintf(` LIMIT $%d`, len(args)+1)
+		args = append(args, limit)
+	}
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
