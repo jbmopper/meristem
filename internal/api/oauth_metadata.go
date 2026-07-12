@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/jbmopper/meristem/internal/oauth"
 )
 
 // EnvPublicBaseURL pins the externally reachable scheme and host used in
@@ -13,14 +15,12 @@ import (
 const EnvPublicBaseURL = "MERISTEM_PUBLIC_BASE_URL"
 const EnvOAuthSystemActorID = "MERISTEM_OAUTH_SYSTEM_ACTOR_TOKEN_ID"
 
-const mcpReadScope = "mcp:read"
-
 func (s *Server) handleOAuthProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	base := s.oauthPublicBaseURL(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource":                 base + "/mcp",
 		"authorization_servers":    []string{base},
-		"scopes_supported":         []string{mcpReadScope},
+		"scopes_supported":         oauth.SupportedOAuthScopes(),
 		"bearer_methods_supported": []string{"header"},
 		"resource_name":            "meristem MCP",
 	})
@@ -37,7 +37,7 @@ func (s *Server) handleOAuthAuthorizationServerMetadata(w http.ResponseWriter, r
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
-		"scopes_supported":                      []string{mcpReadScope},
+		"scopes_supported":                      oauth.SupportedOAuthScopes(),
 	})
 }
 

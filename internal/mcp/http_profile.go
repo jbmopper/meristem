@@ -16,14 +16,15 @@ type HTTPToolProfile struct {
 	validateCall func(tool string, arguments json.RawMessage) error
 }
 
-// ProviderSafeReadHTTPProfile exposes only tracker-shaped reads. In
-// particular, it deliberately excludes the generic event feed until the safe
-// provider feed projection is wired, plus registry, approval, policy, inbox,
-// connector, convergence, and deterministic-error surfaces.
+// ProviderSafeReadHTTPProfile exposes only tracker-shaped reads. feed.read is
+// safe here because the provider HTTP context selects provider_safe_feed.v1;
+// registry, approval, policy, inbox, connector, convergence, and
+// deterministic-error surfaces remain excluded.
 func ProviderSafeReadHTTPProfile() *HTTPToolProfile {
 	return &HTTPToolProfile{
 		name: "provider-safe-read",
 		allowedTools: toolSet(
+			"feed.read",
 			"backlog.readiness",
 			"work_items.list",
 			"work_items.get",

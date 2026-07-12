@@ -150,6 +150,7 @@ func TestProviderTrackerHTTPProfileAdvertisesOnlySafeTrackerTools(t *testing.T) 
 		t.Fatalf("decode tools/list: %v", err)
 	}
 	want := map[string]bool{
+		"feed.read":                  true,
 		"backlog.readiness":          true,
 		"work_items.list":            true,
 		"work_items.get":             true,
@@ -186,7 +187,6 @@ func TestProviderTrackerHTTPProfileRejectsHiddenToolsBeforeDispatch(t *testing.T
 	profile := ProviderTrackerHTTPProfile()
 	hidden := []string{
 		"inbox.capture",
-		"feed.read",
 		"registry.list",
 		"registry.define_tropism",
 		"projections.define",

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/mcp"
@@ -44,13 +45,22 @@ func newMCPRouteTestServer(authenticator auth.Authenticator) *Server {
 	return s
 }
 
+func providerActor(t *testing.T, profile access.ProviderAuthorityProfile) domain.Token {
+	t.Helper()
+	authority, err := access.ReduceProviderAuthority(profile, uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: authority.Scopes}
+}
+
 func TestHandleMCPPostDispatchesAuthenticatedActor(t *testing.T) {
 	s := New(nil, nil)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req = req.WithContext(auth.WithToken(req.Context(), domain.Token{ID: uuid.New(), Source: domain.SourceAgent}))
+	req = req.WithContext(auth.WithToken(req.Context(), providerActor(t, access.ProviderOwnerTrackerReadV1)))
 	rec := httptest.NewRecorder()
 
 	s.handleMCP(rec, req)
@@ -94,7 +104,7 @@ func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req = req.WithContext(auth.WithToken(req.Context(), domain.Token{ID: uuid.New(), Source: domain.SourceHuman}))
+	req = req.WithContext(auth.WithToken(req.Context(), providerActor(t, access.ProviderOwnerTrackerReadV1)))
 	rec := httptest.NewRecorder()
 
 	s.handleMCP(rec, req)
@@ -106,8 +116,46 @@ func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
 	if strings.Contains(body, "work_items.create") || strings.Contains(body, "work_items.transition") || strings.Contains(body, "convergence.propose_checks") {
 		t.Fatalf("HTTP /mcp leaked write tools before idempotency contract: %s", body)
 	}
-	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "work_items.get") {
+	if !strings.Contains(body, "feed.read") || !strings.Contains(body, "backlog.readiness") || !strings.Contains(body, "work_items.get") {
 		t.Fatalf("HTTP /mcp omitted expected read tools: %s", body)
+	}
+}
+
+func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
+	s := New(nil, nil)
+	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+
+	for _, tc := range []struct {
+		name       string
+		actor      domain.Token
+		wantStatus int
+		wantWrite  bool
+	}{
+		{name: "sealed read", actor: providerActor(t, access.ProviderOwnerTrackerReadV1), wantStatus: http.StatusOK},
+		{name: "sealed write", actor: providerActor(t, access.ProviderOwnerTrackerWriteV1), wantStatus: http.StatusOK, wantWrite: true},
+		{name: "missing profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusForbidden},
+		{name: "unknown profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{"provider.profile:future_profile", access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			req = req.WithContext(auth.WithToken(req.Context(), tc.actor))
+			rec := httptest.NewRecorder()
+			s.handleMCP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus != http.StatusOK {
+				if !strings.Contains(rec.Body.String(), "provider_authority_denied") {
+					t.Fatalf("missing fail-closed error: %s", rec.Body.String())
+				}
+				return
+			}
+			hasWrite := strings.Contains(rec.Body.String(), "work_items.create") && strings.Contains(rec.Body.String(), "work_items.transition")
+			if hasWrite != tc.wantWrite {
+				t.Fatalf("write surface=%v want=%v body=%s", hasWrite, tc.wantWrite, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -156,7 +204,7 @@ func TestOAuthProtectedResourceMetadataUsesConfiguredPublicBaseURL(t *testing.T)
 	if len(body.AuthorizationServers) != 1 || body.AuthorizationServers[0] != "https://mcp.example.test" {
 		t.Fatalf("authorization_servers = %#v", body.AuthorizationServers)
 	}
-	if len(body.ScopesSupported) != 1 || body.ScopesSupported[0] != "mcp:read" {
+	if len(body.ScopesSupported) != 2 || body.ScopesSupported[0] != "mcp:read" || body.ScopesSupported[1] != "mcp:tracker_write" {
 		t.Fatalf("scopes_supported = %#v", body.ScopesSupported)
 	}
 	if len(body.BearerMethods) != 1 || body.BearerMethods[0] != "header" {
@@ -260,7 +308,7 @@ func TestMCPRouteInvalidBearerAdvertisesOAuthInvalidToken(t *testing.T) {
 func TestMCPRouteStaticBearerStillDispatches(t *testing.T) {
 	authenticator := &mcpRouteAuth{
 		wantSecret: "mrs_good",
-		tok:        domain.Token{ID: uuid.New(), Source: domain.SourceAgent},
+		tok:        providerActor(t, access.ProviderOwnerTrackerReadV1),
 	}
 	s := newMCPRouteTestServer(authenticator)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)

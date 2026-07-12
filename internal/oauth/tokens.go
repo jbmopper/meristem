@@ -73,8 +73,11 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 	var expires time.Time
 	var redeemed *time.Time
 	err = tx.QueryRow(ctx, `SELECT code_id,client_id,redirect_uri,code_challenge,scope,resource,actor_token_id,authority_profile,expires_at,redeemed_at FROM oauth_authorization_codes WHERE code_hash=$1 FOR UPDATE`, hash).Scan(&codeID, &clientID, &redirectURI, &challenge, &scope, &resource, &actorID, &authorityProfile, &expires, &redeemed)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return TokenPair{}, fmt.Errorf("%w: unknown code", ErrInvalidGrant)
+	}
+	if err != nil {
+		return TokenPair{}, err
 	}
 	if redeemed != nil || s.now().UTC().After(expires) || in.ClientID != clientID || in.RedirectURI != redirectURI {
 		return TokenPair{}, fmt.Errorf("%w: code expired, used, or binding mismatch", ErrInvalidGrant)
@@ -83,7 +86,13 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 		return TokenPair{}, err
 	}
 	client, err := GetClient(ctx, s.pool, clientID)
-	if err != nil || client.RevokedAt != nil || client.ActorTokenID == nil || *client.ActorTokenID != actorID {
+	if err != nil {
+		if errors.Is(err, ErrClientNotFound) {
+			return TokenPair{}, fmt.Errorf("%w: client or actor binding inactive", ErrInvalidGrant)
+		}
+		return TokenPair{}, err
+	}
+	if client.RevokedAt != nil || client.ActorTokenID == nil || *client.ActorTokenID != actorID {
 		return TokenPair{}, fmt.Errorf("%w: client or actor binding inactive", ErrInvalidGrant)
 	}
 	providerActor, err := validateProviderActor(ctx, s.pool, actorID)
@@ -93,6 +102,10 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 	sealedProfile, err := access.ProviderAuthorityProfileFromScopes(providerActor.Scopes)
 	if err != nil || string(sealedProfile) != authorityProfile {
 		return TokenPair{}, fmt.Errorf("%w: authority profile no longer matches actor scopes", ErrInvalidGrant)
+	}
+	expectedScope, err := OAuthScopeForAuthorityProfile(sealedProfile)
+	if err != nil || scope != expectedScope || client.Scope != expectedScope {
+		return TokenPair{}, fmt.Errorf("%w: OAuth scope no longer matches authority profile", ErrInvalidGrant)
 	}
 	access, accessID, accessHash, err := tokenSecret("mcpat_")
 	if err != nil {
@@ -137,8 +150,11 @@ func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (To
 	var storedClient, scope, resource, grantProfile, currentProfile string
 	var grantActor, currentActor *uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT rt.token_id,rt.grant_id,rt.generation,rt.expires_at,rt.used_at,g.client_id,g.scope,g.resource,g.refresh_expires_at,g.revoked_at,g.actor_token_id,g.authority_profile,c.actor_token_id,c.authority_profile FROM oauth_refresh_tokens rt JOIN oauth_grants g ON g.id=rt.grant_id JOIN oauth_clients c ON c.client_id=g.client_id WHERE rt.token_hash=$1 FOR UPDATE OF rt,g`, h[:]).Scan(&tokenID, &grantID, &generation, &tokenExpiry, &used, &storedClient, &scope, &resource, &grantExpiry, &revoked, &grantActor, &grantProfile, &currentActor, &currentProfile)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return TokenPair{}, fmt.Errorf("%w: unknown refresh token", ErrInvalidGrant)
+	}
+	if err != nil {
+		return TokenPair{}, err
 	}
 	now := s.now().UTC()
 	if used != nil {
@@ -157,8 +173,18 @@ func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (To
 		return TokenPair{}, fmt.Errorf("%w: refresh token expired, revoked, or client mismatch", ErrInvalidGrant)
 	}
 	client, err := GetClient(ctx, s.pool, storedClient)
-	if err != nil || client.RevokedAt != nil {
+	if err != nil {
+		if errors.Is(err, ErrClientNotFound) {
+			return TokenPair{}, fmt.Errorf("%w: client inactive", ErrInvalidGrant)
+		}
+		return TokenPair{}, err
+	}
+	if client.RevokedAt != nil {
 		return TokenPair{}, fmt.Errorf("%w: client inactive", ErrInvalidGrant)
+	}
+	expectedScope, err := OAuthScopeForAuthorityProfile(access.ProviderAuthorityProfile(grantProfile))
+	if err != nil || scope != expectedScope || client.Scope != expectedScope {
+		return TokenPair{}, fmt.Errorf("%w: OAuth scope no longer matches authority profile", ErrInvalidGrant)
 	}
 	access, accessID, accessHash, err := tokenSecret("mcpat_")
 	if err != nil {
@@ -206,7 +232,8 @@ func (s *TokenService) AuthenticateAccess(ctx context.Context, secret, expectedR
 		return domain.Token{}, ErrInvalidAccessToken
 	}
 	now := s.now().UTC()
-	if tok.IsRoot || tok.Source != domain.SourceAgent || tok.RevokedAt != nil || grantRevoked != nil || clientRevoked != nil || now.After(tokenExpiry) || now.After(grantExpiry) || resource != expectedResource || normalizeScopeContains(scope, ScopeMCPRead) == false {
+	expectedScope, scopeErr := OAuthScopeForAuthorityProfile(profile)
+	if tok.IsRoot || tok.Source != domain.SourceAgent || tok.RevokedAt != nil || grantRevoked != nil || clientRevoked != nil || now.After(tokenExpiry) || now.After(grantExpiry) || resource != expectedResource || scopeErr != nil || scope != expectedScope {
 		return domain.Token{}, ErrInvalidAccessToken
 	}
 	return tok, nil
@@ -218,13 +245,4 @@ func validTokenSecret(secret, prefix string) bool {
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(secret, prefix))
 	return err == nil && len(raw) == 32
-}
-
-func normalizeScopeContains(raw, want string) bool {
-	for _, s := range strings.Fields(raw) {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }

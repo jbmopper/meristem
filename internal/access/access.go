@@ -38,11 +38,33 @@ const (
 	ScopePolicyProfileSwitch      = "policy_profile.switch"
 	ScopeRegistryWrite            = "registry.write"
 	ScopeApprovalsDecide          = "approvals.decide"
+	// OAuth-client administration is deliberately separate from token
+	// administration. The root credential only mints and revokes tokens; a
+	// scoped, non-root human client reviews provider metadata and binds or
+	// revokes public OAuth clients.
+	ScopeOAuthClientsBind   = "oauth_clients.bind"
+	ScopeOAuthClientsRevoke = "oauth_clients.revoke"
 
 	scopeWorkItemsTreePrefix = "work_items.tree:"
 )
 
 var ErrDenied = errors.New("access: denied")
+
+// CanBindOAuthClient and CanRevokeOAuthClient are intentionally strict: the
+// legacy unscoped-token compatibility path does not apply to provider client
+// administration. These operations require an explicitly scoped human
+// credential and reject the root credential and all agent/system actors.
+func CanBindOAuthClient(actor domain.Token) bool {
+	return canAdminOAuthClient(actor, ScopeOAuthClientsBind)
+}
+
+func CanRevokeOAuthClient(actor domain.Token) bool {
+	return canAdminOAuthClient(actor, ScopeOAuthClientsRevoke)
+}
+
+func canAdminOAuthClient(actor domain.Token, scope string) bool {
+	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil && actor.Source == domain.SourceHuman && hasScope(actor, scope)
+}
 
 // Service evaluates access decisions that need projection reads.
 type Service struct {
