@@ -38,7 +38,7 @@ func TestQueuePatienceIntegration(t *testing.T) {
 
 	enqueue := func(key string) EnqueueResult {
 		res, err := svc.Enqueue(ctx, EnqueueInput{
-			TargetNodeID: "m4", CommandPath: "/v1/work-items/abc/transition",
+			TargetNodeID: "m4", OriginNodeID: "hub", CommandPath: "/v1/work-items/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/transition",
 			CommandBody: json.RawMessage(`{"to":"running"}`), OriginIdempotencyKey: key,
 		})
 		if err != nil {

@@ -40,6 +40,7 @@ func TestNetworkProjectionsRebuildFromEvents(t *testing.T) {
 	queue := crossnode.NewQueueService(pool, writer)
 	queued, err := queue.Enqueue(ctx, crossnode.EnqueueInput{
 		TargetNodeID:         "m4",
+		OriginNodeID:         "hub",
 		CommandPath:          "/v1/work-items/11111111-1111-4111-8111-111111111111/transition",
 		CommandBody:          json.RawMessage(`{"to":"running"}`),
 		OriginIdempotencyKey: "network-rebuild-command",
@@ -66,7 +67,7 @@ func TestNetworkProjectionsRebuildFromEvents(t *testing.T) {
 	}
 
 	due, err := queue.Enqueue(ctx, crossnode.EnqueueInput{
-		TargetNodeID: "m4", CommandPath: "/v1/work-items/def/transition",
+		TargetNodeID: "m4", OriginNodeID: "hub", CommandPath: "/v1/work-items/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/transition",
 		CommandBody: json.RawMessage(`{"to":"running"}`), OriginIdempotencyKey: "network-rebuild-expiry",
 	})
 	if err != nil {
