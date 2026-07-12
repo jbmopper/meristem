@@ -28,13 +28,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // CooldownWindow is how long a route the sender observed failing is skipped by
@@ -208,26 +209,8 @@ func ValidateCommandPath(raw string) error {
 // leakage. Private/LAN HTTP requires TLS termination or an explicit future
 // policy; it is not silently trusted here.
 func ValidateOrigin(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return ErrInvalidOrigin
-	}
-	if u.Path != "" && u.Path != "/" {
-		return ErrInvalidOrigin
-	}
-	if u.Scheme == "https" {
-		return nil
-	}
-	if u.Scheme != "http" {
-		return ErrInvalidOrigin
-	}
-	host := u.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("%w: plaintext HTTP is loopback-only", ErrInvalidOrigin)
+	if err := domain.ValidateNodeOrigin(raw); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidOrigin, err)
 	}
 	return nil
 }

@@ -26,8 +26,8 @@ func marshal(t *testing.T, payload any) map[string]any {
 func TestBuildRegisteredPayloadFull(t *testing.T) {
 	payload, err := BuildRegisteredPayload(RegisterParams{
 		NodeID:    "m4",
-		BaseURL:   strptr("https://ingress.example/mcp"),
-		DirectURL: strptr("https://m4.peer.example/mcp"),
+		BaseURL:   strptr("https://ingress.example"),
+		DirectURL: strptr("https://m4.peer.example"),
 		RelayVia:  []string{"den"},
 		Status:    "active",
 	})
@@ -38,10 +38,10 @@ func TestBuildRegisteredPayloadFull(t *testing.T) {
 	if m["node_id"] != "m4" {
 		t.Errorf("node_id = %v, want m4", m["node_id"])
 	}
-	if m["base_url"] != "https://ingress.example/mcp" {
+	if m["base_url"] != "https://ingress.example" {
 		t.Errorf("base_url = %v", m["base_url"])
 	}
-	if m["direct_url"] != "https://m4.peer.example/mcp" {
+	if m["direct_url"] != "https://m4.peer.example" {
 		t.Errorf("direct_url = %v", m["direct_url"])
 	}
 	if m["status"] != "active" {
@@ -82,7 +82,7 @@ func TestBuildRegisteredPayloadOmitsAbsentURLs(t *testing.T) {
 func TestBuildRegisteredPayloadStable(t *testing.T) {
 	// Identical params marshal identically: the writer's deterministic id
 	// collapses a re-registration onto one event.
-	params := RegisterParams{NodeID: "m4", BaseURL: strptr("https://x/mcp"), Status: "active"}
+	params := RegisterParams{NodeID: "m4", BaseURL: strptr("https://x.example"), Status: "active"}
 	a, err := BuildRegisteredPayload(params)
 	if err != nil {
 		t.Fatalf("build a: %v", err)
@@ -95,6 +95,23 @@ func TestBuildRegisteredPayloadStable(t *testing.T) {
 	jb, _ := json.Marshal(b)
 	if string(ja) != string(jb) {
 		t.Fatalf("identical params produced different wire forms:\n a=%s\n b=%s", ja, jb)
+	}
+}
+
+func TestBuildRegisteredPayloadRejectsUnsafeOrigins(t *testing.T) {
+	for _, raw := range []string{
+		"https://node.example/mcp",
+		"https://user:pass@node.example",
+		"http://10.0.0.63:8080",
+	} {
+		_, err := BuildRegisteredPayload(RegisterParams{
+			NodeID:  "m4",
+			BaseURL: strptr(raw),
+			Status:  "active",
+		})
+		if err == nil || !strings.Contains(err.Error(), "invalid node origin") {
+			t.Errorf("base_url %q: expected invalid node origin, got %v", raw, err)
+		}
 	}
 }
 
@@ -123,7 +140,7 @@ func TestBuildRouteUpdatedPayloadOmitsBaseURL(t *testing.T) {
 	// route_updated never carries base_url — registration owns the ingress URL.
 	payload, err := BuildRouteUpdatedPayload(RouteParams{
 		NodeID:    "m4",
-		DirectURL: strptr("https://m4.peer.example/mcp"),
+		DirectURL: strptr("https://m4.peer.example"),
 		RelayVia:  []string{},
 		Status:    "unreachable",
 	})
@@ -134,7 +151,7 @@ func TestBuildRouteUpdatedPayloadOmitsBaseURL(t *testing.T) {
 	if _, present := m["base_url"]; present {
 		t.Errorf("route_updated must not carry base_url, got %v", m["base_url"])
 	}
-	if m["direct_url"] != "https://m4.peer.example/mcp" {
+	if m["direct_url"] != "https://m4.peer.example" {
 		t.Errorf("direct_url = %v", m["direct_url"])
 	}
 	if m["status"] != "unreachable" {

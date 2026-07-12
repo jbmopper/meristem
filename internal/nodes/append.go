@@ -40,6 +40,12 @@ func BuildRegisteredPayload(p RegisterParams) (any, error) {
 	if err := validateRelayVia(p.RelayVia); err != nil {
 		return nil, err
 	}
+	if err := validateOrigin("base_url", p.BaseURL); err != nil {
+		return nil, err
+	}
+	if err := validateOrigin("direct_url", p.DirectURL); err != nil {
+		return nil, err
+	}
 	return registeredPayload{
 		NodeID:    p.NodeID,
 		BaseURL:   p.BaseURL,
@@ -72,12 +78,25 @@ func BuildRouteUpdatedPayload(p RouteParams) (any, error) {
 	if err := validateRelayVia(p.RelayVia); err != nil {
 		return nil, err
 	}
+	if err := validateOrigin("direct_url", p.DirectURL); err != nil {
+		return nil, err
+	}
 	return routeUpdatedPayload{
 		NodeID:    p.NodeID,
 		DirectURL: p.DirectURL,
 		RelayVia:  p.RelayVia,
 		Status:    p.Status,
 	}, nil
+}
+
+func validateOrigin(field string, value *string) error {
+	if value == nil {
+		return nil
+	}
+	if err := domain.ValidateNodeOrigin(*value); err != nil {
+		return fmt.Errorf("%s %q: %w", field, *value, err)
+	}
+	return nil
 }
 
 // validateRelayVia reports the first relay hop that is not a DNS-safe node_id.

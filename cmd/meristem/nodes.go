@@ -98,7 +98,7 @@ func registerNode(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer
 	var relayVia stringSliceFlag
 	fs.Var(&baseURL, "base-url", "registered ingress base URL (optional)")
 	fs.Var(&directURL, "direct-url", "direct peer route URL (optional)")
-	fs.Var(&relayVia, "relay-via", "node id to relay through; repeatable")
+	fs.Var(&relayVia, "relay-via", "legacy queue-host node id; repeatable")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -144,7 +144,7 @@ func updateNodeRoute(ctx context.Context, pool *pgxpool.Pool, writer *events.Wri
 	var directURL optionalStringFlag
 	var relayVia stringSliceFlag
 	fs.Var(&directURL, "direct-url", "direct peer route URL (optional; omitted clears it)")
-	fs.Var(&relayVia, "relay-via", "node id to relay through; repeatable (omitted clears the chain)")
+	fs.Var(&relayVia, "relay-via", "legacy queue-host node id; repeatable (omitted clears the list)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

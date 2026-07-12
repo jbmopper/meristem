@@ -31,7 +31,7 @@ func TestNodeCommandPaths(t *testing.T) {
 	// register: hub with an ingress base_url and a relay hop, no direct route.
 	if err := registerNode(ctx, pool, writer, actor, []string{
 		"--node-id", "m4",
-		"--base-url", "https://ingress.example/mcp",
+		"--base-url", "https://ingress.example",
 		"--relay-via", "den",
 		"--status", "active",
 	}); err != nil {
@@ -40,7 +40,7 @@ func TestNodeCommandPaths(t *testing.T) {
 
 	// list shows the row.
 	row := listRow(t, ctx, pool, "m4")
-	if row[1] != "https://ingress.example/mcp" {
+	if row[1] != "https://ingress.example" {
 		t.Fatalf("base_url column = %q", row[1])
 	}
 	if row[2] != "-" {
@@ -57,7 +57,7 @@ func TestNodeCommandPaths(t *testing.T) {
 	before := countNodeEvents(t, ctx, pool)
 	if err := registerNode(ctx, pool, writer, actor, []string{
 		"--node-id", "m4",
-		"--base-url", "https://ingress.example/mcp",
+		"--base-url", "https://ingress.example",
 		"--relay-via", "den",
 		"--status", "active",
 	}); err != nil {
@@ -70,7 +70,7 @@ func TestNodeCommandPaths(t *testing.T) {
 	// a changed field (status) appends a fresh event and updates the row.
 	if err := registerNode(ctx, pool, writer, actor, []string{
 		"--node-id", "m4",
-		"--base-url", "https://ingress.example/mcp",
+		"--base-url", "https://ingress.example",
 		"--relay-via", "den",
 		"--status", "unreachable",
 	}); err != nil {
@@ -87,16 +87,16 @@ func TestNodeCommandPaths(t *testing.T) {
 	// the relay chain, and flip status back to active. base_url is untouched.
 	if err := updateNodeRoute(ctx, pool, writer, actor, []string{
 		"--node-id", "m4",
-		"--direct-url", "https://m4.peer.example/mcp",
+		"--direct-url", "https://m4.peer.example",
 		"--status", "active",
 	}); err != nil {
 		t.Fatalf("updateNodeRoute: %v", err)
 	}
 	after := listRow(t, ctx, pool, "m4")
-	if after[1] != "https://ingress.example/mcp" {
+	if after[1] != "https://ingress.example" {
 		t.Fatalf("update-route clobbered base_url: %q", after[1])
 	}
-	if after[2] != "https://m4.peer.example/mcp" {
+	if after[2] != "https://m4.peer.example" {
 		t.Fatalf("direct_url after update-route = %q", after[2])
 	}
 	if after[3] != "-" {
@@ -111,7 +111,7 @@ func TestNodeCommandPaths(t *testing.T) {
 	// the final A payload matches the first route update byte-for-byte.
 	routeA := []string{
 		"--node-id", "m4",
-		"--direct-url", "https://m4.peer.example/mcp",
+		"--direct-url", "https://m4.peer.example",
 		"--status", "active",
 	}
 	routeCount := countNodeEvents(t, ctx, pool)
@@ -135,7 +135,7 @@ func TestNodeCommandPaths(t *testing.T) {
 		t.Fatalf("A -> B -> A appended %d events, want 2", got-routeCount)
 	}
 	final := listRow(t, ctx, pool, "m4")
-	if final[2] != "https://m4.peer.example/mcp" || final[3] != "-" || final[4] != "active" {
+	if final[2] != "https://m4.peer.example" || final[3] != "-" || final[4] != "active" {
 		t.Fatalf("final route A not restored: %v", final)
 	}
 }

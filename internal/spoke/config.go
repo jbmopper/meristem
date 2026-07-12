@@ -80,6 +80,12 @@ func LoadConfig() (Config, error) {
 	if cfg.HubBaseURL == "" {
 		return Config{}, fmt.Errorf("spoke: %s is required (the hub base URL to poll)", EnvHubURL)
 	}
+	if err := domain.ValidateNodeOrigin(cfg.HubBaseURL); err != nil {
+		return Config{}, fmt.Errorf("spoke: %s must be a credential-safe origin: %w", EnvHubURL, err)
+	}
+	if err := domain.ValidateNodeOrigin(cfg.LocalURL); err != nil {
+		return Config{}, fmt.Errorf("spoke: %s must be a credential-safe origin: %w", EnvLocalURL, err)
+	}
 	if cfg.NodeID == "" {
 		return Config{}, fmt.Errorf("spoke: %s is required (this node's DNS-safe node id)", EnvNodeID)
 	}

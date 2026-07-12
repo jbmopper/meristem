@@ -50,6 +50,12 @@ func applyRegisteredV1(ctx context.Context, tx pgx.Tx, event domain.Event) error
 	if p.Status == "" {
 		return fmt.Errorf("node.registered: status is required")
 	}
+	if err := validateOrigin("base_url", p.BaseURL); err != nil {
+		return fmt.Errorf("node.registered: %w", err)
+	}
+	if err := validateOrigin("direct_url", p.DirectURL); err != nil {
+		return fmt.Errorf("node.registered: %w", err)
+	}
 	relay, err := normalizeRelayVia(p.RelayVia)
 	if err != nil {
 		return fmt.Errorf("node.registered: %w", err)
@@ -101,6 +107,9 @@ func applyRouteUpdatedV1(ctx context.Context, tx pgx.Tx, event domain.Event) err
 	}
 	if p.Status == "" {
 		return fmt.Errorf("node.route_updated: status is required")
+	}
+	if err := validateOrigin("direct_url", p.DirectURL); err != nil {
+		return fmt.Errorf("node.route_updated: %w", err)
 	}
 	relay, err := normalizeRelayVia(p.RelayVia)
 	if err != nil {
