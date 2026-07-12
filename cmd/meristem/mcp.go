@@ -18,6 +18,7 @@ import (
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
+	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
@@ -55,6 +56,7 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 		Access:              access.NewService(pool),
 		Idempotency:         idempotency.NewMiddleware(pool, writer),
 		Inbox:               inbox.NewService(pool, writer),
+		OAuthClientAdmin:    oauth.NewClientAdminService(pool, writer),
 		WorkItems:           workitems.NewService(pool, writer),
 		Approvals:           approvalSvc,
 		HTTPConnector:       httpconnector.NewService(pool, writer, approvalSvc, nil),

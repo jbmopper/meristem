@@ -20,6 +20,7 @@ import (
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/httpconnector"
+	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
 	"github.com/jbmopper/meristem/internal/registry"
@@ -64,6 +65,8 @@ func (s *Server) buildTools() []Tool {
 		s.toolWorkItemsGet(),
 		s.toolApprovalsListForWorkItem(),
 		s.toolApprovalsGet(),
+		s.toolOAuthClientsBindActor(),
+		s.toolOAuthClientsRevoke(),
 		s.toolWorkItemsCreate(),
 		s.toolWorkItemsSpawnChild(),
 		s.toolWorkItemsAppendEvent(),
@@ -80,6 +83,69 @@ func (s *Server) buildTools() []Tool {
 		}
 	}
 	return tools
+}
+
+func (s *Server) toolOAuthClientsBindActor() Tool {
+	return Tool{
+		Name:        "oauth_clients.bind_actor",
+		Description: "Bind a registered OAuth client to a pre-provisioned provider actor and sealed authority profile.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"client_id", "actor_token_id", "authority_profile"}, map[string]any{
+			"client_id":         schemaString("Registered OAuth client id."),
+			"actor_token_id":    schemaString("Pre-provisioned provider actor token UUID."),
+			"authority_profile": schemaString("Sealed provider authority profile."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.OAuthClientAdmin == nil {
+				return nil, errors.New("oauth client administration service not configured")
+			}
+			var args struct {
+				ClientID         string    `json:"client_id"`
+				ActorTokenID     uuid.UUID `json:"actor_token_id"`
+				AuthorityProfile string    `json:"authority_profile"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			if err := s.deps.OAuthClientAdmin.BindActor(ctx, args.ClientID, args.ActorTokenID, args.AuthorityProfile, actor); err != nil {
+				return nil, oauthClientAdminToolErr(err)
+			}
+			return map[string]any{
+				"client_id":         args.ClientID,
+				"actor_token_id":    args.ActorTokenID,
+				"authority_profile": args.AuthorityProfile,
+			}, nil
+		},
+	}
+}
+
+func (s *Server) toolOAuthClientsRevoke() Tool {
+	return Tool{
+		Name:        "oauth_clients.revoke",
+		Description: "Revoke a registered OAuth client and its current grants.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"client_id"}, map[string]any{
+			"client_id": schemaString("Registered OAuth client id."),
+			"reason":    schemaString("Optional human-readable revocation reason."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.OAuthClientAdmin == nil {
+				return nil, errors.New("oauth client administration service not configured")
+			}
+			var args struct {
+				ClientID string `json:"client_id"`
+				Reason   string `json:"reason"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			if err := s.deps.OAuthClientAdmin.Revoke(ctx, args.ClientID, args.Reason, actor); err != nil {
+				return nil, oauthClientAdminToolErr(err)
+			}
+			// The canonical REST operation returns 204 with no response body.
+			return nil, nil
+		},
+	}
 }
 
 func (s *Server) toolBacklogReadiness() Tool {
@@ -1458,6 +1524,21 @@ func approvalToolErr(err error) error {
 		return replayableToolErr(fmt.Errorf("invalid_decision: decision must be approved or denied"))
 	case errors.Is(err, approvals.ErrInvalidRequest):
 		return replayableToolErr(err)
+	default:
+		return err
+	}
+}
+
+func oauthClientAdminToolErr(err error) error {
+	switch {
+	case errors.Is(err, oauth.ErrOAuthClientAdminDenied):
+		return replayableToolErr(errors.New("oauth_client_admin_denied: explicit non-root human OAuth client administration scope required"))
+	case errors.Is(err, oauth.ErrClientNotFound):
+		return replayableToolErr(errors.New("oauth_client_not_found: OAuth client not found"))
+	case errors.Is(err, oauth.ErrInvalidClientAdminInput):
+		return replayableToolErr(fmt.Errorf("invalid_oauth_client_admin_request: %w", err))
+	case errors.Is(err, oauth.ErrOAuthClientConflict):
+		return replayableToolErr(fmt.Errorf("oauth_client_conflict: %w", err))
 	default:
 		return err
 	}
