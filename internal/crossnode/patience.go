@@ -51,13 +51,28 @@ type attemptedPayload struct {
 }
 
 type expiredPayload struct {
-	PayloadVersion int          `json:"payload_version,omitempty"`
-	CommandQueueID uuid.UUID    `json:"command_queue_id"`
-	TargetNodeID   string       `json:"target_node_id"`
-	Reason         ExpiryReason `json:"reason"`
-	ExpiredAt      time.Time    `json:"expired_at"`
-	AttemptCount   int          `json:"attempt_count"`
+	PayloadVersion    int             `json:"payload_version,omitempty"`
+	CommandQueueID    uuid.UUID       `json:"command_queue_id"`
+	TargetNodeID      string          `json:"target_node_id"`
+	Reason            ExpiryReason    `json:"reason"`
+	ExpiredAt         time.Time       `json:"expired_at"`
+	AttemptCount      int             `json:"attempt_count"`
+	OriginNodeID      string          `json:"origin_node_id"`
+	CausingWorkItemID *uuid.UUID      `json:"causing_work_item_id,omitempty"`
+	CauseResolution   CauseResolution `json:"cause_resolution"`
 }
+
+type CauseResolution string
+
+const (
+	CauseNone                 CauseResolution = "none"
+	CauseLocalFailed          CauseResolution = "local_work_item_failed"
+	CauseLocalAlreadyTerminal CauseResolution = "local_work_item_already_terminal"
+	CauseLocalMissing         CauseResolution = "local_work_item_missing"
+	CauseRemoteNotification   CauseResolution = "remote_notification_required"
+)
+
+const CrossNodeDeliveryExpiredReason = "cross_node_delivery_expired"
 
 // RecordAttemptInput identifies one logical local execution. AttemptKey must
 // be stable across retries of recording that execution and unique across
@@ -157,13 +172,18 @@ type ExpireDueInput struct {
 	Limit        int
 	ActorTokenID uuid.UUID
 	Source       domain.Source
+	// LocalNodeID lets the queue reconciler prove that an origin-homed causing
+	// work item is local before transitioning it. Empty or invalid means no
+	// local mutation is allowed; the outcome requires remote notification.
+	LocalNodeID string
 }
 
 type ExpireResult struct {
-	CommandQueueID uuid.UUID
-	EventID        uuid.UUID
-	TargetNodeID   string
-	Reason         ExpiryReason
+	CommandQueueID  uuid.UUID
+	EventID         uuid.UUID
+	TargetNodeID    string
+	Reason          ExpiryReason
+	CauseResolution CauseResolution
 }
 
 // ExpireDue appends terminal command.expired events for rows whose 24-hour
@@ -173,6 +193,10 @@ type ExpireResult struct {
 func (s *QueueService) ExpireDue(ctx context.Context, in ExpireDueInput) ([]ExpireResult, error) {
 	if in.Now.IsZero() || in.ActorTokenID == uuid.Nil || !in.Source.Valid() {
 		return nil, ErrInvalidExpiryInput
+	}
+	localNodeID := in.LocalNodeID
+	if !domain.ValidNodeID(localNodeID) {
+		localNodeID = ""
 	}
 	limit := in.Limit
 	if limit <= 0 {
@@ -188,7 +212,7 @@ func (s *QueueService) ExpireDue(ctx context.Context, in ExpireDueInput) ([]Expi
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, target_node_id, attempt_count
+		SELECT id, target_node_id, attempt_count, origin_node_id, causing_work_item_id
 		FROM command_queue
 		WHERE state = 'pending' AND (attempt_count >= $1 OR expires_at <= $2)
 		ORDER BY expires_at, queued_at, id
@@ -202,11 +226,13 @@ func (s *QueueService) ExpireDue(ctx context.Context, in ExpireDueInput) ([]Expi
 		id       uuid.UUID
 		target   string
 		attempts int
+		origin   string
+		cause    *uuid.UUID
 	}
 	var due []dueRow
 	for rows.Next() {
 		var row dueRow
-		if err := rows.Scan(&row.id, &row.target, &row.attempts); err != nil {
+		if err := rows.Scan(&row.id, &row.target, &row.attempts, &row.origin, &row.cause); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("crossnode: scan due command: %w", err)
 		}
@@ -224,6 +250,10 @@ func (s *QueueService) ExpireDue(ctx context.Context, in ExpireDueInput) ([]Expi
 		if row.attempts >= MaxCommandAttempts {
 			reason = ExpiryAttemptsExhausted
 		}
+		causeResolution, causeState, err := resolveExpiryCause(ctx, tx, row.origin, row.cause, localNodeID)
+		if err != nil {
+			return nil, err
+		}
 		id, _, err := s.writer.Append(ctx, tx, events.Spec{
 			SubjectKind:  domain.SubjectNode,
 			SubjectID:    nodes.NodeSubjectID(row.target),
@@ -231,20 +261,62 @@ func (s *QueueService) ExpireDue(ctx context.Context, in ExpireDueInput) ([]Expi
 			Source:       in.Source,
 			ActorTokenID: &in.ActorTokenID,
 			Payload: expiredPayload{
-				CommandQueueID: row.id,
-				TargetNodeID:   row.target,
-				Reason:         reason,
-				ExpiredAt:      in.Now.UTC(),
-				AttemptCount:   row.attempts,
+				CommandQueueID:    row.id,
+				TargetNodeID:      row.target,
+				Reason:            reason,
+				ExpiredAt:         in.Now.UTC(),
+				AttemptCount:      row.attempts,
+				OriginNodeID:      row.origin,
+				CausingWorkItemID: row.cause,
+				CauseResolution:   causeResolution,
 			},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("crossnode: append command.expired: %w", err)
 		}
-		results = append(results, ExpireResult{CommandQueueID: row.id, EventID: id, TargetNodeID: row.target, Reason: reason})
+		if causeResolution == CauseLocalFailed {
+			if _, _, err := s.writer.Append(ctx, tx, events.Spec{
+				SubjectKind:   domain.SubjectWorkItem,
+				SubjectID:     *row.cause,
+				Kind:          domain.EventWorkItemTransitioned,
+				Source:        in.Source,
+				ActorTokenID:  &in.ActorTokenID,
+				Discriminator: row.id.String(),
+				Payload: map[string]any{
+					"from":             causeState,
+					"to":               domain.WorkItemFailed,
+					"reason":           CrossNodeDeliveryExpiredReason,
+					"command_queue_id": row.id,
+				},
+			}); err != nil {
+				return nil, fmt.Errorf("crossnode: fail causing work item: %w", err)
+			}
+		}
+		results = append(results, ExpireResult{CommandQueueID: row.id, EventID: id, TargetNodeID: row.target, Reason: reason, CauseResolution: causeResolution})
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return results, nil
+}
+
+func resolveExpiryCause(ctx context.Context, tx pgx.Tx, origin string, cause *uuid.UUID, localNodeID string) (CauseResolution, domain.WorkItemState, error) {
+	if cause == nil || *cause == uuid.Nil {
+		return CauseNone, "", nil
+	}
+	if localNodeID == "" || origin != localNodeID {
+		return CauseRemoteNotification, "", nil
+	}
+	var state domain.WorkItemState
+	err := tx.QueryRow(ctx, `SELECT state FROM work_items WHERE id = $1 FOR UPDATE`, *cause).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CauseLocalMissing, "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("crossnode: resolve causing work item: %w", err)
+	}
+	if state.Terminal() {
+		return CauseLocalAlreadyTerminal, state, nil
+	}
+	return CauseLocalFailed, state, nil
 }

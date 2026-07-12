@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/access"
@@ -44,11 +45,16 @@ func TestQueueFirstTwoNodeAcceptance(t *testing.T) {
 
 	hubPool, hubToken := newAcceptanceNode(t, ctx, "hub", logger, []string{
 		crossnode.QueueWriteScope("spoke-a", crossnode.OperationClassWorkItemsWrite),
+		crossnode.OriginScope("hub"),
 		crossnode.QueueDrainScope("spoke-a"),
 		crossnode.QueueAckScope("spoke-a"),
 		access.ScopeFeedRead,
 	})
-	localPool, localToken := newAcceptanceNode(t, ctx, "spoke-a", logger, []string{access.ScopeWorkItemsCreate})
+	localPool, localToken := newAcceptanceNode(t, ctx, "spoke-a", logger, []string{
+		access.ScopeWorkItemsCreate,
+		crossnode.TargetExecuteScope("spoke-a"),
+		crossnode.OriginScope("hub"),
+	})
 
 	// Server constructors capture MERISTEM_NODE_ID, so the two handlers keep
 	// independent identities even though this test process has one environment.
@@ -114,6 +120,7 @@ func TestQueueFirstTwoNodeAcceptance(t *testing.T) {
 	}
 	assertCount(t, localPool, "SELECT count(*) FROM work_items", 1)
 	assertEventCount(t, localPool, domain.EventWorkItemCreated, 1)
+	assertRemoteProvenance(t, hubPool, localPool)
 	assertLocalIdempotencyRecord(t, localPool, originKey)
 	assertCount(t, hubPool, "SELECT count(*) FROM command_queue WHERE target_node_id = 'spoke-a' AND state = 'pending'", 1)
 
@@ -146,6 +153,34 @@ func TestQueueFirstTwoNodeAcceptance(t *testing.T) {
 	if readyResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(readyResp.Body)
 		t.Fatalf("local readiness during hub loss: status=%d body=%s", readyResp.StatusCode, body)
+	}
+}
+
+func assertRemoteProvenance(t *testing.T, hubPool, localPool *pgxpool.Pool) {
+	t.Helper()
+	var queueID, originActor uuid.UUID
+	if err := hubPool.QueryRow(context.Background(), `
+		SELECT id, origin_actor_token_id FROM command_queue LIMIT 1
+	`).Scan(&queueID, &originActor); err != nil {
+		t.Fatalf("read queued provenance: %v", err)
+	}
+	var localActor, payloadOriginActor, payloadQueue uuid.UUID
+	var localSource, originNode, originSource string
+	if err := localPool.QueryRow(context.Background(), `
+		SELECT actor_token_id, source,
+		       payload->'remote_provenance'->>'origin_node_id',
+		       (payload->'remote_provenance'->>'origin_actor_token_id')::uuid,
+		       payload->'remote_provenance'->>'origin_actor_source',
+		       (payload->'remote_provenance'->>'queue_command_id')::uuid
+		FROM events WHERE kind=$1 LIMIT 1
+	`, domain.EventWorkItemCreated).Scan(&localActor, &localSource, &originNode, &payloadOriginActor, &originSource, &payloadQueue); err != nil {
+		t.Fatalf("read target event provenance: %v", err)
+	}
+	if localActor == originActor {
+		t.Fatal("target event impersonated the remote actor")
+	}
+	if localSource != string(domain.SourceAgent) || originNode != "hub" || originSource != string(domain.SourceAgent) || payloadOriginActor != originActor || payloadQueue != queueID {
+		t.Fatalf("target provenance local=(%s,%s) remote=(%s,%s,%s,%s)", localActor, localSource, originNode, payloadOriginActor, originSource, payloadQueue)
 	}
 }
 

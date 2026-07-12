@@ -20,8 +20,9 @@ import (
 // POST /v1/crossnode/commands: the home-node call to run, minus the
 // idempotency and routing metadata, which travel in headers.
 type crossnodeCommandRequest struct {
-	CommandPath string          `json:"command_path"`
-	CommandBody json.RawMessage `json:"command_body"`
+	CommandPath       string          `json:"command_path"`
+	CommandBody       json.RawMessage `json:"command_body"`
+	CausingWorkItemID *uuid.UUID      `json:"causing_work_item_id,omitempty"`
 }
 
 // handleCrossnodeCommand durably queues one allowlisted canonical REST
@@ -41,6 +42,20 @@ func (s *Server) handleCrossnodeCommand(w http.ResponseWriter, r *http.Request) 
 	if !validateCrossnodeQueueRequest(w, s.nodeID, actor, queueFor, req.CommandPath, r.Header) {
 		return
 	}
+	// A local causing item may be transitioned when queue patience expires, so
+	// binding it requires ordinary write authority in addition to the narrow
+	// queue capability. A remote origin is recorded for later notification and
+	// is never mutated by this queue host.
+	if req.CausingWorkItemID != nil && strings.TrimSpace(r.Header.Get(crossnode.HeaderOriginNode)) == s.nodeID {
+		if s.access == nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "database_unavailable", "access service is not configured")
+			return
+		}
+		if err := s.access.CanWriteWorkItem(r.Context(), actor, *req.CausingWorkItemID); err != nil {
+			writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot bind this causing work item")
+			return
+		}
+	}
 	if s.crossnode == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "crossnode_unavailable",
 			"cross-node queue service is not configured")
@@ -54,6 +69,7 @@ func (s *Server) handleCrossnodeCommand(w http.ResponseWriter, r *http.Request) 
 		OriginIdempotencyKey: r.Header.Get(crossnode.HeaderIdempotencyKey),
 		OriginActorTokenID:   &actor.ID,
 		Source:               actor.Source,
+		CausingWorkItemID:    req.CausingWorkItemID,
 	})
 	if err != nil {
 		if errors.Is(err, crossnode.ErrInvalidTargetNodeID) {
@@ -350,7 +366,7 @@ func validateCrossnodeQueueRequest(w http.ResponseWriter, localNodeID string, ac
 			"X-Meristem-Origin-Node must name a DNS-safe originating node")
 		return false
 	}
-	if err := crossnode.AuthorizeQueueWrite(actor, queueFor, commandPath); err != nil {
+	if err := crossnode.AuthorizeQueueWrite(actor, queueFor, originNodeID, commandPath); err != nil {
 		if errors.Is(err, crossnode.ErrInvalidCommandPath) {
 			writeAPIError(w, http.StatusBadRequest, "invalid_command_path",
 				"command_path is not an allowlisted canonical REST mutation")

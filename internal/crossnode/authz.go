@@ -32,6 +32,15 @@ func QueueAckScope(targetNodeID string) string {
 	return "crossnode.ack:" + targetNodeID
 }
 
+// OriginScope binds a peer-delivery credential to the origin node it may
+// assert. Syntax validation alone is not an authentication boundary.
+func OriginScope(originNodeID string) string { return "crossnode.origin:" + originNodeID }
+
+// TargetExecuteScope authorizes a dedicated target-local token to execute
+// authenticated remote envelopes without granting that authority to ordinary
+// local work-item writers.
+func TargetExecuteScope(targetNodeID string) string { return "crossnode.execute:" + targetNodeID }
+
 // OperationClassForCommandPath validates a Stage 1 queued command path and
 // maps it to the narrow scope class used at the queue-host boundary.
 func OperationClassForCommandPath(commandPath string) (string, error) {
@@ -44,12 +53,15 @@ func OperationClassForCommandPath(commandPath string) (string, error) {
 // AuthorizeQueueWrite fails closed for root, revoked, legacy unscoped, and
 // wrong-target tokens. Cross-node credentials are explicit capabilities and
 // do not inherit the local legacy-unscoped compatibility shortcut.
-func AuthorizeQueueWrite(actor domain.Token, targetNodeID, commandPath string) error {
+func AuthorizeQueueWrite(actor domain.Token, targetNodeID, originNodeID, commandPath string) error {
 	operationClass, err := OperationClassForCommandPath(commandPath)
 	if err != nil {
 		return err
 	}
-	return authorizeExactScope(actor, QueueWriteScope(targetNodeID, operationClass))
+	if err := authorizeExactScope(actor, QueueWriteScope(targetNodeID, operationClass)); err != nil {
+		return err
+	}
+	return authorizeExactScope(actor, OriginScope(originNodeID))
 }
 
 func AuthorizeQueueDrain(actor domain.Token, targetNodeID string) error {
@@ -58,6 +70,13 @@ func AuthorizeQueueDrain(actor domain.Token, targetNodeID string) error {
 
 func AuthorizeQueueAck(actor domain.Token, targetNodeID string) error {
 	return authorizeExactScope(actor, QueueAckScope(targetNodeID))
+}
+
+func AuthorizeTargetExecution(actor domain.Token, targetNodeID, originNodeID string) error {
+	if err := authorizeExactScope(actor, TargetExecuteScope(targetNodeID)); err != nil {
+		return err
+	}
+	return authorizeExactScope(actor, OriginScope(originNodeID))
 }
 
 func authorizeExactScope(actor domain.Token, required string) error {

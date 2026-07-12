@@ -93,6 +93,14 @@ type Command struct {
 	// only as structural provenance; the receiver still derives actor identity
 	// and source exclusively from its locally authenticated bearer.
 	OriginNodeID string
+	// OriginActorTokenID and OriginActorSource identify the actor on the
+	// originating node. They are provenance only: the receiving event remains
+	// attributed to the target-local bearer that authorized execution.
+	OriginActorTokenID *uuid.UUID
+	OriginActorSource  domain.Source
+	// CausingWorkItemID is the origin-homed item whose finite delivery policy
+	// owns this command. Nil means the caller has no owning work item.
+	CausingWorkItemID *uuid.UUID
 	// TargetNodeID is the DNS-safe home node id the command is bound for. It
 	// is the X-Meristem-Queue-For value for KindQueue candidates.
 	TargetNodeID string

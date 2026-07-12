@@ -55,6 +55,19 @@ func applyQueuedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	if p.OriginIdempotencyKey == "" {
 		return fmt.Errorf("command.queued: origin_idempotency_key is required")
 	}
+	originNodeID := p.OriginNodeID
+	if originNodeID == "" {
+		originNodeID = "legacy-unknown"
+	} else if !domain.ValidNodeID(originNodeID) {
+		return fmt.Errorf("command.queued: invalid origin_node_id %q", originNodeID)
+	}
+	originSource := p.OriginActorSource
+	if originSource == "" {
+		originSource = event.Source
+	}
+	if !originSource.Valid() {
+		return fmt.Errorf("command.queued: invalid origin_actor_source %q", originSource)
+	}
 	body := p.CommandBody
 	if len(body) == 0 {
 		body = json.RawMessage("{}")
@@ -62,11 +75,14 @@ func applyQueuedV1(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO command_queue (
 			id, target_node_id, command_path, command_body,
-			origin_idempotency_key, origin_actor_token_id, queued_at, expires_at
+			origin_idempotency_key, origin_actor_token_id, origin_node_id,
+			origin_actor_source, causing_work_item_id, queued_at, expires_at
 		)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (id) DO NOTHING
-	`, event.ID, p.TargetNodeID, p.CommandPath, []byte(body), p.OriginIdempotencyKey, p.OriginActorTokenID, event.OccurredAt, event.OccurredAt.Add(CommandQueuePatience))
+	`, event.ID, p.TargetNodeID, p.CommandPath, []byte(body), p.OriginIdempotencyKey,
+		p.OriginActorTokenID, originNodeID, originSource,
+		p.CausingWorkItemID, event.OccurredAt, event.OccurredAt.Add(CommandQueuePatience))
 	if err != nil {
 		return fmt.Errorf("command.queued: insert projection: %w", err)
 	}

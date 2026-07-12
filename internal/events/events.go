@@ -150,6 +150,10 @@ func NewWriter(registry *projections.Registry) *Writer {
 // be the unit of failure: this function never commits or rolls back; the
 // caller decides.
 func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID, fresh bool, err error) {
+	spec, err = enrichSpecWithRemoteProvenance(ctx, spec)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
 	id, err = DeterministicID(spec)
 	if err != nil {
 		return uuid.Nil, false, err
