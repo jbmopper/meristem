@@ -37,21 +37,26 @@ type HTTPOptions struct {
 	Profile *HTTPToolProfile
 }
 
+// ReadOnlyHTTPTools is the provider-safe HTTP surface. The non-nil allowlist
+// also selects the structural provider context reducer in tool handlers; stdio
+// MCP and unrestricted in-process HTTP calls retain the ordinary operator DTOs.
 func ReadOnlyHTTPTools() map[string]bool {
 	return map[string]bool{
-		"backlog.readiness":            true,
-		"feed.read":                    true,
-		"projections.list":             true,
-		"projections.get":              true,
-		"registry.list":                true,
-		"registry.get":                 true,
-		"work_items.list":              true,
-		"work_items.get":               true,
-		"approvals.list_for_work_item": true,
-		"approvals.get":                true,
-		"deterministic_errors.list":    true,
-		"deterministic_errors.get":     true,
+		"feed.read":       true,
+		"work_items.list": true,
+		"work_items.get":  true,
 	}
+}
+
+type providerSafeContextKey struct{}
+
+func withProviderSafeContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, providerSafeContextKey{}, true)
+}
+
+func isProviderSafeContext(ctx context.Context) bool {
+	value, _ := ctx.Value(providerSafeContextKey{}).(bool)
+	return value
 }
 
 // HandleHTTPMessage dispatches one Streamable HTTP POST body using the actor
@@ -62,6 +67,12 @@ func (s *Server) HandleHTTPMessage(ctx context.Context, raw []byte, actor domain
 }
 
 func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, actor domain.Token, opts HTTPOptions) HTTPResponse {
+	// The API's provider route always supplies a non-nil allowlist. Treat that
+	// as both a tool filter and a response-data boundary so a future tool cannot
+	// accidentally return the ordinary raw event/work-item DTO through /mcp.
+	if opts.AllowedTools != nil {
+		ctx = withProviderSafeContext(ctx)
+	}
 	var msg rpcMessage
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
