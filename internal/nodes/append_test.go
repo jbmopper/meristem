@@ -98,6 +98,25 @@ func TestBuildRegisteredPayloadStable(t *testing.T) {
 	}
 }
 
+func TestBuildRegisteredPayloadCanonicalizesOriginsBeforeEventIdentity(t *testing.T) {
+	payload, err := BuildRegisteredPayload(RegisterParams{
+		NodeID:    "m4",
+		BaseURL:   strptr("HTTPS://Ingress.Example:443/"),
+		DirectURL: strptr("https://M4.Peer.Example:8443/"),
+		Status:    "active",
+	})
+	if err != nil {
+		t.Fatalf("BuildRegisteredPayload: %v", err)
+	}
+	m := marshal(t, payload)
+	if m["base_url"] != "https://ingress.example" {
+		t.Errorf("base_url = %v", m["base_url"])
+	}
+	if m["direct_url"] != "https://m4.peer.example:8443" {
+		t.Errorf("direct_url = %v", m["direct_url"])
+	}
+}
+
 func TestBuildRegisteredPayloadRejectsUnsafeOrigins(t *testing.T) {
 	for _, raw := range []string{
 		"https://node.example/mcp",

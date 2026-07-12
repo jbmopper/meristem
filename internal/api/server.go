@@ -35,6 +35,7 @@ import (
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/mcp"
+	"github.com/jbmopper/meristem/internal/nodes"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
@@ -54,6 +55,10 @@ const EnvHTTPAddr = "MERISTEM_HTTP_ADDR"
 // naming a peer is still queued, so a single-node deploy needs no config.
 const EnvNodeID = "MERISTEM_NODE_ID"
 
+// EnvRegistryHomeNodeID pins the only source identity accepted by the local
+// registry snapshot observation endpoint.
+const EnvRegistryHomeNodeID = "MERISTEM_REGISTRY_HOME_NODE_ID"
+
 // Defaults chosen to be reasonable behind a reverse proxy (Caddy/nginx). The
 // spec calls for TLS termination at that layer, not in-process.
 const (
@@ -72,6 +77,7 @@ type Server struct {
 	logger                *slog.Logger
 	addr                  string
 	nodeID                string
+	registryHomeNodeID    string
 	publicBaseURL         string
 	mux                   *http.ServeMux
 	writer                *events.Writer
@@ -96,6 +102,7 @@ type Server struct {
 	projections           *projectiondefs.Service
 	registry              *registry.Service
 	crossnode             *crossnode.QueueService
+	nodeSnapshots         *nodes.SnapshotService
 	oauthClients          *oauth.RegistrationService
 	policy                safety.Policy
 }
@@ -117,13 +124,14 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		addr = defaultAddr
 	}
 	s := &Server{
-		pool:          pool,
-		logger:        logger,
-		addr:          addr,
-		nodeID:        strings.TrimSpace(os.Getenv(EnvNodeID)),
-		publicBaseURL: normalizePublicBaseURL(os.Getenv(EnvPublicBaseURL)),
-		mux:           http.NewServeMux(),
-		policy:        policy,
+		pool:               pool,
+		logger:             logger,
+		addr:               addr,
+		nodeID:             strings.TrimSpace(os.Getenv(EnvNodeID)),
+		registryHomeNodeID: strings.TrimSpace(os.Getenv(EnvRegistryHomeNodeID)),
+		publicBaseURL:      normalizePublicBaseURL(os.Getenv(EnvPublicBaseURL)),
+		mux:                http.NewServeMux(),
+		policy:             policy,
 	}
 	if pool != nil {
 		s.writer = app.NewEventWriter()
@@ -147,6 +155,7 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		s.projections = projectiondefs.NewService(pool, s.writer)
 		s.registry = registry.NewService(pool, s.writer)
 		s.crossnode = crossnode.NewQueueService(pool, s.writer)
+		s.nodeSnapshots = nodes.NewSnapshotService(pool, s.writer)
 		s.oauthClients = oauth.NewRegistrationService(pool, s.writer)
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
@@ -193,6 +202,8 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /v1/crossnode/commands", s.protected(http.HandlerFunc(s.handleCrossnodeCommandsList)))
 	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/attempt", s.crossnodeAckCommand(http.HandlerFunc(s.handleCrossnodeCommandAttempt)))
 	s.mux.Handle("POST /v1/crossnode/commands/{event_id}/ack", s.crossnodeAckCommand(http.HandlerFunc(s.handleCrossnodeCommandAck)))
+	s.mux.Handle("GET /v1/nodes/registry-snapshot", s.protected(http.HandlerFunc(s.handleRegistrySnapshotRead)))
+	s.mux.Handle("POST /v1/nodes/registry-snapshot/observe", s.commandWithAccess(s.canObserveRegistrySnapshot, http.HandlerFunc(s.handleRegistrySnapshotObserve)))
 	s.mux.Handle("POST /v1/subactor-grants", s.command(http.HandlerFunc(s.handleCreateSubactorGrant)))
 	s.mux.Handle("POST /v1/policy-profile", s.commandWithAccess(s.canSwitchPolicyProfile, http.HandlerFunc(s.handleSwitchPolicyProfile)))
 	s.mux.Handle("POST /v1/tokens/revoke-all", s.commandWithAccess(s.canPanicRevokeTokens, http.HandlerFunc(s.handlePanicRevokeTokens)))
