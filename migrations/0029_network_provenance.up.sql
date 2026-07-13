@@ -25,4 +25,3 @@ ALTER TABLE command_queue
     ALTER COLUMN origin_actor_source SET NOT NULL,
     ADD CONSTRAINT command_queue_origin_actor_source_check
         CHECK (origin_actor_source IN ('human', 'agent', 'system'));
-

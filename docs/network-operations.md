@@ -135,8 +135,8 @@ curl --fail --silent --show-error https://hub.example.test/readyz
 ```
 
 After enqueueing a test command, confirm the hub row moves from `pending` to
-`done`, `refused`, `failed`, or `expired`. A command that remains `pending` after more than two poll
-intervals requires checking, in order:
+`done`, `refused`, `failed`, or `expired`. A command that remains `pending`
+after more than two poll intervals requires checking, in order:
 
 1. spoke process health and its `hub_reachable` tick field;
 2. outbound DNS, certificate validation, and connectivity to the hub;
@@ -163,8 +163,9 @@ The queue-host token must have `crossnode.outcomes:<origin>` and the local
 observer token must have `crossnode.observe:<queue-host>:<origin>`. Neither may
 be root. The cursor and every observed terminal fact are event-backed, so a
 queue-host outage retains both sides' last durable state and replay resumes
-without duplicating the origin transition. Alert on a stopped reconciler or on pending
-rows older than the configured worker tick, not by rewriting queue state.
+without duplicating the origin transition. Alert on a stopped reconciler or on
+pending rows older than the configured worker tick, not by rewriting queue
+state.
 
 During a hub outage, verify that the local node remains usable:
 
@@ -205,4 +206,14 @@ replay collapse, update, and outage retention across two databases:
 MERISTEM_INTEGRATION=1 \
 MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
 go test ./internal/nodes -run TestRegistrySyncTwoDatabaseReplayAndOutageRetention -count=1 -v
+```
+
+The outcome-return test expires a remotely caused command during a queue-host
+outage, then proves recovery produces exactly one origin observation and one
+origin-local work-item transition; replay and missing causes remain bounded:
+
+```bash
+MERISTEM_INTEGRATION=1 \
+MERISTEM_TEST_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
+go test ./internal/crossnode -run TestOutcomeReturnTwoNodeAcceptance -count=1 -v
 ```
