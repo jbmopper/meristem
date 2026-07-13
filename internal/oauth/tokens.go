@@ -163,6 +163,14 @@ func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (To
 		if _, _, err := s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthRefreshReuseDetected, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "token_id": tokenID, "detected_at_unix": now.Unix(), "reason": "rotated refresh token replayed"}}); err != nil {
 			return TokenPair{}, err
 		}
+		// RFC 9700 §4.14.2: replay of a rotated refresh token means either the
+		// attacker or the legitimate client now holds the live token, so the
+		// whole grant is compromised — revoke it, not just the replayed token.
+		if revoked == nil {
+			if _, _, err := s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthGrantRevoked, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "revoked_at_unix": now.Unix(), "reason": "refresh token reuse detected"}}); err != nil {
+				return TokenPair{}, err
+			}
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return TokenPair{}, err
 		}

@@ -165,18 +165,46 @@ func TestProviderOAuthLifecycle(t *testing.T) {
 	if rotated.RefreshToken == pair.RefreshToken {
 		t.Fatal("refresh token did not rotate")
 	}
+	if _, err := tokens.AuthenticateAccess(ctx, rotated.AccessToken, input.Resource); err != nil {
+		t.Fatalf("rotated access token before replay: %v", err)
+	}
+	// RFC 9700 §4.14.2: replaying a rotated-out refresh token means either the
+	// attacker or the legitimate client holds the live token, so reuse
+	// detection revokes the whole grant, not just the replayed token.
 	if _, err := tokens.Refresh(ctx, pair.RefreshToken, client.ClientID); !errors.Is(err, oauth.ErrRefreshReuse) {
 		t.Fatalf("reuse=%v", err)
 	}
-	if _, err := tokens.AuthenticateAccess(ctx, rotated.AccessToken, input.Resource); err != nil {
-		t.Fatalf("healthy successor grant was revoked by lost-response retry: %v", err)
+	if _, err := tokens.Refresh(ctx, rotated.RefreshToken, client.ClientID); !errors.Is(err, oauth.ErrInvalidGrant) {
+		t.Fatalf("rotated refresh token survived reuse detection: %v", err)
+	}
+	if _, err := tokens.AuthenticateAccess(ctx, rotated.AccessToken, input.Resource); !errors.Is(err, oauth.ErrInvalidAccessToken) {
+		t.Fatalf("outstanding access token survived reuse detection: %v", err)
+	}
+	if _, err := tokens.AuthenticateAccess(ctx, pair.AccessToken, input.Resource); !errors.Is(err, oauth.ErrInvalidAccessToken) {
+		t.Fatalf("pre-rotation access token survived reuse detection: %v", err)
 	}
 	var reuseEvents, revokeEvents int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthRefreshReuseDetected).Scan(&reuseEvents); err != nil || reuseEvents != 1 {
 		t.Fatalf("reuse events=%d err=%v", reuseEvents, err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthGrantRevoked).Scan(&revokeEvents); err != nil || revokeEvents != 0 {
-		t.Fatalf("reuse unexpectedly revoked grant: events=%d err=%v", revokeEvents, err)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthGrantRevoked).Scan(&revokeEvents); err != nil || revokeEvents != 1 {
+		t.Fatalf("revoke events=%d err=%v", revokeEvents, err)
+	}
+	var grantRevokedAt *time.Time
+	var compromiseReason string
+	if err := pool.QueryRow(ctx, `SELECT revoked_at,compromise_reason FROM oauth_grants WHERE compromise_reason IS NOT NULL`).Scan(&grantRevokedAt, &compromiseReason); err != nil {
+		t.Fatal(err)
+	}
+	if grantRevokedAt == nil || compromiseReason != "refresh token reuse detected" {
+		t.Fatalf("grant projection revoked_at=%v reason=%q", grantRevokedAt, compromiseReason)
+	}
+	// A second replay still reports reuse but must not append a second
+	// revocation for the already-revoked grant.
+	if _, err := tokens.Refresh(ctx, pair.RefreshToken, client.ClientID); !errors.Is(err, oauth.ErrRefreshReuse) {
+		t.Fatalf("second reuse=%v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthGrantRevoked).Scan(&revokeEvents); err != nil || revokeEvents != 1 {
+		t.Fatalf("second replay double-revoked: events=%d err=%v", revokeEvents, err)
 	}
 
 	writeAuthority, err := access.ReduceProviderAuthority(access.ProviderOwnerTrackerWriteV1, uuid.Nil)

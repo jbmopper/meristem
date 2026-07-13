@@ -169,9 +169,12 @@ curl -fsS -X POST \
 
 Continue the pending authorization page. Authorization codes are single-use
 and the authorization request expires after 10 minutes. Access tokens live for
-1 hour. Refresh tokens live for 30 days and rotate on every use. Reuse of an
-old refresh token is recorded and rejected as `invalid_grant` without revoking
-the healthy successor (so a lost token response does not destroy the session).
+1 hour. Refresh tokens live for 30 days and rotate on every use. Replay of a
+rotated-out refresh token is recorded, rejected as `invalid_grant`, and revokes
+the whole grant — the live rotated refresh token and any outstanding access
+tokens stop working (RFC 9700 §4.14.2: after a replay either the attacker or
+the legitimate client holds the live token, so neither can be trusted). The
+provider client must re-run the authorization flow to obtain a new grant.
 Approval is per new grant or authority change, not every access-token refresh.
 
 ## First read/write smoke
