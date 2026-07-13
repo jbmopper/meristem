@@ -85,6 +85,11 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 	if canonicalTool == "oauth_clients.revoke" {
 		return CanRevokeOAuthClient(actor)
 	}
+	// A grant is a strict subset of its client's authority, so grant revocation
+	// reuses the client revoke scope rather than provisioning a new one.
+	if canonicalTool == "oauth_grants.revoke" {
+		return CanRevokeOAuthClient(actor)
+	}
 	if canonicalTool == "policy_profile.switch" {
 		// Evaluated before the root/legacy shortcut: the switch tool is
 		// human-and-non-root regardless of scope breadth.

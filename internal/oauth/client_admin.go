@@ -21,6 +21,7 @@ var (
 	ErrOAuthClientAdminDenied  = errors.New("oauth: client administration denied")
 	ErrInvalidClientAdminInput = errors.New("oauth: invalid client administration input")
 	ErrOAuthClientConflict     = errors.New("oauth: client administration conflict")
+	ErrGrantNotFound           = errors.New("oauth: grant not found")
 )
 
 type ClientAdminService struct {
@@ -139,6 +140,48 @@ func (s *ClientAdminService) Revoke(ctx context.Context, clientID, reason string
 	})
 	if err != nil {
 		return fmt.Errorf("oauth: revoke client event: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// RevokeGrant appends one oauth_grant.revoked event for a single grant. It
+// reuses the oauth_clients.revoke authority: a grant is a strict subset of its
+// client's authority, so revoking one carries no new provisioning burden.
+// Re-revoking an already-revoked grant is a no-op, matching client revocation
+// and the projector's COALESCE(revoked_at) semantics. A reason is required
+// because the projector rejects an empty compromise_reason.
+func (s *ClientAdminService) RevokeGrant(ctx context.Context, grantID uuid.UUID, reason string, actor domain.Token) error {
+	if !access.CanRevokeOAuthClient(actor) {
+		return ErrOAuthClientAdminDenied
+	}
+	reason = strings.TrimSpace(reason)
+	if grantID == uuid.Nil || reason == "" {
+		return fmt.Errorf("%w: grant_id and reason are required", ErrInvalidClientAdminInput)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var revokedAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT revoked_at FROM oauth_grants WHERE id=$1 FOR UPDATE`, grantID).Scan(&revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrGrantNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if revokedAt != nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID,
+		Kind: domain.EventOAuthGrantRevoked, Source: actor.Source, ActorTokenID: &actor.ID,
+		Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "reason": reason, "revoked_at_unix": now.Unix()},
+	})
+	if err != nil {
+		return fmt.Errorf("oauth: revoke grant event: %w", err)
 	}
 	return tx.Commit(ctx)
 }

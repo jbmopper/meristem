@@ -263,6 +263,7 @@ func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 		"approvals.decide":           true,
 		"oauth_clients.bind_actor":   true,
 		"oauth_clients.revoke":       true,
+		"oauth_grants.revoke":        true,
 		"connectors.http_request":    true,
 		"work_items.create":          true,
 		"work_items.spawn_child":     true,

@@ -188,12 +188,45 @@ func (s *Server) handleOAuthRevokeClient(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type revokeGrantRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (s *Server) handleOAuthRevokeGrant(w http.ResponseWriter, r *http.Request) {
+	tok, ok := auth.TokenFromContext(r.Context())
+	if !ok || !access.CanRevokeOAuthClient(tok) {
+		writeAPIError(w, http.StatusForbidden, "oauth_client_admin_denied", "explicit non-root human oauth_clients.revoke scope required")
+		return
+	}
+	if s.oauthClientAdmin == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "oauth_unavailable", "oauth client administration is not configured")
+		return
+	}
+	grantID, err := uuid.Parse(strings.TrimSpace(r.PathValue("grant_id")))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_grant_id", "grant_id must be a UUID")
+		return
+	}
+	var req revokeGrantRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.policy.MaxRequestBodyBytes)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
+		return
+	}
+	if err := s.oauthClientAdmin.RevokeGrant(r.Context(), grantID, req.Reason, tok); err != nil {
+		writeOAuthClientAdminError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func writeOAuthClientAdminError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, oauth.ErrOAuthClientAdminDenied):
 		writeAPIError(w, http.StatusForbidden, "oauth_client_admin_denied", "oauth client administration denied")
 	case errors.Is(err, oauth.ErrClientNotFound):
 		writeAPIError(w, http.StatusNotFound, "oauth_client_not_found", "oauth client not found")
+	case errors.Is(err, oauth.ErrGrantNotFound):
+		writeAPIError(w, http.StatusNotFound, "oauth_grant_not_found", "oauth grant not found")
 	case errors.Is(err, oauth.ErrInvalidClientAdminInput):
 		writeAPIError(w, http.StatusBadRequest, "invalid_oauth_client_admin_request", err.Error())
 	case errors.Is(err, oauth.ErrOAuthClientConflict):
