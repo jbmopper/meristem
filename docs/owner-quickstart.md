@@ -38,9 +38,10 @@ server exec one shared artifact (`$BIN`); rebuild it only from a clean `v1`
 checkout with `scripts/rebuild-meristem-bin.sh` (it refuses a dirty tree or a
 non-`v1` HEAD; `--force` overrides). One rebuild covers the API server and all
 wrappers, but running MCP client sessions keep their old process until the
-client session restarts, and an unsigned rebuild re-triggers the macOS firewall
-approval for the API listener (the script ad-hoc code-signs to avoid this;
-failure is loud but non-fatal). Background in `agent-worktrees.md`. This rebuild
+client session restarts, and a rebuild re-triggers the macOS firewall approval
+for the API listener (the script ad-hoc code-signs, which is hash-based and may
+not prevent the re-prompt; failure is loud but non-fatal). Background in
+`agent-worktrees.md`. This rebuild
 is repo-side work item a9374bdd; the live redeploy (regenerate wrappers, restart
 sessions) is owner action 835e0dbf.
 

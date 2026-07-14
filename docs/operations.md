@@ -107,10 +107,12 @@ Caveats:
   process is restarted or the MCP client session is relaunched. Rebuilding only
   changes what the *next* launch execs; it does not disturb in-flight work.
 - **macOS firewall / code signing.** The macOS Application Firewall tracks
-  inbound-connection approvals per executable identity. An unsigned rebuild
-  changes that identity and re-triggers the approval prompt when the API listener
-  next binds a port; the ad-hoc signing step keeps the identity stable. If
-  `codesign` is unavailable or fails, expect a one-time re-approval prompt.
+  inbound-connection approvals per executable identity. Any rebuild changes an
+  unsigned or ad-hoc-signed binary's identity (ad-hoc signatures are hash-based),
+  so expect a re-approval prompt for the API listener after a rebuild. The ad-hoc
+  signing step gives the artifact a valid signature; the durable fix is a stable
+  real signing identity. Verify actual prompt behavior during the 835e0dbf
+  redeploy.
 
 Rebuilding the shared artifact is repo-side (work item a9374bdd). The live
 redeploy — regenerating the wrappers and restarting the API, worker, and MCP

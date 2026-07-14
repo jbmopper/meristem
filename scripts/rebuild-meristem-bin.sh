@@ -102,10 +102,11 @@ log "building $OUT from $(git rev-parse --short HEAD)"
 log "built $OUT"
 
 # macOS Application Firewall tracks inbound-connection approvals per executable
-# identity. An unsigned rebuild changes that identity, so macOS re-prompts to
-# allow the API listener the next time it binds a port. Ad-hoc signing (`-s -`)
-# gives the artifact a stable identity so repeated rebuilds do not re-trigger the
-# approval dialog. Signing is best-effort: a failure is loud but not fatal.
+# identity. Ad-hoc signing (`-s -`) gives the artifact a valid signature, but an
+# ad-hoc identity is its content hash, which changes on every rebuild — so expect
+# a re-approval prompt per rebuild anyway. The durable fix is signing with a
+# stable real identity; observe the actual prompt behavior during the 835e0dbf
+# redeploy. Signing is best-effort: a failure is loud but not fatal.
 if [[ "$(uname -s)" == "Darwin" ]]; then
   if command -v codesign >/dev/null 2>&1; then
     if codesign -s - --force "$OUT"; then
