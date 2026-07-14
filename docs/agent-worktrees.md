@@ -61,8 +61,18 @@ scripts/prepare-agent-worktree.sh --target cerberus-healer-98853a93
 
 ## Rebuilding meristem-bin
 
-Only rebuild `.meristem/generated/meristem-bin` from a clean worktree at the
-intended ref.
+`.meristem/generated/meristem-bin` is the single artifact that backs the API
+server and every generated agent MCP wrapper (Claude, Codex, Cursor, Cerberus);
+one rebuild covers all of them (work item a9374bdd). The one-command path is
+`scripts/rebuild-meristem-bin.sh`: it fetches `origin/v1`, refuses a dirty tree
+or a HEAD that is not the fetched `v1` tip (`--force` overrides), builds the
+artifact, and on macOS ad-hoc code-signs it (`codesign -s - --force`) so the
+Application Firewall does not re-prompt for the API listener. Running sessions
+keep their old process until restarted.
+
+Use the manual throwaway-worktree procedure below when you need to build from a
+ref other than the current checkout's HEAD. Only rebuild
+`.meristem/generated/meristem-bin` from a clean worktree at the intended ref.
 
 ```bash
 build_tree=/tmp/meristem-bin-build

@@ -12,10 +12,13 @@ cd "$REPO_ROOT"
 MERISTEM_DATABASE_URL="${MERISTEM_DATABASE_URL:-postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable}"
 DEFAULT_WORKTREE_BASE="$(cd "$REPO_ROOT/.." && pwd)"
 AGENT_WORKTREE_BASE="${MERISTEM_AGENT_WORKTREE_BASE:-$DEFAULT_WORKTREE_BASE}"
+# One shared build artifact backs the API server AND every agent wrapper, so a
+# stale worktree can no longer run divergent projector code against the shared
+# database (work item a9374bdd). The generated launcher execs this artifact and
+# fails closed if it is missing rather than falling back to a per-worktree
+# `go run`. Rebuild it from a clean v1 checkout with
+# scripts/rebuild-meristem-bin.sh.
 MERISTEM_BIN="${MERISTEM_BIN:-$REPO_ROOT/.meristem/generated/meristem-bin}"
-if [[ ! -x "$MERISTEM_BIN" ]]; then
-  MERISTEM_BIN="${GO_BIN:-go} run ./cmd/meristem"
-fi
 
 ROOT_ID="${CERBERUS_ROOT_ID:-98853a93-2de4-42fb-9438-a1a54caf9589}"
 ROOT_SHORT="${CERBERUS_ROOT_SHORT:-98853a93}"
@@ -39,6 +42,10 @@ set -euo pipefail
 primary_repo="$REPO_ROOT"
 workspace_root="$workspace_root"
 token_file="\$primary_repo/$token_file"
+# Exec the single shared build artifact that also backs the API server, so this
+# wrapper stays on one code version (work item a9374bdd). Rebuild it from a clean
+# v1 checkout with \$primary_repo/scripts/rebuild-meristem-bin.sh.
+meristem_bin="$MERISTEM_BIN"
 if [[ ! -e "\$workspace_root/.git" ]]; then
   echo "missing Cerberus $head worktree: \$workspace_root" >&2
   echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target cerberus-$head-$ROOT_SHORT" >&2
@@ -48,12 +55,17 @@ if [[ ! -s "\$token_file" ]]; then
   echo "missing or empty Cerberus token file for $head: \$token_file" >&2
   exit 64
 fi
+if [[ ! -x "\$meristem_bin" ]]; then
+  echo "missing shared meristem build artifact: \$meristem_bin" >&2
+  echo "build it from a clean v1 checkout: \$primary_repo/scripts/rebuild-meristem-bin.sh" >&2
+  exit 64
+fi
 cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
 export CERBERUS_ROOT_ID="$ROOT_ID"
 export CERBERUS_HEAD="$head"
 export MERISTEM_TOKEN="\$(tr -d '\\n' < "\$token_file")"
-exec $MERISTEM_BIN mcp
+exec "\$meristem_bin" mcp
 EOF
   chmod 700 "$script"
   printf '%s\n' "$script"

@@ -81,6 +81,43 @@ Optional services (each runs the same safety validation before opening the datab
 - **MCP:** `MERISTEM_TOKEN=... go run ./cmd/meristem mcp`
 - **Manual worker tick:** `MERISTEM_TOKEN=... go run ./cmd/meristem worker --once`
 
+## Rebuild the shared build artifact
+
+`.meristem/generated/meristem-bin` is the single build artifact that backs **both**
+the API server and every generated agent MCP wrapper (Claude, Codex, Cursor,
+Cerberus). One rebuild covers all of them. Because projection writers run
+synchronously in the writing process, keeping every wrapper on one binary stops a
+stale wrapper from running divergent projector code against the shared database.
+
+Rebuild only from a clean checkout at the `v1` tip:
+
+```bash
+scripts/rebuild-meristem-bin.sh
+```
+
+The script refuses to build from a dirty tree or a HEAD that is not the freshly
+fetched `origin/v1` (pass `--force` to override). On macOS it then ad-hoc
+code-signs the artifact (`codesign -s - --force`); a signing failure is loud but
+not fatal.
+
+Caveats:
+
+- **Running sessions are not hot-swapped.** A live API server or an MCP client
+  session keeps its current process — and therefore its old binary — until that
+  process is restarted or the MCP client session is relaunched. Rebuilding only
+  changes what the *next* launch execs; it does not disturb in-flight work.
+- **macOS firewall / code signing.** The macOS Application Firewall tracks
+  inbound-connection approvals per executable identity. An unsigned rebuild
+  changes that identity and re-triggers the approval prompt when the API listener
+  next binds a port; the ad-hoc signing step keeps the identity stable. If
+  `codesign` is unavailable or fails, expect a one-time re-approval prompt.
+
+Rebuilding the shared artifact is repo-side (work item a9374bdd). The live
+redeploy — regenerating the wrappers and restarting the API, worker, and MCP
+sessions — is owner action tracked under work item 835e0dbf. See
+[`docs/agent-worktrees.md`](agent-worktrees.md) for the clean-worktree rebuild
+discipline.
+
 ## Shutdown
 
 ### API, MCP, or worker (foreground process)

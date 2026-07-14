@@ -192,9 +192,20 @@ write_generated_configs() {
 set -euo pipefail
 primary_repo="$REPO_ROOT"
 workspace_root="$claude_code_workspace"
+# Exec the single shared build artifact that also backs the API server, instead
+# of \`go run\` from this worktree. This keeps every wrapper on one code version,
+# so a stale worktree can no longer run divergent projector code against the
+# shared database (work item a9374bdd). Rebuild it from a clean v1 checkout with
+# \$primary_repo/scripts/rebuild-meristem-bin.sh.
+meristem_bin="\$primary_repo/.meristem/generated/meristem-bin"
 if [[ ! -e "\$workspace_root/.git" ]]; then
   echo "missing Claude Code meristem worktree: \$workspace_root" >&2
   echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target claude-code-gui" >&2
+  exit 64
+fi
+if [[ ! -x "\$meristem_bin" ]]; then
+  echo "missing shared meristem build artifact: \$meristem_bin" >&2
+  echo "build it from a clean v1 checkout: \$primary_repo/scripts/rebuild-meristem-bin.sh" >&2
   exit 64
 fi
 cd "\$workspace_root"
@@ -203,7 +214,7 @@ export MERISTEM_TOKEN="\$(cat "\$primary_repo/.meristem/claude-code-gui.token")"
 # Claude (like Cursor) rejects dot-namespaced MCP tool names; advertise the
 # underscore aliases. Dispatch still accepts canonical names.
 export MERISTEM_MCP_TOOL_NAMES="\${MERISTEM_MCP_TOOL_NAMES:-cursor}"
-exec "$GO_BIN" run ./cmd/meristem mcp
+exec "\$meristem_bin" mcp
 EOF
   chmod 700 "$GENERATED_DIR/claude-code-meristem-command.sh"
 
@@ -212,15 +223,26 @@ EOF
 set -euo pipefail
 primary_repo="$REPO_ROOT"
 workspace_root="$codex_workspace"
+# Exec the single shared build artifact that also backs the API server, instead
+# of \`go run\` from this worktree. This keeps every wrapper on one code version,
+# so a stale worktree can no longer run divergent projector code against the
+# shared database (work item a9374bdd). Rebuild it from a clean v1 checkout with
+# \$primary_repo/scripts/rebuild-meristem-bin.sh.
+meristem_bin="\$primary_repo/.meristem/generated/meristem-bin"
 if [[ ! -e "\$workspace_root/.git" ]]; then
   echo "missing Codex meristem worktree: \$workspace_root" >&2
   echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target codex" >&2
   exit 64
 fi
+if [[ ! -x "\$meristem_bin" ]]; then
+  echo "missing shared meristem build artifact: \$meristem_bin" >&2
+  echo "build it from a clean v1 checkout: \$primary_repo/scripts/rebuild-meristem-bin.sh" >&2
+  exit 64
+fi
 cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
 export MERISTEM_TOKEN="\$(cat "\$primary_repo/.meristem/codex.token")"
-exec "$GO_BIN" run ./cmd/meristem mcp
+exec "\$meristem_bin" mcp
 EOF
   chmod 700 "$GENERATED_DIR/codex-meristem-command.sh"
 
