@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -181,9 +182,11 @@ func TestTickDrainExecuteAck(t *testing.T) {
 	f := newFakeFleet(t)
 	id1 := "11111111-1111-4111-8111-111111111111"
 	id2 := "22222222-2222-4222-8222-222222222222"
+	pathA := "/v1/work-items/aaaa1111-1111-4111-8111-111111111111/transition"
+	pathB := "/v1/work-items/bbbb2222-2222-4222-8222-222222222222/transition"
 	f.setPending(
-		cmd(id1, "/v1/work-items/a/transition", "orig-key-1", map[string]any{"to": "running"}),
-		cmd(id2, "/v1/work-items/b/transition", "orig-key-2", map[string]any{"to": "blocked"}),
+		cmd(id1, pathA, "orig-key-1", map[string]any{"to": "running"}),
+		cmd(id2, pathB, "orig-key-2", map[string]any{"to": "blocked"}),
 	)
 
 	p := New(f.config(), f.hub.Client(), &memCursor{}, nil)
@@ -203,7 +206,7 @@ func TestTickDrainExecuteAck(t *testing.T) {
 	if len(f.attempts) != 2 || f.attempts[0].Payload.AttemptKey != id1+":1" {
 		t.Fatalf("attempt budget records = %+v", f.attempts)
 	}
-	if f.localCalls[0].Path != "/v1/work-items/a/transition" || f.localCalls[1].Path != "/v1/work-items/b/transition" {
+	if f.localCalls[0].Path != pathA || f.localCalls[1].Path != pathB {
 		t.Fatalf("execute order wrong: %+v", f.localCalls)
 	}
 	// Original idempotency key is reused verbatim as the local Idempotency-Key.
@@ -230,7 +233,7 @@ func TestTickFailureFailedAck(t *testing.T) {
 	f := newFakeFleet(t)
 	f.localStatus = http.StatusConflict // 409: definitive local rejection
 	id := "33333333-3333-4333-8333-333333333333"
-	f.setPending(cmd(id, "/v1/work-items/c/transition", "orig-key-3", map[string]any{"to": "done"}))
+	f.setPending(cmd(id, "/v1/work-items/cccc3333-3333-4333-8333-333333333333/transition", "orig-key-3", map[string]any{"to": "done"}))
 
 	p := New(f.config(), f.hub.Client(), &memCursor{}, nil)
 	res := p.Tick(context.Background())
@@ -246,11 +249,74 @@ func TestTickFailureFailedAck(t *testing.T) {
 	}
 }
 
+// TestTickRefusesInvalidCommandPath proves the spoke does not trust the hub's
+// command path: a hostile splice ("@evil.example/x") and a disallowed local
+// path ("/v1/tokens") are refused before any local call, while a valid
+// work-items command still executes and acks done.
+func TestTickRefusesInvalidCommandPath(t *testing.T) {
+	f := newFakeFleet(t)
+	splice := "88888888-8888-4888-8888-888888888888" // "@evil.example/x": URL splice
+	local := "99999999-9999-4999-8999-999999999999"  // "/v1/tokens": off-allowlist local path
+	valid := "eeee6666-6666-4666-8666-666666666666"  // legitimate work-items command
+	validPath := "/v1/work-items/eeee6666-6666-4666-8666-666666666666/transition"
+	f.setPending(
+		cmd(splice, "@evil.example/x", "orig-key-8", map[string]any{"to": "running"}),
+		cmd(local, "/v1/tokens", "orig-key-9", map[string]any{"scope": "root"}),
+		cmd(valid, validPath, "orig-key-a", map[string]any{"to": "running"}),
+	)
+
+	p := New(f.config(), f.hub.Client(), &memCursor{}, nil)
+	res := p.Tick(context.Background())
+
+	if res.Drained != 3 || res.Refused != 2 || res.AttemptsRecorded != 1 || res.Executed != 1 || res.Failed != 0 || res.Acked != 3 {
+		t.Fatalf("result = %+v, want drained=3 refused=2 attempts=executed=1 failed=0 acked=3", res)
+	}
+
+	// Only the valid command reached the local api, and only after an attempt was
+	// recorded. The hostile paths never produced a local call.
+	if len(f.localCalls) != 1 {
+		t.Fatalf("local calls = %+v, want exactly the valid command", f.localCalls)
+	}
+	if got := f.localCalls[0].Path; got != validPath {
+		t.Fatalf("local call path = %q, want the valid work-items path", got)
+	}
+	// The endpoint join is safe precisely because a validated path always starts
+	// with "/v1/work-items", so it can never splice the local URL's authority.
+	if !strings.HasPrefix(f.localCalls[0].Path, "/v1/work-items") {
+		t.Fatalf("executed path %q escaped the work-items surface", f.localCalls[0].Path)
+	}
+	if len(f.attempts) != 1 || f.attempts[0].EventID != valid {
+		t.Fatalf("attempt budget records = %+v, want one for the valid command", f.attempts)
+	}
+
+	// All three commands are acked, but the refused ones close as refused (never
+	// done) so a well-behaved hub retires them without waiting out patience.
+	byID := make(map[string]ackCall, len(f.acks))
+	for _, a := range f.acks {
+		byID[a.EventID] = a
+	}
+	if len(byID) != 3 {
+		t.Fatalf("acks = %+v, want one per command", f.acks)
+	}
+	for _, id := range []string{splice, local} {
+		a, ok := byID[id]
+		if !ok {
+			t.Fatalf("command %s was not acked at all", id)
+		}
+		if a.Payload.Outcome != crossnode.CommandRefused || a.Payload.OK || a.Payload.StatusCode != http.StatusBadRequest {
+			t.Fatalf("refused ack for %s = %+v, want outcome refused, ok false, status 400", id, a.Payload)
+		}
+	}
+	if a := byID[valid]; a.Payload.Outcome != crossnode.CommandDone || !a.Payload.OK || a.Payload.StatusCode != http.StatusOK {
+		t.Fatalf("valid ack = %+v, want outcome done, ok true, status 200", a.Payload)
+	}
+}
+
 func TestTickRetryable5xxConsumesAttemptWithoutAck(t *testing.T) {
 	f := newFakeFleet(t)
 	f.localStatus = http.StatusServiceUnavailable
 	id := "77777777-7777-4777-8777-777777777777"
-	f.setPending(cmd(id, "/v1/work-items/c/transition", "orig-key-7", map[string]any{"to": "done"}))
+	f.setPending(cmd(id, "/v1/work-items/cccc7777-7777-4777-8777-777777777777/transition", "orig-key-7", map[string]any{"to": "done"}))
 
 	p := New(f.config(), f.hub.Client(), &memCursor{}, nil)
 	res := p.Tick(context.Background())
@@ -288,7 +354,7 @@ func TestTickHubDownNoOp(t *testing.T) {
 func TestTickLocalDownLeavesPending(t *testing.T) {
 	f := newFakeFleet(t)
 	id := "55555555-5555-4555-8555-555555555555"
-	f.setPending(cmd(id, "/v1/work-items/d/transition", "orig-key-5", map[string]any{"to": "running"}))
+	f.setPending(cmd(id, "/v1/work-items/dddd5555-5555-4555-8555-555555555555/transition", "orig-key-5", map[string]any{"to": "running"}))
 	cfg := f.config()
 	f.local.Close() // local api unreachable: cannot determine an outcome
 

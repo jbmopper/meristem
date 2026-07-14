@@ -58,6 +58,9 @@ type TickResult struct {
 	Executed int
 	// Failed is how many executed commands returned a non-2xx (acked ok=false).
 	Failed int
+	// Refused is how many drained commands failed local command-path validation
+	// and were refused without ever being executed against the local api.
+	Refused int
 	// Acked is how many acks the hub accepted.
 	Acked int
 	// NewFeedEvents is how many new hub-feed events this tick observed.
@@ -96,6 +99,7 @@ func (p *Poller) Tick(ctx context.Context) TickResult {
 		slog.Int("attempts_recorded", res.AttemptsRecorded),
 		slog.Int("executed", res.Executed),
 		slog.Int("failed", res.Failed),
+		slog.Int("refused", res.Refused),
 		slog.Int("acked", res.Acked),
 		slog.Int("new_feed_events", res.NewFeedEvents),
 		slog.Bool("hub_reachable", res.HubReachable),
@@ -115,6 +119,38 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 	res.Drained = len(commands)
 
 	for _, cmd := range commands {
+		// Never trust the hub's command path. The queue host validates it at
+		// enqueue, but the spoke replays each command against its own local api
+		// under its own local bearer, so a compromised or malicious hub could
+		// otherwise return a crafted path — one that splices the local URL (e.g.
+		// "@evil.example/x" -> http://localhost@evil.example/x, exfiltrating the
+		// local token) or reaches a local endpoint outside the narrow work-items
+		// surface. Re-validating here restricts execution to the allowlist and
+		// guarantees the endpoint join below stays under "/v1/work-items".
+		if err := crossnode.ValidateCommandPath(cmd.CommandPath); err != nil {
+			p.logger.Warn("spoke refusing command with invalid path, not executing",
+				slog.String("node_id", p.cfg.NodeID),
+				slog.String("event_id", cmd.EventID.String()),
+				slog.String("command_path", cmd.CommandPath),
+				slog.String("error", err.Error()),
+			)
+			// Close the command terminally as a refusal (never as done): the path
+			// is definitively disallowed, so retrying cannot help. A synthetic 400
+			// mirrors the queue host's own invalid_command_path status. If the ack
+			// fails we simply leave it pending; the 24h/5-attempt patience
+			// reconciler is the backstop.
+			if err := p.ackHub(ctx, cmd.EventID, http.StatusBadRequest, crossnode.CommandRefused); err != nil {
+				p.logger.Warn("spoke refusal ack failed, will re-ack next tick",
+					slog.String("node_id", p.cfg.NodeID),
+					slog.String("event_id", cmd.EventID.String()),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			res.Refused++
+			res.Acked++
+			continue
+		}
 		if err := p.recordAttempt(ctx, cmd); err != nil {
 			p.logger.Warn("spoke attempt refused, skipping local execution",
 				slog.String("node_id", p.cfg.NodeID),
