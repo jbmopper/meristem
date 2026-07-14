@@ -116,15 +116,28 @@ func (s *ClientAdminService) Revoke(ctx context.Context, clientID, reason string
 	if clientID == "" {
 		return fmt.Errorf("%w: client_id is required", ErrInvalidClientAdminInput)
 	}
+	return s.revokeSubject(ctx, `SELECT revoked_at FROM oauth_clients WHERE client_id=$1 FOR UPDATE`, clientID, ErrClientNotFound, "oauth: revoke client event", func(now time.Time) events.Spec {
+		return events.Spec{
+			SubjectKind: domain.SubjectOAuthClient, SubjectID: ClientSubjectID(clientID),
+			Kind: domain.EventOAuthClientRevoked, Source: actor.Source, ActorTokenID: &actor.ID,
+			Payload: map[string]any{"payload_version": 1, "client_id": clientID, "reason": strings.TrimSpace(reason), "revoked_at_unix": now.Unix()},
+		}
+	})
+}
+
+// revokeSubject is the shared revocation transaction: lock the projection row,
+// no-op if already revoked, and append the revocation event. spec receives the
+// timestamp sampled under the row lock so revoked_at_unix stays lock-ordered.
+func (s *ClientAdminService) revokeSubject(ctx context.Context, lockQuery string, lockArg any, notFound error, wrap string, spec func(now time.Time) events.Spec) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT revoked_at FROM oauth_clients WHERE client_id=$1 FOR UPDATE`, clientID).Scan(&revokedAt)
+	err = tx.QueryRow(ctx, lockQuery, lockArg).Scan(&revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrClientNotFound
+		return notFound
 	}
 	if err != nil {
 		return err
@@ -132,14 +145,8 @@ func (s *ClientAdminService) Revoke(ctx context.Context, clientID, reason string
 	if revokedAt != nil {
 		return nil
 	}
-	now := time.Now().UTC()
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind: domain.SubjectOAuthClient, SubjectID: ClientSubjectID(clientID),
-		Kind: domain.EventOAuthClientRevoked, Source: actor.Source, ActorTokenID: &actor.ID,
-		Payload: map[string]any{"payload_version": 1, "client_id": clientID, "reason": strings.TrimSpace(reason), "revoked_at_unix": now.Unix()},
-	})
-	if err != nil {
-		return fmt.Errorf("oauth: revoke client event: %w", err)
+	if _, _, err := s.writer.Append(ctx, tx, spec(time.Now().UTC())); err != nil {
+		return fmt.Errorf("%s: %w", wrap, err)
 	}
 	return tx.Commit(ctx)
 }
@@ -158,32 +165,13 @@ func (s *ClientAdminService) RevokeGrant(ctx context.Context, grantID uuid.UUID,
 	if grantID == uuid.Nil || reason == "" {
 		return fmt.Errorf("%w: grant_id and reason are required", ErrInvalidClientAdminInput)
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT revoked_at FROM oauth_grants WHERE id=$1 FOR UPDATE`, grantID).Scan(&revokedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrGrantNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if revokedAt != nil {
-		return nil
-	}
-	now := time.Now().UTC()
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID,
-		Kind: domain.EventOAuthGrantRevoked, Source: actor.Source, ActorTokenID: &actor.ID,
-		Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "reason": reason, "revoked_at_unix": now.Unix()},
+	return s.revokeSubject(ctx, `SELECT revoked_at FROM oauth_grants WHERE id=$1 FOR UPDATE`, grantID, ErrGrantNotFound, "oauth: revoke grant event", func(now time.Time) events.Spec {
+		return events.Spec{
+			SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID,
+			Kind: domain.EventOAuthGrantRevoked, Source: actor.Source, ActorTokenID: &actor.ID,
+			Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "reason": reason, "revoked_at_unix": now.Unix()},
+		}
 	})
-	if err != nil {
-		return fmt.Errorf("oauth: revoke grant event: %w", err)
-	}
-	return tx.Commit(ctx)
 }
 
 func loadProviderActorForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) (domain.Token, error) {
