@@ -296,6 +296,10 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 				"listChanged": false,
 			},
 		},
+		// Onboarding text injected into the connecting agent's system prompt by
+		// compliant clients. Shared by stdio and the HTTP /mcp gateway; see
+		// instructions.go for why the same text is safe across profiles.
+		"instructions": serverInstructions,
 	}, nil
 }
 

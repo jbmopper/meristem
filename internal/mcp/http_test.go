@@ -35,6 +35,17 @@ func TestHandleHTTPMessageInitializeReturnsJSONRPCResponse(t *testing.T) {
 	if string(out.ID) != "1" {
 		t.Fatalf("id = %s, want 1", out.ID)
 	}
+	// The HTTP /mcp gateway shares handleInitialize, so onboarding
+	// instructions must reach provider-facing clients too.
+	var result struct {
+		Instructions string `json:"instructions"`
+	}
+	if err := json.Unmarshal(out.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if strings.TrimSpace(result.Instructions) == "" {
+		t.Error("expected non-empty initialize instructions over HTTP")
+	}
 }
 
 func TestHandleHTTPMessageNotificationReturnsAcceptedNoBody(t *testing.T) {
