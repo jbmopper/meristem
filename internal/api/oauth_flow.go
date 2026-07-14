@@ -52,6 +52,9 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		if result.State != "" {
 			q.Set("state", result.State)
 		}
+		// RFC 9207: identify the issuer of the authorization response so the
+		// client can detect mix-up attacks. Matches the metadata "issuer" value.
+		q.Set("iss", s.oauthPublicBaseURL(r))
 		u.RawQuery = q.Encode()
 		http.Redirect(w, r, u.String(), http.StatusFound)
 		return

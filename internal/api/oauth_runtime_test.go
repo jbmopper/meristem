@@ -177,6 +177,9 @@ func TestEnabledOAuthMetadataUsesOnlyConfiguredBase(t *testing.T) {
 	if got := body["issuer"]; got != "https://mcp.example.test" {
 		t.Fatalf("issuer = %v", got)
 	}
+	if got := body["authorization_response_iss_parameter_supported"]; got != true {
+		t.Fatalf("authorization_response_iss_parameter_supported = %v", got)
+	}
 	if strings.Contains(rec.Body.String(), "attacker") {
 		t.Fatalf("metadata trusted request routing headers: %s", rec.Body.String())
 	}
