@@ -55,6 +55,7 @@ func TestServer_Initialize_EchoesProtocolVersion(t *testing.T) {
 		ProtocolVersion string         `json:"protocolVersion"`
 		ServerInfo      map[string]any `json:"serverInfo"`
 		Capabilities    map[string]any `json:"capabilities"`
+		Instructions    string         `json:"instructions"`
 	}
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
@@ -67,6 +68,11 @@ func TestServer_Initialize_EchoesProtocolVersion(t *testing.T) {
 	}
 	if _, ok := result.Capabilities["tools"]; !ok {
 		t.Errorf("missing tools capability: %+v", result.Capabilities)
+	}
+	// The initialize result must carry onboarding instructions that clients
+	// inject into the connecting agent's system prompt.
+	if strings.TrimSpace(result.Instructions) == "" {
+		t.Error("expected non-empty initialize instructions")
 	}
 }
 
