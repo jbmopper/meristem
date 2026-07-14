@@ -216,6 +216,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /oauth/token", s.oauthPublicRoute(s.handleOAuthToken))
 	s.mux.Handle("POST /v1/oauth/clients/{client_id}/actor", s.command(http.HandlerFunc(s.handleOAuthBindActor)))
 	s.mux.Handle("POST /v1/oauth/clients/{client_id}/revoke", s.command(http.HandlerFunc(s.handleOAuthRevokeClient)))
+	s.mux.Handle("POST /v1/oauth/grants/{grant_id}/revoke", s.command(http.HandlerFunc(s.handleOAuthRevokeGrant)))
 	s.mux.Handle("GET /mcp", s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP))))
 	s.mux.Handle("POST /mcp", s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP))))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))

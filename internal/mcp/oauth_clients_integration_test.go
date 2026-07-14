@@ -27,6 +27,7 @@ func TestOAuthClientAdminToolErrors(t *testing.T) {
 	}{
 		{"denied", oauth.ErrOAuthClientAdminDenied, "oauth_client_admin_denied"},
 		{"not found", oauth.ErrClientNotFound, "oauth_client_not_found"},
+		{"grant not found", oauth.ErrGrantNotFound, "oauth_grant_not_found"},
 		{"invalid", oauth.ErrInvalidClientAdminInput, "invalid_oauth_client_admin_request"},
 		{"conflict", oauth.ErrOAuthClientConflict, "oauth_client_conflict"},
 	}

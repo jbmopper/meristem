@@ -28,6 +28,7 @@ func TestOAuthTypedErrorsDoNotExposeInternalFailures(t *testing.T) {
 		{"token validation", writeOAuthTokenError, oauth.ErrInvalidGrant, http.StatusBadRequest, "invalid_grant"},
 		{"token internal", writeOAuthTokenError, errors.New("database password secret"), http.StatusInternalServerError, "server_error"},
 		{"admin validation", writeOAuthClientAdminError, oauth.ErrInvalidClientAdminInput, http.StatusBadRequest, "invalid_oauth_client_admin_request"},
+		{"admin grant not found", writeOAuthClientAdminError, oauth.ErrGrantNotFound, http.StatusNotFound, "oauth_grant_not_found"},
 		{"admin internal", writeOAuthClientAdminError, errors.New("database password secret"), http.StatusInternalServerError, "oauth_client_admin_failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,6 +55,23 @@ func TestOAuthClientAdminHTTPRejectsRootAndAgent(t *testing.T) {
 		req = req.WithContext(auth.WithToken(req.Context(), actor))
 		rec := httptest.NewRecorder()
 		s.handleOAuthBindActor(rec, req)
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "oauth_client_admin_denied") {
+			t.Fatalf("actor=%+v status=%d body=%s", actor, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestOAuthGrantRevokeHTTPRejectsRootAndAgent(t *testing.T) {
+	for _, actor := range []domain.Token{
+		{ID: uuid.New(), IsRoot: true, Source: domain.SourceHuman, Scopes: []string{access.ScopeOAuthClientsRevoke}},
+		{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeOAuthClientsRevoke}},
+	} {
+		s := New(nil, nil)
+		req := httptest.NewRequest(http.MethodPost, "/v1/oauth/grants/"+uuid.NewString()+"/revoke", strings.NewReader(`{"reason":"compromised"}`))
+		req.SetPathValue("grant_id", uuid.NewString())
+		req = req.WithContext(auth.WithToken(req.Context(), actor))
+		rec := httptest.NewRecorder()
+		s.handleOAuthRevokeGrant(rec, req)
 		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "oauth_client_admin_denied") {
 			t.Fatalf("actor=%+v status=%d body=%s", actor, rec.Code, rec.Body.String())
 		}

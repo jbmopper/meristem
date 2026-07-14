@@ -67,6 +67,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolApprovalsGet(),
 		s.toolOAuthClientsBindActor(),
 		s.toolOAuthClientsRevoke(),
+		s.toolOAuthGrantsRevoke(),
 		s.toolWorkItemsCreate(),
 		s.toolWorkItemsSpawnChild(),
 		s.toolWorkItemsAppendEvent(),
@@ -140,6 +141,35 @@ func (s *Server) toolOAuthClientsRevoke() Tool {
 				return nil, err
 			}
 			if err := s.deps.OAuthClientAdmin.Revoke(ctx, args.ClientID, args.Reason, actor); err != nil {
+				return nil, oauthClientAdminToolErr(err)
+			}
+			// The canonical REST operation returns 204 with no response body.
+			return nil, nil
+		},
+	}
+}
+
+func (s *Server) toolOAuthGrantsRevoke() Tool {
+	return Tool{
+		Name:        "oauth_grants.revoke",
+		Description: "Revoke a single issued OAuth grant, invalidating its access and refresh tokens.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"grant_id", "reason"}, map[string]any{
+			"grant_id": schemaString("Issued OAuth grant UUID."),
+			"reason":   schemaString("Human-readable revocation reason."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.OAuthClientAdmin == nil {
+				return nil, errors.New("oauth client administration service not configured")
+			}
+			var args struct {
+				GrantID uuid.UUID `json:"grant_id"`
+				Reason  string    `json:"reason"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			if err := s.deps.OAuthClientAdmin.RevokeGrant(ctx, args.GrantID, args.Reason, actor); err != nil {
 				return nil, oauthClientAdminToolErr(err)
 			}
 			// The canonical REST operation returns 204 with no response body.
@@ -1535,6 +1565,8 @@ func oauthClientAdminToolErr(err error) error {
 		return replayableToolErr(errors.New("oauth_client_admin_denied: explicit non-root human OAuth client administration scope required"))
 	case errors.Is(err, oauth.ErrClientNotFound):
 		return replayableToolErr(errors.New("oauth_client_not_found: OAuth client not found"))
+	case errors.Is(err, oauth.ErrGrantNotFound):
+		return replayableToolErr(errors.New("oauth_grant_not_found: OAuth grant not found"))
 	case errors.Is(err, oauth.ErrInvalidClientAdminInput):
 		return replayableToolErr(fmt.Errorf("invalid_oauth_client_admin_request: %w", err))
 	case errors.Is(err, oauth.ErrOAuthClientConflict):
