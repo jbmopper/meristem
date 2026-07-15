@@ -2075,11 +2075,13 @@ func newIntegrationPool(t *testing.T) *pgxpool.Pool {
 }
 
 // TestScanOnceToleratesMalformedEventAppendedPayload pins the repair for work
-// item eb635476 defect (1): an event_appended payload whose inner is not a
-// JSON object must not abort the convergence pass or suppress the breach pass
-// behind it. The skip leaves exactly one deterministic_error report no matter
-// how many passes re-fold the same history, and a legacy string-encoded JSON
-// object still contributes its signal instead of counting as malformed.
+// item eb635476 defect (1): event_appended history that cannot contribute
+// signals must not abort the convergence pass or suppress the breach pass
+// behind it. Free-form JSON inners (prose) are benign non-signals and leave
+// no deterministic-error noise; only a payload that is not an envelope at all
+// leaves evidence — exactly one report no matter how many passes, or how many
+// distinct worker tokens, re-fold the same history. A legacy string-encoded
+// JSON object still contributes its signal.
 func TestScanOnceToleratesMalformedEventAppendedPayload(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -2088,14 +2090,19 @@ func TestScanOnceToleratesMalformedEventAppendedPayload(t *testing.T) {
 	}
 
 	writer := app.NewEventWriter()
-	systemTok, err := createSystemToken(t, ctx, pool, writer, "malformed-payload-worker")
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "root", IsRoot: true, Source: domain.SourceHuman})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	systemTok, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "malformed-payload-worker", Source: domain.SourceSystem, Actor: &root.Token})
 	if err != nil {
 		t.Fatalf("create system token: %v", err)
 	}
 	service := workitems.NewService(pool, writer)
 
-	// Item A carries the malformed history and an unsatisfiable check, so it
-	// stays running and both passes re-fold the same malformed payload.
+	// Item A carries the problem history and an unsatisfiable check, so it
+	// stays running and every pass re-folds the same payloads.
 	itemA, err := service.Create(ctx, workitems.CreateInput{
 		Title:                      "running item with malformed appended history",
 		State:                      domain.WorkItemRunning,
@@ -2106,9 +2113,13 @@ func TestScanOnceToleratesMalformedEventAppendedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create item A: %v", err)
 	}
+	// Valid free-form append: prose inner, a benign non-signal.
 	if err := service.AppendEvent(ctx, itemA.ID, "human_response_recorded", "free prose, not an object", systemTok.Token); err != nil {
-		t.Fatalf("append malformed prose inner: %v", err)
+		t.Fatalf("append prose inner: %v", err)
 	}
+	// Envelope-level malformed history: a raw payload that is not an
+	// event_appended envelope at all (predates envelope-shaped writers).
+	appendRawWorkItemEvent(t, ctx, pool, writer, systemTok.Token, itemA.ID, "legacy raw payload, no envelope")
 
 	// Item B carries a legacy string-encoded JSON object; recovery must let
 	// its passing signal satisfy the check and converge the item.
@@ -2173,5 +2184,52 @@ func TestScanOnceToleratesMalformedEventAppendedPayload(t *testing.T) {
 	}
 	if got := countEventsByKind(t, ctx, pool, domain.EventDeterministicErrorReported); got != 1 {
 		t.Errorf("deterministic_error.reported rows after second pass = %d, want 1 (evidence must be idempotent)", got)
+	}
+
+	// A second worker under a DIFFERENT actor token re-folds the same
+	// history; evidence identity derives from the offending event, not the
+	// reporting token, so still exactly one report.
+	otherTok, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "malformed-payload-worker-2", Source: domain.SourceSystem, Actor: &root.Token})
+	if err != nil {
+		t.Fatalf("create second system token: %v", err)
+	}
+	w2, err := New(pool, writer, budgets, &otherTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("create second worker: %v", err)
+	}
+	third, err := w2.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce with second worker token: %v", err)
+	}
+	if third.ConvergenceMalformedPayloadsSkipped != 1 {
+		t.Errorf("third.ConvergenceMalformedPayloadsSkipped = %d, want 1", third.ConvergenceMalformedPayloadsSkipped)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventDeterministicErrorReported); got != 1 {
+		t.Errorf("deterministic_error.reported rows after second worker token = %d, want 1 (evidence identity must not include the worker token)", got)
+	}
+}
+
+// appendRawWorkItemEvent appends a work_item.event_appended event with an
+// arbitrary raw payload, bypassing the service's envelope wrapping the way
+// pre-envelope writers did.
+func appendRawWorkItemEvent(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, id uuid.UUID, payload any) {
+	t.Helper()
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin tx for raw append: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    id,
+		Kind:         domain.EventWorkItemEventAppended,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &actor.ID,
+		Payload:      payload,
+	}); err != nil {
+		t.Fatalf("raw append: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("raw append commit: %v", err)
 	}
 }

@@ -142,22 +142,19 @@ func TestDecodeEventAppendedInnerToleratesLegacyShapes(t *testing.T) {
 			wantObject:    true,
 		},
 		{
-			name:          "prose string inner is malformed",
+			name:          "prose string inner is a benign non-signal",
 			payload:       `{"inner_kind":"human_response_recorded","inner":"just some prose"}`,
 			wantInnerKind: "human_response_recorded",
-			wantMalformed: true,
 		},
 		{
-			name:          "numeric inner is malformed",
+			name:          "numeric inner is a benign non-signal",
 			payload:       `{"inner_kind":"agent.status","inner":7}`,
 			wantInnerKind: "agent.status",
-			wantMalformed: true,
 		},
 		{
-			name:          "array inner is malformed",
+			name:          "array inner is a benign non-signal",
 			payload:       `{"inner_kind":"agent.status","inner":[1,2]}`,
 			wantInnerKind: "agent.status",
-			wantMalformed: true,
 		},
 		{
 			name:          "missing inner is benign",
@@ -172,6 +169,11 @@ func TestDecodeEventAppendedInnerToleratesLegacyShapes(t *testing.T) {
 		{
 			name:          "non-envelope payload is malformed",
 			payload:       `"not an envelope at all"`,
+			wantMalformed: true,
+		},
+		{
+			name:          "envelope with non-string inner_kind is malformed",
+			payload:       `{"inner_kind":7,"inner":{"pass":true}}`,
 			wantMalformed: true,
 		},
 	}

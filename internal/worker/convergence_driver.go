@@ -65,11 +65,12 @@ type eventAppendedSignalEnvelope struct {
 }
 
 // decodeEventAppendedInner extracts the inner signal object from one
-// event_appended payload without ever failing the pass. Historical payloads
-// carry inner as a JSON object, as a string-encoded JSON object (legacy
-// writers), or as free prose; only the first two can contribute signals.
-// It returns (nil, "") for benign no-signal payloads and a non-empty reason
-// when the payload is malformed and worth deterministic evidence.
+// event_appended payload without ever failing the pass. The append contract
+// accepts arbitrary JSON, so inner may be an object, a string-encoded JSON
+// object (legacy writers — recovered), or free-form JSON (prose, numbers,
+// arrays) that is a valid append carrying no signal. Only a payload that is
+// not an event_appended envelope at all is malformed and worth deterministic
+// evidence; it returns a non-empty reason for that case alone.
 func decodeEventAppendedInner(payload []byte) (inner map[string]any, innerKind string, reason string) {
 	var env eventAppendedSignalEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {
@@ -87,9 +88,9 @@ func decodeEventAppendedInner(payload []byte) (inner map[string]any, innerKind s
 		if err := json.Unmarshal([]byte(s), &obj); err == nil {
 			return obj, env.InnerKind, ""
 		}
-		return nil, env.InnerKind, "inner is a string that does not encode a JSON object"
 	}
-	return nil, env.InnerKind, "inner is not a JSON object"
+	// Free-form JSON inner: benign non-signal, not an error.
+	return nil, env.InnerKind, ""
 }
 
 // scanConvergence runs one convergence-driven reconcile pass across running
@@ -400,12 +401,21 @@ func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workIt
 	return out, malformed, nil
 }
 
+// convergenceEvidenceIdentity is the fixed identity under which malformed
+// event_appended evidence is recorded. It is deliberately NOT the worker's
+// actor token: evidence identity derives from the offending event alone, so
+// multiple workers or a token rotation still collapse onto one report per
+// event. Attribution (who observed it) still carries the real actor token.
+var convergenceEvidenceIdentity = uuid.NewSHA1(uuid.NameSpaceURL,
+	[]byte("meristem/worker/convergence/malformed-event-appended"))
+
 // reportMalformedEventAppended records deterministic evidence that one
-// event_appended payload was skipped by the convergence fold. The idempotency
-// identity is derived from the offending event id, so every subsequent pass
-// collapses onto the same deterministic_error subject and event rows instead
-// of re-reporting each tick. Evidence failures are logged, never propagated:
-// evidence must not become a second way to abort the pass.
+// event_appended payload could not be decoded as an envelope at all. The
+// idempotency identity is derived from the offending event id, so every
+// subsequent pass — from any worker — collapses onto the same
+// deterministic_error subject and event rows instead of re-reporting each
+// tick. Evidence failures are logged, never propagated: evidence must not
+// become a second way to abort the pass.
 func (w *Worker) reportMalformedEventAppended(ctx context.Context, workItemID, eventID uuid.UUID, reason string) {
 	if w.actor == nil {
 		slog.WarnContext(ctx, "convergence skipped malformed event_appended payload without durable evidence: worker has no actor token",
@@ -423,7 +433,7 @@ func (w *Worker) reportMalformedEventAppended(ctx context.Context, workItemID, e
 		return
 	}
 	rctx := idempotency.WithRequest(ctx, idempotency.Request{
-		TokenID: *w.actor,
+		TokenID: convergenceEvidenceIdentity,
 		Scope:   "worker.convergence.malformed_event_appended",
 		Key:     eventID.String(),
 	})

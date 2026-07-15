@@ -263,9 +263,10 @@ type Result struct {
 	// escalated directly and were moved out of the running loop.
 	ConvergenceEscalations int
 	// ConvergenceMalformedPayloadsSkipped is how many event_appended payloads
-	// the convergence fold skipped because their inner value was not (and did
-	// not string-encode) a JSON object. Each skip leaves a deterministic_error
-	// report; none aborts the pass.
+	// the convergence fold skipped because they could not be decoded as an
+	// envelope at all. Free-form JSON inners (prose, numbers, arrays) are
+	// valid non-signal appends and are not counted. Each counted skip leaves
+	// an idempotent deterministic_error report; none aborts the pass.
 	ConvergenceMalformedPayloadsSkipped int
 }
 
