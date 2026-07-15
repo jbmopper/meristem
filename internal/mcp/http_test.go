@@ -249,6 +249,119 @@ func TestProviderTrackerHTTPProfileRejectsLatentExecutionAuthority(t *testing.T)
 	}
 }
 
+func TestProviderTrackerHTTPProfileValidatorAcceptsAdvertisedReads(t *testing.T) {
+	// Every read the tracker profile advertises via tools/list must pass its
+	// call validator; a mismatch rejects calls to a tool the surface offers.
+	profile := ProviderTrackerHTTPProfile()
+	for name := range ProviderSafeReadHTTPProfile().allowedTools {
+		if err := profile.validateCall(name, nil); err != nil {
+			t.Errorf("advertised read tool %s rejected by validator: %v", name, err)
+		}
+	}
+}
+
+func TestProviderTrackerHTTPProfileAllowsBacklogReadinessCall(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+
+	resp := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"backlog.readiness","arguments":{}}}`),
+		actor,
+		HTTPOptions{Profile: ProviderTrackerHTTPProfile()},
+	)
+
+	// Reaching the handler's dependency check proves the call cleared both the
+	// allowlist and the profile validator.
+	if !strings.Contains(string(resp.Body), "workitems service not configured") {
+		t.Fatalf("backlog.readiness did not reach dispatch: %s", resp.Body)
+	}
+}
+
+func TestProviderSafeReadHTTPProfileAllowsCallsWithoutValidator(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+
+	resp := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"backlog.readiness","arguments":{}}}`),
+		actor,
+		HTTPOptions{Profile: ProviderSafeReadHTTPProfile()},
+	)
+
+	if !strings.Contains(string(resp.Body), "workitems service not configured") {
+		t.Fatalf("safe-read profile call did not reach dispatch: %s", resp.Body)
+	}
+}
+
+func TestCheckHTTPToolAllowedFailsClosedOnEmptyAllowlist(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+	call := []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"feed.read","arguments":{}}}`)
+
+	cases := []struct {
+		name string
+		opts HTTPOptions
+	}{
+		{"explicitly empty allowlist", HTTPOptions{AllowedTools: map[string]bool{}}},
+		{"zero-value profile", HTTPOptions{Profile: &HTTPToolProfile{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := s.HandleHTTPMessageWithOptions(context.Background(), call, actor, tc.opts)
+			if !strings.Contains(string(resp.Body), "not enabled on this HTTP MCP profile") {
+				t.Fatalf("restricted route with empty allowlist failed open: %s", resp.Body)
+			}
+		})
+	}
+}
+
+func TestCheckHTTPToolAllowedAbsentOptionsRemainUnrestricted(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+
+	resp := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"backlog.readiness","arguments":{}}}`),
+		actor,
+		HTTPOptions{},
+	)
+
+	if strings.Contains(string(resp.Body), "not enabled on this HTTP MCP profile") {
+		t.Fatalf("absent options gated the call: %s", resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "workitems service not configured") {
+		t.Fatalf("unrestricted call did not reach dispatch: %s", resp.Body)
+	}
+}
+
+func TestHandleHTTPMessageWithOptionsEmptyAllowlistAdvertisesNoTools(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+
+	resp := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":11,"method":"tools/list"}`),
+		actor,
+		HTTPOptions{AllowedTools: map[string]bool{}},
+	)
+
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", resp.Status, resp.Body)
+	}
+	var envelope struct {
+		Result struct {
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Body, &envelope); err != nil {
+		t.Fatalf("decode tools/list: %v", err)
+	}
+	if len(envelope.Result.Tools) != 0 {
+		t.Fatalf("empty allowlist advertised %d tools: %s", len(envelope.Result.Tools), resp.Body)
+	}
+}
+
 func TestAcceptsStreamableHTTPPostRequiresJSONAndSSE(t *testing.T) {
 	if !AcceptsStreamableHTTPPost("application/json, text/event-stream") {
 		t.Fatal("expected application/json + text/event-stream to be accepted")

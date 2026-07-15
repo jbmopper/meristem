@@ -151,8 +151,8 @@ func (s *Server) httpRPCResult(msg rpcMessage, result any, rerr *rpcError) HTTPR
 
 func (s *Server) handleListToolsFiltered(actor domain.Token, opts HTTPOptions) (any, *rpcError) {
 	result, rerr := s.handleListTools(actor)
-	allowed := opts.allowedTools()
-	if rerr != nil || len(allowed) == 0 {
+	allowed, restricted := opts.allowedTools()
+	if rerr != nil || !restricted {
 		return result, rerr
 	}
 	body, ok := result.(map[string]any)
@@ -177,8 +177,8 @@ func (s *Server) handleListToolsFiltered(actor domain.Token, opts HTTPOptions) (
 }
 
 func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, opts HTTPOptions) *rpcError {
-	allowed := opts.allowedTools()
-	if len(allowed) == 0 {
+	allowed, restricted := opts.allowedTools()
+	if !restricted {
 		return nil
 	}
 	var params callToolParams

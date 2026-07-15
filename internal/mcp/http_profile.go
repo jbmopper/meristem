@@ -70,11 +70,19 @@ func toolSet(names ...string) map[string]bool {
 	return out
 }
 
-func (o HTTPOptions) allowedTools() map[string]bool {
+// allowedTools returns the effective allowlist and whether the options
+// restrict tools at all. A set Profile or a non-nil AllowedTools map is
+// restricting even when its set is empty: only wholly absent options mean
+// unrestricted, so an explicitly empty allowlist or a zero-value profile
+// denies every tool instead of failing open.
+func (o HTTPOptions) allowedTools() (map[string]bool, bool) {
 	if o.Profile != nil {
-		return o.Profile.allowedTools
+		return o.Profile.allowedTools, true
 	}
-	return o.AllowedTools
+	if o.AllowedTools != nil {
+		return o.AllowedTools, true
+	}
+	return nil, false
 }
 
 func (p HTTPToolProfile) Name() string { return p.name }
@@ -92,7 +100,7 @@ func (p *HTTPToolProfile) validate(tool string, arguments json.RawMessage) error
 
 func validateProviderTrackerCall(tool string, raw json.RawMessage) error {
 	switch tool {
-	case "feed.read", "work_items.list", "work_items.get":
+	case "feed.read", "backlog.readiness", "work_items.list", "work_items.get":
 		return nil
 	case "work_items.create", "work_items.spawn_child":
 		var args struct {
