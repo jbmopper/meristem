@@ -79,7 +79,23 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 	if err != nil {
 		return TokenPair{}, err
 	}
-	if redeemed != nil || !s.now().UTC().Before(expires) || in.ClientID != clientID || in.RedirectURI != redirectURI {
+	if redeemed != nil {
+		// Authorization-code replay (RFC 6749 §4.1.2 / RFC 9700): the code was
+		// already exchanged. Revoke the grant minted from that first redemption
+		// so any tokens issued from this code stop authenticating, mirroring the
+		// refresh-token reuse handling. The response is the same generic
+		// ErrInvalidGrant returned for an expired, mismatched, or never-issued
+		// code, so a caller cannot tell a replayed code from any other — the
+		// revocation runs silently inside this transaction.
+		if err := s.revokeReplayedCodeGrant(ctx, tx, systemActor.ID, codeID); err != nil {
+			return TokenPair{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return TokenPair{}, err
+		}
+		return TokenPair{}, fmt.Errorf("%w: code expired, used, or binding mismatch", ErrInvalidGrant)
+	}
+	if !s.now().UTC().Before(expires) || in.ClientID != clientID || in.RedirectURI != redirectURI {
 		return TokenPair{}, fmt.Errorf("%w: code expired, used, or binding mismatch", ErrInvalidGrant)
 	}
 	if err := verifyStoredS256(in.CodeVerifier, challenge, challengeMethod); err != nil {
@@ -123,7 +139,7 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 	if err != nil {
 		return TokenPair{}, err
 	}
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthGrantIssued, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "client_id": clientID, "actor_token_id": actorID, "authority_profile": authorityProfile, "scope": scope, "resource": resource, "access_token_id": accessID, "access_token_hash_b64": base64.StdEncoding.EncodeToString(accessHash), "access_expires_at_unix": accessExpires.Unix(), "refresh_token_id": refreshID, "refresh_token_hash_b64": base64.StdEncoding.EncodeToString(refreshHash), "refresh_expires_at_unix": refreshExpires.Unix(), "generation": 1}})
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthGrantIssued, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "client_id": clientID, "code_id": codeID, "actor_token_id": actorID, "authority_profile": authorityProfile, "scope": scope, "resource": resource, "access_token_id": accessID, "access_token_hash_b64": base64.StdEncoding.EncodeToString(accessHash), "access_expires_at_unix": accessExpires.Unix(), "refresh_token_id": refreshID, "refresh_token_hash_b64": base64.StdEncoding.EncodeToString(refreshHash), "refresh_expires_at_unix": refreshExpires.Unix(), "generation": 1}})
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -131,6 +147,31 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 		return TokenPair{}, err
 	}
 	return TokenPair{AccessToken: access, RefreshToken: refresh, TokenType: "Bearer", ExpiresIn: int(accessExpires.Sub(now).Seconds()), Scope: scope}, nil
+}
+
+// revokeReplayedCodeGrant handles an authorization-code replay: the code row was
+// already redeemed, so the grant that first redemption minted is revoked (RFC
+// 6749 §4.1.2 / RFC 9700), the same defense the refresh path applies on reuse.
+// The lookup and revoke run inside the caller's redemption transaction. If no
+// grant is found, or it is already revoked, the call is a no-op so the caller's
+// generic invalid_grant response is unchanged and never leaks whether the code —
+// or a grant for it — existed.
+func (s *TokenService) revokeReplayedCodeGrant(ctx context.Context, tx pgx.Tx, systemActorID uuid.UUID, codeID string) error {
+	var grantID uuid.UUID
+	var revoked *time.Time
+	err := tx.QueryRow(ctx, `SELECT id,revoked_at FROM oauth_grants WHERE code_id=$1 FOR UPDATE`, codeID).Scan(&grantID, &revoked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if revoked != nil {
+		return nil
+	}
+	now := s.now().UTC()
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Kind: domain.EventOAuthGrantRevoked, Source: domain.SourceSystem, ActorTokenID: &systemActorID, Payload: map[string]any{"payload_version": 1, "grant_id": grantID, "revoked_at_unix": now.Unix(), "reason": "authorization_code_replay"}})
+	return err
 }
 
 func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (TokenPair, error) {

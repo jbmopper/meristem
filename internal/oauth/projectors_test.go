@@ -81,7 +81,7 @@ func TestOAuthProjectorsRejectPayloadIdentityAndMalformedFields(t *testing.T) {
 			name:      "short token hash",
 			projector: grantIssuedProjector{},
 			event: domain.Event{SubjectKind: domain.SubjectOAuthGrant, SubjectID: grantID, Payload: map[string]any{
-				"payload_version": 1, "grant_id": grantID, "actor_token_id": uuid.New(), "client_id": "mcpc_one", "authority_profile": "owner_tracker_read_v1", "scope": ScopeMCPRead, "resource": "https://example.test/mcp", "access_token_id": "access", "access_token_hash_b64": base64.StdEncoding.EncodeToString([]byte("short")), "refresh_token_id": "refresh", "refresh_token_hash_b64": sha, "access_expires_at_unix": 100, "refresh_expires_at_unix": 200, "generation": 1,
+				"payload_version": 1, "grant_id": grantID, "actor_token_id": uuid.New(), "client_id": "mcpc_one", "code_id": "codeabc", "authority_profile": "owner_tracker_read_v1", "scope": ScopeMCPRead, "resource": "https://example.test/mcp", "access_token_id": "access", "access_token_hash_b64": base64.StdEncoding.EncodeToString([]byte("short")), "refresh_token_id": "refresh", "refresh_token_hash_b64": sha, "access_expires_at_unix": 100, "refresh_expires_at_unix": 200, "generation": 1,
 			}},
 			want: "32-byte",
 		},
