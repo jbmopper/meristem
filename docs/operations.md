@@ -8,7 +8,106 @@ Host-focused instructions for a local or single-VM deployment. Container paths r
 - Docker (for Postgres via `docker compose`)
 - A POSIX shell
 
-## Bring-up (recommended: bootstrap script)
+## Bring-up
+
+On the **primary host (Slab)** meristem starts automatically at login; that is
+the installed default there (**Primary host (Slab): login-time autostart**,
+below). On every other host — and as the fallback/reference on Slab itself —
+bring-up is manual via the bootstrap script (**Manual bring-up (bootstrap
+script)**, below).
+
+### Primary host (Slab): login-time autostart
+
+On **Slab** (the primary host, a 24GB Apple Silicon Mac) meristem is installed
+to come up automatically at login. This is the installed default there as of
+2026-07-15, verified working after a real reboot. Setup is arranged by an
+untracked installer, `.meristem/launchd/install-autostart.sh`; what follows
+describes the resulting behavior and how to reproduce it by hand, not the
+installer's internals.
+
+**What runs.** Three launchd **user agents** live in `~/Library/LaunchAgents`,
+labelled `com.jbmopper.meristem.codex.api`, `.worker`, and `.feed-watch`. Each
+sets `RunAtLoad` and `KeepAlive`, so launchd starts it at login and relaunches
+it if it exits. Rather than exec the service directly, every agent first runs a
+**wait-for-postgres gate**: it polls the `meristem-postgres` container
+healthcheck every 5s, up to a 300s timeout, and only then execs the service's
+existing run script. If the gate times out, `KeepAlive` relaunches it, so
+bring-up still converges on a slow boot instead of failing permanently.
+
+**Postgres.** The database is not started by the agents. An untracked
+`docker-compose.override.yml` adds `restart: unless-stopped` to the `postgres`
+service, so Postgres comes back with the Docker engine on its own and gives the
+gates something to wait for. The override is ignored via `.git/info/exclude`, so
+it never dirties `git status`.
+
+**colima.** The Docker engine runs as a persistent service under
+`brew services start colima`, so the VM is brought up at login without a
+foreground `colima start`. This has a **required companion**: the Homebrew
+`docker` CLI formula (`brew install docker`). `brew services` launches colima
+with a minimal PATH that cannot see a docker CLI under `/usr/local/bin`, and
+colima's dependency check fails fatally without a CLI it can find. Known caveat:
+that check can still fail on some boots; the post-reboot verification below
+catches it, and the recovery is simply `colima start`.
+
+**Ordering is emergent, not sequenced.** launchd fires all three agents in
+parallel at login. colima brings the VM up (~60-90s), Postgres auto-restarts and
+goes healthy (~10s), the gates release, and the services exec. The system is
+green about 2-3 minutes after login. On a single-user FileVault Mac the
+disk-unlock screen is effectively the login, so login-time ≈ boot-time.
+
+Manual-equivalent setup (what the installer arranges, if reproducing by hand):
+
+1. Install the Docker engine plus its CLI companion, and start colima as a
+   persistent service:
+
+   ```bash
+   brew install docker            # CLI companion required by colima under brew services
+   brew services start colima     # persistent VM at login
+   ```
+
+2. Make Postgres auto-restart with the engine, without dirtying git. Add an
+   untracked override and exclude it locally:
+
+   ```bash
+   cat > docker-compose.override.yml <<'YAML'
+   services:
+     postgres:
+       restart: unless-stopped
+   YAML
+   echo docker-compose.override.yml >> .git/info/exclude
+   ```
+
+3. Install and load the three launchd agents (`api`, `worker`, `feed-watch`),
+   each with `RunAtLoad` + `KeepAlive` and exec'ing the wait-for-postgres gate
+   before the service run script:
+
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.jbmopper.meristem.codex.{api,worker,feed-watch}.plist
+   ```
+
+> **zsh footnote.** The wait scripts are zsh. `status` is a **read-only reserved
+> variable** in zsh (it aliases `$?`), so a wait-loop variable named `status`
+> breaks the script — name it something else (e.g. `pg_health`).
+
+Post-reboot verification, in order:
+
+```bash
+colima status                            # VM running
+docker ps                                # meristem-postgres up and healthy
+launchctl list | grep meristem           # three agents loaded
+curl -sS http://127.0.0.1:8080/readyz    # API ready
+```
+
+If colima lost its PATH/dependency-check race on this boot, `colima status`
+shows it stopped; run `colima start` and the gates release on their next poll.
+Finally, a reboot purges ephemeral `/private/tmp` worktrees, so prune the stale
+entries from the primary checkout afterward:
+
+```bash
+git worktree prune
+```
+
+### Manual bring-up (bootstrap script)
 
 The script validates **resource safety** first, then Postgres, migrations, tokens, and seed. See [`scripts/bootstrap.sh`](../scripts/bootstrap.sh).
 

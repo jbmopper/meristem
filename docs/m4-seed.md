@@ -48,6 +48,17 @@ colima status
 docker context show   # should print "colima"
 ```
 
+On the autostart host (Slab, a 24GB Mac) colima is not started in the
+foreground this way. It runs as a persistent service under
+`brew services start colima`, reusing the VM you last sized with `colima start`.
+That service path **requires** the Homebrew `docker` CLI formula
+(`brew install docker`): `brew services` gives colima a minimal PATH, and its
+dependency check fails at login without a CLI it can find. Slab's 24GB leaves a
+little more headroom than this 16GB profile assumes, so raise `--memory` when
+you first size the VM if you want it; the rest of this profile's guidance still
+applies. The full login-time autostart story lives in
+[`docs/operations.md`](operations.md).
+
 ## 2. Postgres resource limits
 
 The base [`docker-compose.yml`](../docker-compose.yml) sets no CPU/memory
