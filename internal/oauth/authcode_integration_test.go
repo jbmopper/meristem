@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
@@ -27,6 +28,7 @@ import (
 // isolated from authorization concerns.
 type exchangeFixture struct {
 	ctx      context.Context
+	pool     *pgxpool.Pool
 	svc      *AuthCodeService
 	tokens   *TokenService
 	clientID string
@@ -88,6 +90,7 @@ func newExchangeFixture(t *testing.T, now func() time.Time) exchangeFixture {
 	}
 	return exchangeFixture{
 		ctx:      ctx,
+		pool:     pool,
 		svc:      svc,
 		tokens:   tokens,
 		clientID: client.ClientID,
@@ -150,6 +153,61 @@ func TestExchangeCodeRoundTrip(t *testing.T) {
 		CodeVerifier: f.verifier,
 	}); !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("second exchange err = %v, want ErrInvalidGrant (already redeemed)", err)
+	}
+}
+
+// TestExchangeCodeReplayRevokesGrant covers finding 1: replaying an
+// already-redeemed authorization code returns invalid_grant AND revokes the
+// grant minted from the first redemption (RFC 6749 §4.1.2 / RFC 9700), so the
+// tokens issued from that code stop authenticating.
+func TestExchangeCodeReplayRevokesGrant(t *testing.T) {
+	f := newExchangeFixture(t, nil)
+	code := f.issue(t)
+
+	pair, err := f.tokens.ExchangeCode(f.ctx, RedeemInput{Code: code, ClientID: f.clientID, RedirectURI: f.redirect, CodeVerifier: f.verifier})
+	if err != nil {
+		t.Fatalf("first exchange: %v", err)
+	}
+	// The freshly minted access and refresh tokens work before the replay.
+	if _, err := f.tokens.AuthenticateAccess(f.ctx, pair.AccessToken, f.resource); err != nil {
+		t.Fatalf("access token before replay: %v", err)
+	}
+
+	// Replaying the same code fails closed with the same generic invalid_grant
+	// returned for any expired/mismatched/unknown code.
+	if _, err := f.tokens.ExchangeCode(f.ctx, RedeemInput{Code: code, ClientID: f.clientID, RedirectURI: f.redirect, CodeVerifier: f.verifier}); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("replay err = %v, want ErrInvalidGrant", err)
+	}
+
+	// A single grant.revoked event was appended for the code-replay reason and
+	// folded into the grant projection.
+	var revokeEvents int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthGrantRevoked).Scan(&revokeEvents); err != nil || revokeEvents != 1 {
+		t.Fatalf("revoke events=%d err=%v", revokeEvents, err)
+	}
+	var revokedAt *time.Time
+	var reason string
+	if err := f.pool.QueryRow(f.ctx, `SELECT revoked_at,compromise_reason FROM oauth_grants`).Scan(&revokedAt, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if revokedAt == nil || reason != "authorization_code_replay" {
+		t.Fatalf("grant projection revoked_at=%v reason=%q", revokedAt, reason)
+	}
+
+	// The tokens minted from the replayed code no longer authenticate.
+	if _, err := f.tokens.AuthenticateAccess(f.ctx, pair.AccessToken, f.resource); !errors.Is(err, ErrInvalidAccessToken) {
+		t.Fatalf("access token survived replay revocation: %v", err)
+	}
+	if _, err := f.tokens.Refresh(f.ctx, pair.RefreshToken, f.clientID); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("refresh token survived replay revocation: %v", err)
+	}
+
+	// A second replay still fails closed but does not double-revoke.
+	if _, err := f.tokens.ExchangeCode(f.ctx, RedeemInput{Code: code, ClientID: f.clientID, RedirectURI: f.redirect, CodeVerifier: f.verifier}); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("second replay err = %v, want ErrInvalidGrant", err)
+	}
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE kind=$1`, domain.EventOAuthGrantRevoked).Scan(&revokeEvents); err != nil || revokeEvents != 1 {
+		t.Fatalf("second replay double-revoked: events=%d err=%v", revokeEvents, err)
 	}
 }
 

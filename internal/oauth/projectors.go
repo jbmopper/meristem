@@ -74,6 +74,7 @@ func (grantIssuedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event
 		GrantID              uuid.UUID `json:"grant_id"`
 		ActorTokenID         uuid.UUID `json:"actor_token_id"`
 		ClientID             string    `json:"client_id"`
+		CodeID               string    `json:"code_id"`
 		AuthorityProfile     string    `json:"authority_profile"`
 		Scope                string    `json:"scope"`
 		Resource             string    `json:"resource"`
@@ -88,7 +89,7 @@ func (grantIssuedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event
 	if err := decode(e.Payload, &p); err != nil {
 		return fmt.Errorf("%s: decode payload: %w", kind, err)
 	}
-	if p.GrantID == uuid.Nil || e.SubjectID != p.GrantID || p.ActorTokenID == uuid.Nil || p.ClientID == "" || !validProfileOAuthScope(p.AuthorityProfile, p.Scope) || p.Resource == "" || p.AccessTokenID == "" || p.RefreshTokenID == "" || p.AccessExpiresAtUnix <= 0 || p.RefreshExpiresAtUnix <= 0 || p.AccessExpiresAtUnix > p.RefreshExpiresAtUnix || p.Generation != 1 {
+	if p.GrantID == uuid.Nil || e.SubjectID != p.GrantID || p.ActorTokenID == uuid.Nil || p.ClientID == "" || p.CodeID == "" || !validProfileOAuthScope(p.AuthorityProfile, p.Scope) || p.Resource == "" || p.AccessTokenID == "" || p.RefreshTokenID == "" || p.AccessExpiresAtUnix <= 0 || p.RefreshExpiresAtUnix <= 0 || p.AccessExpiresAtUnix > p.RefreshExpiresAtUnix || p.Generation != 1 {
 		return fmt.Errorf("%s: required field missing, invalid, or subject_id does not match grant_id", kind)
 	}
 	ah, err := decodeSHA256(kind, "access_token_hash_b64", p.AccessTokenHashB64)
@@ -101,7 +102,7 @@ func (grantIssuedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event
 	}
 	re := time.Unix(p.RefreshExpiresAtUnix, 0).UTC()
 	ae := time.Unix(p.AccessExpiresAtUnix, 0).UTC()
-	if _, err = tx.Exec(ctx, `INSERT INTO oauth_grants(id,client_id,actor_token_id,authority_profile,scope,resource,refresh_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) ON CONFLICT(id) DO NOTHING`, p.GrantID, p.ClientID, p.ActorTokenID, p.AuthorityProfile, p.Scope, p.Resource, re, e.OccurredAt); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO oauth_grants(id,client_id,actor_token_id,authority_profile,scope,resource,refresh_expires_at,code_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9) ON CONFLICT(id) DO NOTHING`, p.GrantID, p.ClientID, p.ActorTokenID, p.AuthorityProfile, p.Scope, p.Resource, re, p.CodeID, e.OccurredAt); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO oauth_access_tokens(token_id,token_hash,grant_id,expires_at,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(token_id) DO NOTHING`, p.AccessTokenID, ah, p.GrantID, ae, e.OccurredAt); err != nil {
