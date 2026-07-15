@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/errorreporting"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -21,13 +24,14 @@ const (
 
 // convergencePassResult tracks the effects of one ScanOnce convergence kernel.
 type convergencePassResult struct {
-	ConvergenceCandidatesScanned       int
-	ConvergenceVerdictsRecorded        int
-	ConvergenceVerdictsAlreadyRecorded int
-	ConvergenceStaleInputsSkipped      int
-	ConvergenceAccepts                 int
-	ConvergenceRetries                 int
-	ConvergenceEscalations             int
+	ConvergenceCandidatesScanned        int
+	ConvergenceVerdictsRecorded         int
+	ConvergenceVerdictsAlreadyRecorded  int
+	ConvergenceStaleInputsSkipped       int
+	ConvergenceAccepts                  int
+	ConvergenceRetries                  int
+	ConvergenceEscalations              int
+	ConvergenceMalformedPayloadsSkipped int
 }
 
 var defaultConvergenceBudget = convergence.Budget{
@@ -56,8 +60,36 @@ type convergenceDecision struct {
 }
 
 type eventAppendedSignalEnvelope struct {
-	InnerKind string         `json:"inner_kind"`
-	Inner     map[string]any `json:"inner"`
+	InnerKind string          `json:"inner_kind"`
+	Inner     json.RawMessage `json:"inner"`
+}
+
+// decodeEventAppendedInner extracts the inner signal object from one
+// event_appended payload without ever failing the pass. Historical payloads
+// carry inner as a JSON object, as a string-encoded JSON object (legacy
+// writers), or as free prose; only the first two can contribute signals.
+// It returns (nil, "") for benign no-signal payloads and a non-empty reason
+// when the payload is malformed and worth deterministic evidence.
+func decodeEventAppendedInner(payload []byte) (inner map[string]any, innerKind string, reason string) {
+	var env eventAppendedSignalEnvelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return nil, "", "payload is not an event_appended envelope: " + err.Error()
+	}
+	if len(env.Inner) == 0 || string(env.Inner) == "null" {
+		return nil, env.InnerKind, ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(env.Inner, &obj); err == nil {
+		return obj, env.InnerKind, ""
+	}
+	var s string
+	if err := json.Unmarshal(env.Inner, &s); err == nil {
+		if err := json.Unmarshal([]byte(s), &obj); err == nil {
+			return obj, env.InnerKind, ""
+		}
+		return nil, env.InnerKind, "inner is a string that does not encode a JSON object"
+	}
+	return nil, env.InnerKind, "inner is not a JSON object"
 }
 
 // scanConvergence runs one convergence-driven reconcile pass across running
@@ -90,7 +122,8 @@ func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, er
 			return result, err
 		}
 
-		signals, err := w.convergenceSignalsForItem(ctx, c.ID, c.SuggestedConvergenceChecks)
+		signals, malformed, err := w.convergenceSignalsForItem(ctx, c.ID, c.SuggestedConvergenceChecks)
+		result.ConvergenceMalformedPayloadsSkipped += malformed
 		if err != nil {
 			return result, err
 		}
@@ -248,28 +281,29 @@ func (w *Worker) latestConvergenceVerdict(ctx context.Context, workItemID uuid.U
 	return &out, nil
 }
 
-// convergenceSignalsForItem gathers deterministic signals the reducer can consume.
-func (w *Worker) convergenceSignalsForItem(ctx context.Context, workItemID uuid.UUID, checks []string) ([]convergence.Signal, error) {
+// convergenceSignalsForItem gathers deterministic signals the reducer can
+// consume, plus the count of malformed event_appended payloads it skipped.
+func (w *Worker) convergenceSignalsForItem(ctx context.Context, workItemID uuid.UUID, checks []string) ([]convergence.Signal, int, error) {
 	var out []convergence.Signal
 
-	fromAppended, err := w.convergenceSignalsFromEventAppended(ctx, workItemID)
+	fromAppended, malformed, err := w.convergenceSignalsFromEventAppended(ctx, workItemID)
 	if err != nil {
-		return nil, err
+		return nil, malformed, err
 	}
 	out = append(out, fromAppended...)
 
 	fromSignalRows, err := w.convergenceSignalsFromSignalsTable(ctx, workItemID)
 	if err != nil {
-		return nil, err
+		return nil, malformed, err
 	}
 	out = append(out, fromSignalRows...)
 
 	fromBuiltinQueries, err := w.convergenceSignalsFromBuiltinQueries(ctx, workItemID, checks)
 	if err != nil {
-		return nil, err
+		return nil, malformed, err
 	}
 	out = append(out, fromBuiltinQueries...)
-	return out, nil
+	return out, malformed, nil
 }
 
 func (w *Worker) convergenceSignalsFromBuiltinQueries(ctx context.Context, workItemID uuid.UUID, checks []string) ([]convergence.Signal, error) {
@@ -313,9 +347,9 @@ func (w *Worker) evaluateBuiltinQueryCheck(ctx context.Context, workItemID uuid.
 	}
 }
 
-func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workItemID uuid.UUID) ([]convergence.Signal, error) {
+func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workItemID uuid.UUID) ([]convergence.Signal, int, error) {
 	rows, err := w.pool.Query(ctx, `
-		SELECT payload
+		SELECT id, payload
 		FROM events
 		WHERE subject_kind = $1
 			AND subject_id = $2
@@ -323,33 +357,88 @@ func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workIt
 		ORDER BY occurred_at ASC
 	`, domain.SubjectWorkItem, workItemID, domain.EventWorkItemEventAppended)
 	if err != nil {
-		return nil, fmt.Errorf("query event_appended signals for %s: %w", workItemID, err)
+		return nil, 0, fmt.Errorf("query event_appended signals for %s: %w", workItemID, err)
 	}
 	defer rows.Close()
 
-	var out []convergence.Signal
+	type appendedRow struct {
+		id      uuid.UUID
+		payload json.RawMessage
+	}
+	var scanned []appendedRow
 	for rows.Next() {
-		var payload json.RawMessage
-		if err := rows.Scan(&payload); err != nil {
-			return nil, fmt.Errorf("scan event_appended signal for %s: %w", workItemID, err)
+		var row appendedRow
+		if err := rows.Scan(&row.id, &row.payload); err != nil {
+			return nil, 0, fmt.Errorf("scan event_appended signal for %s: %w", workItemID, err)
 		}
-		var env eventAppendedSignalEnvelope
-		if err := json.Unmarshal(payload, &env); err != nil {
-			return nil, fmt.Errorf("decode event_appended payload for %s: %w", workItemID, err)
-		}
-		if env.InnerKind == "" || env.Inner == nil {
+		scanned = append(scanned, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate event_appended signals for %s: %w", workItemID, err)
+	}
+
+	var out []convergence.Signal
+	malformed := 0
+	for _, row := range scanned {
+		inner, innerKind, reason := decodeEventAppendedInner(row.payload)
+		if reason != "" {
+			// Malformed history must not abort the pass (or suppress the
+			// breach pass behind it); it is skipped with durable evidence.
+			malformed++
+			w.reportMalformedEventAppended(ctx, workItemID, row.id, reason)
 			continue
 		}
-		s := toConvergenceSignal(env.InnerKind, env.Inner)
+		if innerKind == "" || inner == nil {
+			continue
+		}
+		s := toConvergenceSignal(innerKind, inner)
 		if s == nil {
 			continue
 		}
 		out = append(out, *s)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate event_appended signals for %s: %w", workItemID, err)
+	return out, malformed, nil
+}
+
+// reportMalformedEventAppended records deterministic evidence that one
+// event_appended payload was skipped by the convergence fold. The idempotency
+// identity is derived from the offending event id, so every subsequent pass
+// collapses onto the same deterministic_error subject and event rows instead
+// of re-reporting each tick. Evidence failures are logged, never propagated:
+// evidence must not become a second way to abort the pass.
+func (w *Worker) reportMalformedEventAppended(ctx context.Context, workItemID, eventID uuid.UUID, reason string) {
+	if w.actor == nil {
+		slog.WarnContext(ctx, "convergence skipped malformed event_appended payload without durable evidence: worker has no actor token",
+			"work_item_id", workItemID, "event_id", eventID, "reason", reason)
+		return
 	}
-	return out, nil
+	details, err := json.Marshal(map[string]string{
+		"work_item_id": workItemID.String(),
+		"event_id":     eventID.String(),
+		"reason":       reason,
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "convergence malformed-payload evidence marshal failed",
+			"work_item_id", workItemID, "event_id", eventID, "error", err)
+		return
+	}
+	rctx := idempotency.WithRequest(ctx, idempotency.Request{
+		TokenID: *w.actor,
+		Scope:   "worker.convergence.malformed_event_appended",
+		Key:     eventID.String(),
+	})
+	svc := errorreporting.NewService(w.pool, w.writer)
+	if _, err := svc.Report(rctx, errorreporting.ReportInput{
+		Component: "worker.convergence",
+		Code:      "malformed_event_appended_payload",
+		Message:   "event_appended payload skipped by convergence fold: " + reason,
+		Severity:  domain.DeterministicErrorWarning,
+		Details:   details,
+		Actor:     domain.Token{ID: *w.actor, Source: domain.SourceSystem},
+	}); err != nil {
+		slog.WarnContext(ctx, "convergence malformed-payload evidence report failed",
+			"work_item_id", workItemID, "event_id", eventID, "error", err)
+	}
 }
 
 func (w *Worker) convergenceSignalsFromSignalsTable(ctx context.Context, workItemID uuid.UUID) ([]convergence.Signal, error) {

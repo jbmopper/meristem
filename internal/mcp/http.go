@@ -191,10 +191,8 @@ func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, opts HTTPOptions) *rp
 	if !allowed[canonical] {
 		return rpcErrorf(errCodeMethodNotFound, "tool not enabled on this HTTP MCP profile: "+params.Name)
 	}
-	if opts.Profile != nil {
-		if err := opts.Profile.validateCall(canonical, params.Arguments); err != nil {
-			return rpcErrorf(errCodeInvalidParams, err.Error())
-		}
+	if err := opts.Profile.validate(canonical, params.Arguments); err != nil {
+		return rpcErrorf(errCodeInvalidParams, err.Error())
 	}
 	return nil
 }

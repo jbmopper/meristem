@@ -2073,3 +2073,105 @@ func newIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	return pgtest.NewPool(t, "meristem_worker_itest")
 }
+
+// TestScanOnceToleratesMalformedEventAppendedPayload pins the repair for work
+// item eb635476 defect (1): an event_appended payload whose inner is not a
+// JSON object must not abort the convergence pass or suppress the breach pass
+// behind it. The skip leaves exactly one deterministic_error report no matter
+// how many passes re-fold the same history, and a legacy string-encoded JSON
+// object still contributes its signal instead of counting as malformed.
+func TestScanOnceToleratesMalformedEventAppendedPayload(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "malformed-payload-worker")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+
+	// Item A carries the malformed history and an unsatisfiable check, so it
+	// stays running and both passes re-fold the same malformed payload.
+	itemA, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "running item with malformed appended history",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"event:never.emitted"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item A: %v", err)
+	}
+	if err := service.AppendEvent(ctx, itemA.ID, "human_response_recorded", "free prose, not an object", systemTok.Token); err != nil {
+		t.Fatalf("append malformed prose inner: %v", err)
+	}
+
+	// Item B carries a legacy string-encoded JSON object; recovery must let
+	// its passing signal satisfy the check and converge the item.
+	itemB, err := service.Create(ctx, workitems.CreateInput{
+		Title:                      "running item with string-encoded object history",
+		State:                      domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"event:provider.progress"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create item B: %v", err)
+	}
+	if err := service.AppendEvent(ctx, itemB.ID, "checklist.item:event:provider.progress", `{"pass": true}`, systemTok.Token); err != nil {
+		t.Fatalf("append string-encoded object inner: %v", err)
+	}
+
+	// A breached captured item proves the pass behind convergence still runs.
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	breachedID := uuid.New()
+	seedWorkItemAt(t, ctx, pool, writer, systemTok.Token, breachedID, domain.WorkItemCaptured, now.Add(-2*time.Hour))
+
+	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
+		domain.WorkItemCaptured: time.Hour,
+	}}
+	w, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("create worker: %v", err)
+	}
+
+	first, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce must tolerate malformed event_appended payloads, got: %v", err)
+	}
+	if first.ConvergenceMalformedPayloadsSkipped != 1 {
+		t.Errorf("first.ConvergenceMalformedPayloadsSkipped = %d, want 1", first.ConvergenceMalformedPayloadsSkipped)
+	}
+	if first.BreachesEmitted != 1 {
+		t.Errorf("first.BreachesEmitted = %d, want 1 (breach pass must not be suppressed)", first.BreachesEmitted)
+	}
+	if first.ConvergenceAccepts != 1 {
+		t.Errorf("first.ConvergenceAccepts = %d, want 1 (string-encoded object signal must be recovered)", first.ConvergenceAccepts)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventDeterministicErrorReported); got != 1 {
+		t.Errorf("deterministic_error.reported rows after first pass = %d, want 1", got)
+	}
+
+	itemAAfter, err := service.Get(ctx, itemA.ID)
+	if err != nil {
+		t.Fatalf("get item A: %v", err)
+	}
+	if itemAAfter.State != domain.WorkItemRunning {
+		t.Fatalf("item A state after first pass = %s, want running (so the second pass re-folds the malformed payload)", itemAAfter.State)
+	}
+
+	second, err := w.ScanOnce(ctx)
+	if err != nil {
+		t.Fatalf("ScanOnce second: %v", err)
+	}
+	if second.ConvergenceMalformedPayloadsSkipped != 1 {
+		t.Errorf("second.ConvergenceMalformedPayloadsSkipped = %d, want 1", second.ConvergenceMalformedPayloadsSkipped)
+	}
+	if got := countEventsByKind(t, ctx, pool, domain.EventDeterministicErrorReported); got != 1 {
+		t.Errorf("deterministic_error.reported rows after second pass = %d, want 1 (evidence must be idempotent)", got)
+	}
+}

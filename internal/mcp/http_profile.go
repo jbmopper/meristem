@@ -79,6 +79,17 @@ func (o HTTPOptions) allowedTools() map[string]bool {
 
 func (p HTTPToolProfile) Name() string { return p.name }
 
+// validate applies the profile's optional per-call narrowing. Profiles whose
+// allowed set is entirely read-shaped (provider-safe-read) define no
+// validateCall; the allowed-set gate has already run, so a nil validator
+// means "no further narrowing", never a panic.
+func (p *HTTPToolProfile) validate(tool string, arguments json.RawMessage) error {
+	if p == nil || p.validateCall == nil {
+		return nil
+	}
+	return p.validateCall(tool, arguments)
+}
+
 func validateProviderTrackerCall(tool string, raw json.RawMessage) error {
 	switch tool {
 	case "feed.read", "work_items.list", "work_items.get":

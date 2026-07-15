@@ -120,3 +120,73 @@ func reductionForDecision(attempt int, digest string, disposition domain.Verdict
 		},
 	}
 }
+
+func TestDecodeEventAppendedInnerToleratesLegacyShapes(t *testing.T) {
+	cases := []struct {
+		name          string
+		payload       string
+		wantInnerKind string
+		wantObject    bool
+		wantMalformed bool
+	}{
+		{
+			name:          "object inner",
+			payload:       `{"inner_kind":"provider.progress","inner":{"pass":true}}`,
+			wantInnerKind: "provider.progress",
+			wantObject:    true,
+		},
+		{
+			name:          "string-encoded object inner is recovered",
+			payload:       `{"inner_kind":"human_response_recorded","inner":"{\"decision\":\"approved\"}"}`,
+			wantInnerKind: "human_response_recorded",
+			wantObject:    true,
+		},
+		{
+			name:          "prose string inner is malformed",
+			payload:       `{"inner_kind":"human_response_recorded","inner":"just some prose"}`,
+			wantInnerKind: "human_response_recorded",
+			wantMalformed: true,
+		},
+		{
+			name:          "numeric inner is malformed",
+			payload:       `{"inner_kind":"agent.status","inner":7}`,
+			wantInnerKind: "agent.status",
+			wantMalformed: true,
+		},
+		{
+			name:          "array inner is malformed",
+			payload:       `{"inner_kind":"agent.status","inner":[1,2]}`,
+			wantInnerKind: "agent.status",
+			wantMalformed: true,
+		},
+		{
+			name:          "missing inner is benign",
+			payload:       `{"inner_kind":"agent.status"}`,
+			wantInnerKind: "agent.status",
+		},
+		{
+			name:          "null inner is benign",
+			payload:       `{"inner_kind":"agent.status","inner":null}`,
+			wantInnerKind: "agent.status",
+		},
+		{
+			name:          "non-envelope payload is malformed",
+			payload:       `"not an envelope at all"`,
+			wantMalformed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inner, innerKind, reason := decodeEventAppendedInner([]byte(tc.payload))
+			if (reason != "") != tc.wantMalformed {
+				t.Fatalf("reason = %q, wantMalformed = %v", reason, tc.wantMalformed)
+			}
+			if (inner != nil) != tc.wantObject {
+				t.Fatalf("inner = %v, wantObject = %v", inner, tc.wantObject)
+			}
+			if innerKind != tc.wantInnerKind {
+				t.Fatalf("innerKind = %q, want %q", innerKind, tc.wantInnerKind)
+			}
+		})
+	}
+}

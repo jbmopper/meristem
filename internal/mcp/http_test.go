@@ -257,3 +257,20 @@ func TestAcceptsStreamableHTTPPostRequiresJSONAndSSE(t *testing.T) {
 		t.Fatal("expected missing text/event-stream to be rejected")
 	}
 }
+
+// TestProviderSafeReadProfileToolsCallDoesNotPanic pins the repair for work
+// item eb635476 defect (2): the provider-safe read profile defines no
+// validateCall, and tools/call for an allowed read must pass the profile gate
+// instead of dereferencing the nil validator. Disallowed tools must still
+// fail closed.
+func TestProviderSafeReadProfileToolsCallDoesNotPanic(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	opts := HTTPOptions{Profile: ProviderSafeReadHTTPProfile()}
+
+	if rpcErr := s.checkHTTPToolAllowed(json.RawMessage(`{"name":"feed.read","arguments":{}}`), opts); rpcErr != nil {
+		t.Fatalf("allowed provider-safe read was rejected: %+v", rpcErr)
+	}
+	if rpcErr := s.checkHTTPToolAllowed(json.RawMessage(`{"name":"work_items.create","arguments":{"title":"nope"}}`), opts); rpcErr == nil {
+		t.Fatal("write tool must remain fail-closed on the provider-safe read profile")
+	}
+}

@@ -275,11 +275,12 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 		slog.Int("convergence_accepts", result.ConvergenceAccepts),
 		slog.Int("convergence_retries", result.ConvergenceRetries),
 		slog.Int("convergence_escalations", result.ConvergenceEscalations),
+		slog.Int("convergence_malformed_payloads_skipped", result.ConvergenceMalformedPayloadsSkipped),
 	)
 }
 
 func formatWorkerOnceResult(result worker.Result) string {
-	return fmt.Sprintf("worker --once: network_commands_expired=%d scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d review_candidates=%d review_children_spawned=%d review_children_already_present=%d review_skipped_missing_cultivar=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d",
+	return fmt.Sprintf("worker --once: network_commands_expired=%d scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d review_candidates=%d review_children_spawned=%d review_children_already_present=%d review_skipped_missing_cultivar=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d malformed_payloads_skipped=%d",
 		result.NetworkCommandsExpired,
 		result.Scanned,
 		result.BreachesEmitted,
@@ -306,6 +307,7 @@ func formatWorkerOnceResult(result worker.Result) string {
 		result.ConvergenceAccepts,
 		result.ConvergenceRetries,
 		result.ConvergenceEscalations,
+		result.ConvergenceMalformedPayloadsSkipped,
 	)
 }
 

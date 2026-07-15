@@ -262,6 +262,11 @@ type Result struct {
 	// ConvergenceEscalations is how many candidates exhausted budget or
 	// escalated directly and were moved out of the running loop.
 	ConvergenceEscalations int
+	// ConvergenceMalformedPayloadsSkipped is how many event_appended payloads
+	// the convergence fold skipped because their inner value was not (and did
+	// not string-encode) a JSON object. Each skip leaves a deterministic_error
+	// report; none aborts the pass.
+	ConvergenceMalformedPayloadsSkipped int
 }
 
 // Worker scans the work_items projection for convergence opportunities and
@@ -354,6 +359,7 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	}
 
 	convergenceResult, err := w.scanConvergence(ctx)
+	out.ConvergenceMalformedPayloadsSkipped = convergenceResult.ConvergenceMalformedPayloadsSkipped
 	if err != nil {
 		return out, fmt.Errorf("worker: convergence pass: %w", err)
 	}
