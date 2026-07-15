@@ -210,12 +210,35 @@ func (s *Server) toolBacklogReadiness() Tool {
 			if err != nil {
 				return nil, err
 			}
-			return backlog.Summarize(items, backlog.Options{
+			summary := backlog.Summarize(items, backlog.Options{
 				Limit: 0,
 				AsOf:  time.Now().UTC(),
-			}), nil
+			})
+			if isProviderSafeContext(ctx) {
+				summary = providerSafeReadinessSummary(summary)
+			}
+			return summary, nil
 		},
 	}
+}
+
+// providerSafeReadinessSummary strips the free-form state reason from every
+// classified item. backlog.readiness emits backlog.Item rather than the
+// provider-safe work-item DTO, so the state_reason omission the other read
+// tools get from providerSafeWorkItemDTO must be applied here explicitly.
+func providerSafeReadinessSummary(summary backlog.Summary) backlog.Summary {
+	for _, group := range []*[]backlog.Item{
+		&summary.Groups.V1Substrate,
+		&summary.Groups.ReadyNext,
+		&summary.Groups.Blockers,
+		&summary.Groups.Running,
+		&summary.Groups.StaleNoise,
+	} {
+		for i := range *group {
+			(*group)[i].StateReason = nil
+		}
+	}
+	return summary
 }
 
 func (s *Server) toolProjectionsList() Tool {

@@ -11,6 +11,7 @@ import (
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -143,6 +144,21 @@ func TestProviderSafeHTTPContextAllVersusTreeAndNoEventPayloadLeakage(t *testing
 		t.Fatalf("tracker profile did not select provider-safe work-item DTO: %s", ownerTrackerList)
 	}
 	assertProviderTextSafe(t, ownerTrackerList)
+
+	// backlog.readiness emits backlog.Item, not the provider-safe work-item
+	// DTO, and is advertised by both production profiles; its summary must be
+	// reduced under the provider-safe context like every other read.
+	ownerReadiness := providerHTTPToolTextWithOptions(t, s, owner, "backlog.readiness", map[string]any{}, HTTPOptions{Profile: ProviderSafeReadHTTPProfile()})
+	if !strings.Contains(ownerReadiness, backlog.Contract) {
+		t.Fatalf("readiness summary missing contract: %s", ownerReadiness)
+	}
+	if !strings.Contains(ownerReadiness, a1.ID.String()) {
+		t.Fatalf("readiness summary missing blocked child A1: %s", ownerReadiness)
+	}
+	assertProviderTextSafe(t, ownerReadiness)
+
+	trackerReadiness := providerHTTPToolTextWithOptions(t, s, ownerTracker, "backlog.readiness", map[string]any{}, HTTPOptions{Profile: ProviderTrackerHTTPProfile()})
+	assertProviderTextSafe(t, trackerReadiness)
 }
 
 func providerHTTPToolText(t *testing.T, s *Server, actor domain.Token, name string, args map[string]any) string {
