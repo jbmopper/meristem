@@ -89,7 +89,13 @@ func (grantIssuedProjector) Apply(ctx context.Context, tx pgx.Tx, e domain.Event
 	if err := decode(e.Payload, &p); err != nil {
 		return fmt.Errorf("%s: decode payload: %w", kind, err)
 	}
-	if p.GrantID == uuid.Nil || e.SubjectID != p.GrantID || p.ActorTokenID == uuid.Nil || p.ClientID == "" || p.CodeID == "" || !validProfileOAuthScope(p.AuthorityProfile, p.Scope) || p.Resource == "" || p.AccessTokenID == "" || p.RefreshTokenID == "" || p.AccessExpiresAtUnix <= 0 || p.RefreshExpiresAtUnix <= 0 || p.AccessExpiresAtUnix > p.RefreshExpiresAtUnix || p.Generation != 1 {
+	// code_id is deliberately NOT required: grant.issued events emitted before
+	// migration 0034 / the code-linking change carry no code_id, and this
+	// projector must re-fold them during a full rebuild without aborting. An
+	// empty code_id is a legacy unlinked grant — it stores '' (the column
+	// default, excluded from the partial unique index) and an authorization-code
+	// replay simply finds no grant to revoke.
+	if p.GrantID == uuid.Nil || e.SubjectID != p.GrantID || p.ActorTokenID == uuid.Nil || p.ClientID == "" || !validProfileOAuthScope(p.AuthorityProfile, p.Scope) || p.Resource == "" || p.AccessTokenID == "" || p.RefreshTokenID == "" || p.AccessExpiresAtUnix <= 0 || p.RefreshExpiresAtUnix <= 0 || p.AccessExpiresAtUnix > p.RefreshExpiresAtUnix || p.Generation != 1 {
 		return fmt.Errorf("%s: required field missing, invalid, or subject_id does not match grant_id", kind)
 	}
 	ah, err := decodeSHA256(kind, "access_token_hash_b64", p.AccessTokenHashB64)
