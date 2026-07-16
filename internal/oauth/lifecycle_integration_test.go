@@ -249,6 +249,31 @@ func TestProviderOAuthLifecycle(t *testing.T) {
 		t.Fatalf("write token scope=%q", writePair.Scope)
 	}
 
+	// An explicit owner denial issues no code, surfaces access_denied, and
+	// drives the request work item to a terminal state with completed_at set.
+	t.Run("owner denial", func(t *testing.T) {
+		deniedInput := input
+		deniedInput.State = "owner-denied"
+		deniedReq, err := authorize.Begin(ctx, deniedInput)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ap.Decide(ctx, approvals.DecisionInput{ApprovalID: deniedReq.ApprovalID, Decision: approvals.DecisionDenied, Reason: "owner denied", Actor: decider.Token}); err != nil {
+			t.Fatal(err)
+		}
+		denied, err := authorize.Continue(ctx, deniedReq.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if denied.OAuthError != "access_denied" || denied.Code != "" || denied.Pending {
+			t.Fatalf("denial continue=%+v", denied)
+		}
+		if denied.State != deniedInput.State {
+			t.Fatalf("denial state=%q want %q", denied.State, deniedInput.State)
+		}
+		assertOAuthRequestTerminal(t, pool, deniedReq, string(approvals.StatusDenied), string(domain.WorkItemFailed))
+	})
+
 	// A decision at the request deadline is too late: no code is issued and
 	// the request work item reaches a terminal state in the same transaction.
 	clock := time.Now().UTC()
