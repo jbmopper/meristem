@@ -191,6 +191,14 @@ func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, opts HTTPOptions) *rp
 	if !allowed[canonical] {
 		return rpcErrorf(errCodeMethodNotFound, "tool not enabled on this HTTP MCP profile: "+params.Name)
 	}
+	// Fail-closed rendering gate. A restricted (provider-safe) route only reaches
+	// dispatch for a tool that has a registered provider-safe renderer. This is
+	// structural: adding a tool to a provider profile's allowlist without also
+	// registering its provider-safe rendering makes every call reject here with
+	// no body, rather than falling through to a raw operator DTO.
+	if !providerSafeRenderRegistered(canonical) {
+		return rpcErrorf(errCodeMethodNotFound, "provider-safe response rendering not registered for tool: "+params.Name)
+	}
 	if err := opts.Profile.validate(canonical, params.Arguments); err != nil {
 		return rpcErrorf(errCodeInvalidParams, err.Error())
 	}

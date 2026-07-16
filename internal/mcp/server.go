@@ -359,6 +359,16 @@ func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw jso
 			// distinction is "the transport worked, the tool didn't".
 			return toolErrorResult(err.Error()), nil
 		}
+		if isProviderSafeContext(ctx) {
+			// The boundary, not the handler, owns the provider-safe wire shape.
+			// A missing renderer or an unrendered carrier fails closed with a
+			// JSON-RPC error (no body) rather than emitting an ordinary DTO.
+			rendered, rerr := renderProviderSafeResult(tool.Name, result)
+			if rerr != nil {
+				return nil, rerr
+			}
+			result = rendered
+		}
 		return toolSuccessResult(result), nil
 	}
 	result, err := s.handleIdempotentMutationTool(ctx, actor, tool, params.Arguments)
@@ -388,6 +398,17 @@ func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.
 			if err != nil {
 				status = mutationToolErrorStatus(err)
 				toolResult = toolErrorResult(err.Error())
+			} else if isProviderSafeContext(callCtx) {
+				// Reduce the mutation response at the boundary before it is
+				// enveloped and persisted for idempotent replay, so a
+				// provider-safe write can never store or replay an ordinary DTO.
+				rendered, rerr := renderProviderSafeResult(tool.Name, payload)
+				if rerr != nil {
+					status = http.StatusInternalServerError
+					toolResult = toolErrorResult(rerr.Message)
+				} else {
+					toolResult = toolSuccessResult(rendered)
+				}
 			} else {
 				toolResult = toolSuccessResult(payload)
 			}

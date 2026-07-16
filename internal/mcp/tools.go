@@ -215,7 +215,9 @@ func (s *Server) toolBacklogReadiness() Tool {
 				AsOf:  time.Now().UTC(),
 			})
 			if isProviderSafeContext(ctx) {
-				summary = providerSafeReadinessSummary(summary)
+				// Hand the unreduced summary to the boundary renderer, which owns
+				// the state_reason omission for the provider-safe wire shape.
+				return providerSafeReadinessResult{summary: summary}, nil
 			}
 			return summary, nil
 		},
@@ -597,10 +599,7 @@ func (s *Server) toolFeedRead() Tool {
 					return nil, err
 				}
 				if isProviderSafeContext(ctx) {
-					return map[string]any{
-						"contract": feed.ProviderSafeContract,
-						"items":    feed.ProjectProviderSafeItems(items),
-					}, nil
+					return providerSafeFeedSnapshot{items: items}, nil
 				}
 				return map[string]any{"items": items}, nil
 			}
@@ -643,17 +642,14 @@ func (s *Server) toolFeedRead() Tool {
 			if err != nil {
 				return nil, err
 			}
-			responseItems := any(page.Items)
-			response := map[string]any{
-				"items":       responseItems,
+			if isProviderSafeContext(ctx) {
+				return providerSafeFeedPage{page: page}, nil
+			}
+			return map[string]any{
+				"items":       page.Items,
 				"next_cursor": page.NextCursor,
 				"has_more":    page.HasMore,
-			}
-			if isProviderSafeContext(ctx) {
-				response["contract"] = feed.ProviderSafeContract
-				response["items"] = feed.ProjectProviderSafeItems(page.Items)
-			}
-			return response, nil
+			}, nil
 		},
 	}
 }
@@ -759,17 +755,10 @@ func (s *Server) toolWorkItemsList() Tool {
 			if err != nil {
 				return nil, err
 			}
-			out := make([]workItemDTO, 0, len(items))
 			if isProviderSafeContext(ctx) {
-				safe := make([]providerSafeWorkItemDTO, 0, len(items))
-				for _, item := range items {
-					safe = append(safe, toProviderSafeWorkItemDTO(item))
-				}
-				return map[string]any{
-					"contract": ProviderSafeWorkItemsContract,
-					"items":    safe,
-				}, nil
+				return providerSafeWorkItemsResult{items: items}, nil
 			}
+			out := make([]workItemDTO, 0, len(items))
 			for _, item := range items {
 				out = append(out, toWorkItemDTO(item))
 			}
@@ -810,10 +799,7 @@ func (s *Server) toolWorkItemsGet() Tool {
 				return nil, err
 			}
 			if isProviderSafeContext(ctx) {
-				return map[string]any{
-					"contract":  ProviderSafeWorkItemsContract,
-					"work_item": toProviderSafeWorkItemDTO(item),
-				}, nil
+				return providerSafeWorkItemResult{item: item}, nil
 			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
@@ -884,6 +870,9 @@ func (s *Server) toolWorkItemsCreate() Tool {
 			})
 			if err != nil {
 				return nil, workItemToolErr(err, nil)
+			}
+			if isProviderSafeContext(ctx) {
+				return providerSafeWorkItemResult{item: item, echoID: true}, nil
 			}
 			return map[string]any{
 				"work_item_id": item.ID,
@@ -963,6 +952,9 @@ func (s *Server) toolWorkItemsSpawnChild() Tool {
 			})
 			if err != nil {
 				return nil, workItemToolErr(err, fmt.Errorf("parent work item %s not found", parent))
+			}
+			if isProviderSafeContext(ctx) {
+				return providerSafeWorkItemResult{item: item, echoID: true, parentID: &parent}, nil
 			}
 			return map[string]any{
 				"parent_id":    parent,
@@ -1349,6 +1341,9 @@ func (s *Server) toolWorkItemsUpdateMetadata() Tool {
 			if err != nil {
 				return nil, workItemToolErr(err, fmt.Errorf("work item %s not found", id))
 			}
+			if isProviderSafeContext(ctx) {
+				return providerSafeWorkItemResult{item: item}, nil
+			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
 	}
@@ -1390,6 +1385,9 @@ func (s *Server) toolWorkItemsTransition() Tool {
 			item, err := s.deps.WorkItems.Transition(ctx, id, to, args.Reason, actor)
 			if err != nil {
 				return nil, workItemToolErr(err, fmt.Errorf("work item %s not found", id))
+			}
+			if isProviderSafeContext(ctx) {
+				return providerSafeWorkItemResult{item: item}, nil
 			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},

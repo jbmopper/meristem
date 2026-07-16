@@ -14,6 +14,7 @@ import (
 	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -134,6 +135,23 @@ func TestProviderSafeHTTPContextAllVersusTreeAndNoEventPayloadLeakage(t *testing
 		t.Fatalf("delegated list leaked out-of-tree B: %s", delegatedList)
 	}
 
+	// work_items.get returns a single work-item DTO and is on both provider read
+	// surfaces; fetching the blocked child A1 (which carries PRIVATE-STATE-REASON)
+	// must be reduced like the list read.
+	ownerGet := providerHTTPToolText(t, s, owner, "work_items.get", map[string]any{"id": a1.ID.String()})
+	if !strings.Contains(ownerGet, ProviderSafeWorkItemsContract) {
+		t.Fatalf("work_items.get did not select provider-safe work-item DTO: %s", ownerGet)
+	}
+	if !strings.Contains(ownerGet, "Visible child A1") {
+		t.Fatalf("work_items.get missing requested item: %s", ownerGet)
+	}
+	for _, omitted := range []string{"created_by", "state_reason"} {
+		if strings.Contains(ownerGet, omitted) {
+			t.Errorf("work_items.get leaked %q: %s", omitted, ownerGet)
+		}
+	}
+	assertProviderTextSafe(t, ownerGet)
+
 	ownerTrackerAuthority, err := access.ReduceProviderAuthority(access.ProviderOwnerTrackerWriteV1, uuid.Nil)
 	if err != nil {
 		t.Fatal(err)
@@ -159,6 +177,131 @@ func TestProviderSafeHTTPContextAllVersusTreeAndNoEventPayloadLeakage(t *testing
 
 	trackerReadiness := providerHTTPToolTextWithOptions(t, s, ownerTracker, "backlog.readiness", map[string]any{}, HTTPOptions{Profile: ProviderTrackerHTTPProfile()})
 	assertProviderTextSafe(t, trackerReadiness)
+}
+
+// TestProviderTrackerMutationsRenderProviderSafe pins the provider-safe wire
+// shape for the tracker mutation surface. Before this enforcement the write
+// tools returned the ordinary operator DTO under the provider-tracker profile,
+// leaking created_by and the free-form state_reason. Every mutation response
+// must now be reduced to provider_safe_work_items.v1, and the append_event
+// acknowledgement must join no DTO at all.
+func TestProviderTrackerMutationsRenderProviderSafe(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "provider-tracker-mut-root",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := rootResult.Token
+
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems:   workitems.NewService(pool, writer),
+	}, ServerInfo{Name: "provider-safe-test", Version: "test"}, nil)
+	profile := ProviderTrackerHTTPProfile()
+
+	create := callHTTPTool(t, s, root, profile, "work_items.create", map[string]any{
+		"title":                        "Mutation canary parent",
+		"body":                         "ordinary tracker body",
+		"human_review_status":          "blocked",
+		"suggested_convergence_checks": []string{"event:mut-parent"},
+		"idempotency_key":              "mut-create",
+	})
+	if create.IsError || create.TransportError != "" {
+		t.Fatalf("create failed: %+v", create)
+	}
+	assertProviderSafeMutationText(t, "work_items.create", create.Text)
+	if !strings.Contains(create.Text, "work_item_id") {
+		t.Errorf("create did not echo work_item_id: %s", create.Text)
+	}
+	parentID := createdWorkItemID(t, create.Text)
+
+	spawn := callHTTPTool(t, s, root, profile, "work_items.spawn_child", map[string]any{
+		"parent_id":                    parentID.String(),
+		"title":                        "Mutation canary child",
+		"body":                         "ordinary child body",
+		"human_review_status":          "blocked",
+		"suggested_convergence_checks": []string{"event:mut-child"},
+		"idempotency_key":              "mut-spawn",
+	})
+	if spawn.IsError || spawn.TransportError != "" {
+		t.Fatalf("spawn_child failed: %+v", spawn)
+	}
+	assertProviderSafeMutationText(t, "work_items.spawn_child", spawn.Text)
+	if !strings.Contains(spawn.Text, "parent_id") {
+		t.Errorf("spawn_child did not echo parent_id: %s", spawn.Text)
+	}
+
+	update := callHTTPTool(t, s, root, profile, "work_items.update_metadata", map[string]any{
+		"id":                           parentID.String(),
+		"human_review_status":          "blocked",
+		"suggested_convergence_checks": []string{"event:mut-parent", "event:mut-extra"},
+		"idempotency_key":              "mut-update",
+	})
+	if update.IsError || update.TransportError != "" {
+		t.Fatalf("update_metadata failed: %+v", update)
+	}
+	assertProviderSafeMutationText(t, "work_items.update_metadata", update.Text)
+
+	transition := callHTTPTool(t, s, root, profile, "work_items.transition", map[string]any{
+		"id":              parentID.String(),
+		"to":              "blocked",
+		"reason":          "PRIVATE-STATE-REASON-MUTATION",
+		"idempotency_key": "mut-transition",
+	})
+	if transition.IsError || transition.TransportError != "" {
+		t.Fatalf("transition failed: %+v", transition)
+	}
+	assertProviderSafeMutationText(t, "work_items.transition", transition.Text)
+	if strings.Contains(transition.Text, "PRIVATE-STATE-REASON-MUTATION") {
+		t.Fatalf("transition leaked the free-form state reason: %s", transition.Text)
+	}
+
+	// append_event's acknowledgement joins no DTO and echoes no free-form field;
+	// it is the one provider tool with a documented no-reduction justification, so
+	// its response must carry only the id echo and the boolean, never a work-item
+	// DTO or contract marker.
+	appended := callHTTPTool(t, s, root, profile, "work_items.append_event", map[string]any{
+		"id":              parentID.String(),
+		"kind":            "provider.note",
+		"payload":         map[string]any{"note": "ordinary tracker note"},
+		"idempotency_key": "mut-append",
+	})
+	if appended.IsError || appended.TransportError != "" {
+		t.Fatalf("append_event failed: %+v", appended)
+	}
+	if !strings.Contains(appended.Text, "work_item_id") || !strings.Contains(appended.Text, "appended") {
+		t.Errorf("append_event acknowledgement missing expected fields: %s", appended.Text)
+	}
+	for _, forbidden := range []string{ProviderSafeWorkItemsContract, `"work_item"`, "created_by", "state_reason", "PRIVATE-STATE-REASON-MUTATION"} {
+		if strings.Contains(appended.Text, forbidden) {
+			t.Errorf("append_event acknowledgement leaked %q: %s", forbidden, appended.Text)
+		}
+	}
+}
+
+// assertProviderSafeMutationText asserts a tracker mutation response was reduced
+// to the provider-safe work-item contract with no operator-only fields.
+func assertProviderSafeMutationText(t *testing.T, tool, text string) {
+	t.Helper()
+	if !strings.Contains(text, ProviderSafeWorkItemsContract) {
+		t.Errorf("%s response missing provider-safe contract: %s", tool, text)
+	}
+	for _, forbidden := range []string{"created_by", "state_reason", "PRIVATE-STATE-REASON"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("%s response leaked %q: %s", tool, forbidden, text)
+		}
+	}
 }
 
 func providerHTTPToolText(t *testing.T, s *Server, actor domain.Token, name string, args map[string]any) string {
