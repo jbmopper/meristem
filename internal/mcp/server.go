@@ -379,7 +379,7 @@ func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw jso
 }
 
 func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (map[string]any, error) {
-	req, arguments, err := mcpIdempotencyRequest(actor, tool, raw)
+	req, arguments, err := mcpIdempotencyRequest(ctx, actor, tool, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -430,14 +430,14 @@ func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.
 }
 
 func mcpCallContext(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (context.Context, json.RawMessage, error) {
-	req, stripped, err := mcpIdempotencyRequest(actor, tool, raw)
+	req, stripped, err := mcpIdempotencyRequest(ctx, actor, tool, raw)
 	if err != nil {
 		return ctx, raw, err
 	}
 	return idempotency.WithRequest(ctx, req), stripped, nil
 }
 
-func mcpIdempotencyRequest(actor domain.Token, tool Tool, raw json.RawMessage) (idempotency.Request, json.RawMessage, error) {
+func mcpIdempotencyRequest(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (idempotency.Request, json.RawMessage, error) {
 	if !tool.Mutates {
 		return idempotency.Request{}, raw, nil
 	}
@@ -474,6 +474,13 @@ func mcpIdempotencyRequest(actor domain.Token, tool Tool, raw json.RawMessage) (
 	requestPayload := map[string]any{
 		"tool":      tool.Name,
 		"arguments": stripped,
+	}
+	if isProviderSafeContext(ctx) {
+		// Keep the logical idempotency identity (token/scope/key) unchanged while
+		// versioning the response-data contract inside the request hash. A cache
+		// row recorded before provider-safe boundary rendering therefore conflicts
+		// instead of replaying its legacy raw DTO or re-executing the mutation.
+		requestPayload["response_contract"] = providerSafeIdempotencyContract
 	}
 	canonicalRequest, err := events.CanonicalJSON(requestPayload)
 	if err != nil {

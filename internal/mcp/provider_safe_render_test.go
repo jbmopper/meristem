@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/domain"
 )
 
@@ -123,32 +125,91 @@ func TestRenderProviderSafeResultFailsClosed(t *testing.T) {
 	})
 }
 
-// TestProviderSafeNoReductionEntryPassesThrough documents that the one tool with
-// a no-reduction justification (work_items.append_event) is registered (so it
-// clears the fail-closed gate) and is emitted unchanged, since its
-// acknowledgement joins no DTO and echoes no free-form field.
-func TestProviderSafeNoReductionEntryPassesThrough(t *testing.T) {
+// TestProviderSafeAppendEventRendererIsTypedAndExact pins the acknowledgement
+// to a typed carrier and a two-field wire shape. A raw map must fail closed so
+// future fields cannot leak through an apparent "safe acknowledgement".
+func TestProviderSafeAppendEventRendererIsTypedAndExact(t *testing.T) {
 	const tool = "work_items.append_event"
 	if !providerSafeRenderRegistered(tool) {
 		t.Fatalf("%s must be registered to clear the fail-closed boundary gate", tool)
 	}
-	renderer, ok := providerSafeRendererFor(tool)
-	if !ok {
-		t.Fatalf("%s renderer missing", tool)
-	}
-	if renderer.providerSafeRenderable() {
-		t.Fatalf("%s should be a documented no-reduction pass-through, not a reducer", tool)
-	}
-	ack := map[string]any{"work_item_id": uuid.New(), "appended": true}
+	id := uuid.New()
+	ack := providerSafeAppendEventResult{workItemID: id, appended: true}
 	rendered, rerr := renderProviderSafeResult(tool, ack)
 	if rerr != nil {
-		t.Fatalf("no-reduction render failed: %+v", rerr)
+		t.Fatalf("append-event render failed: %+v", rerr)
 	}
 	got, ok := rendered.(map[string]any)
 	if !ok {
-		t.Fatalf("no-reduction render changed the type: %T", rendered)
+		t.Fatalf("append-event renderer returned %T", rendered)
 	}
-	if got["appended"] != true || got["work_item_id"] != ack["work_item_id"] {
+	if len(got) != 2 || got["appended"] != true || got["work_item_id"] != id {
 		t.Fatalf("acknowledgement was altered: %+v", got)
+	}
+	if _, rerr := renderProviderSafeResult(tool, map[string]any{
+		"work_item_id": id,
+		"appended":     true,
+		"future_field": "must-not-pass-through",
+	}); rerr == nil {
+		t.Fatal("raw append-event map rendered instead of failing closed")
+	}
+}
+
+func TestProviderSafeReadinessRendererProjectsEveryGroup(t *testing.T) {
+	privateReason := "PRIVATE-READINESS-STATE-REASON"
+	now := time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)
+	item := func(title string) backlog.Item {
+		return backlog.Item{
+			ID:                         uuid.New(),
+			Title:                      title,
+			State:                      domain.WorkItemBlocked,
+			StateReason:                &privateReason,
+			HumanReviewStatus:          domain.HumanReviewBlocked,
+			SuggestedConvergenceChecks: []string{"event:reviewed"},
+			StateEnteredAt:             now,
+			UpdatedAt:                  now,
+			Tags:                       []string{"blocked"},
+		}
+	}
+	summary := backlog.Summary{
+		Contract:    backlog.Contract,
+		Source:      "test projection",
+		Limit:       0,
+		AsOf:        now,
+		Totals:      backlog.Totals{Visible: 5, NonTerminal: 5},
+		StateCounts: map[domain.WorkItemState]int{domain.WorkItemBlocked: 5},
+		Groups: backlog.Groups{
+			V1Substrate: []backlog.Item{item("V1-GROUP-CANARY")},
+			ReadyNext:   []backlog.Item{item("READY-GROUP-CANARY")},
+			Blockers:    []backlog.Item{item("BLOCKER-GROUP-CANARY")},
+			Running:     []backlog.Item{item("RUNNING-GROUP-CANARY")},
+			StaleNoise:  []backlog.Item{item("STALE-GROUP-CANARY")},
+		},
+		SpecSeedDrift:       []string{"missing_refresh_item:R9"},
+		ClassificationRules: []string{"explicit test rule"},
+	}
+
+	rendered, rerr := renderProviderSafeResult("backlog.readiness", providerSafeReadinessResult{summary: summary})
+	if rerr != nil {
+		t.Fatalf("readiness render failed: %+v", rerr)
+	}
+	encoded, err := json.Marshal(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, required := range []string{
+		"v1_substrate", "ready_next", "blockers", "running", "stale_noise",
+		"V1-GROUP-CANARY", "READY-GROUP-CANARY", "BLOCKER-GROUP-CANARY",
+		"RUNNING-GROUP-CANARY", "STALE-GROUP-CANARY", "explicit test rule",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("provider readiness omitted %q: %s", required, text)
+		}
+	}
+	for _, forbidden := range []string{"state_reason", privateReason} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("provider readiness leaked %q: %s", forbidden, text)
+		}
 	}
 }

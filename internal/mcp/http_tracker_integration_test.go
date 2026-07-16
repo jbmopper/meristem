@@ -118,6 +118,58 @@ func TestProviderTrackerHTTPMutationIdempotencyIntegration(t *testing.T) {
 	}
 }
 
+// TestProviderTrackerRejectsLegacyRawIdempotencyReplay seeds the exact cache
+// shape produced before provider-safe response-contract versioning: the same
+// tool, arguments, key, and old request hash paired with an ordinary DTO. The
+// provider retry must conflict under the unchanged logical key, not replay the
+// raw body and not execute the mutation again.
+func TestProviderTrackerRejectsLegacyRawIdempotencyReplay(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	actor := createMCPTestActor(t, ctx, pool, writer, "provider-legacy-cache")
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems:   workitems.NewService(pool, writer),
+	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	args := map[string]any{
+		"title":                        "Legacy raw cache canary",
+		"body":                         "ordinary operator DTO response",
+		"human_review_status":          "blocked",
+		"suggested_convergence_checks": []string{"event:legacy-cache-reviewed"},
+		"idempotency_key":              "legacy-provider-cache-key",
+	}
+
+	// An unrestricted call uses the pre-discriminator request hash and stores the
+	// ordinary work-item DTO, faithfully modeling a legacy provider cache row
+	// without bypassing the event-backed idempotency writer in the test.
+	legacy := callHTTPTool(t, s, actor, nil, "work_items.create", args)
+	if legacy.IsError || legacy.TransportError != "" {
+		t.Fatalf("seed legacy cache row: %+v", legacy)
+	}
+	if !strings.Contains(legacy.Text, "created_by") || strings.Contains(legacy.Text, ProviderSafeWorkItemsContract) {
+		t.Fatalf("seed response was not an ordinary legacy DTO: %s", legacy.Text)
+	}
+
+	retry := callHTTPTool(t, s, actor, ProviderTrackerHTTPProfile(), "work_items.create", args)
+	if !retry.IsError || !strings.Contains(retry.Text, "idempotency_key_conflict") {
+		t.Fatalf("provider retry did not fail closed on the legacy row: %+v", retry)
+	}
+	if strings.Contains(retry.Text, "created_by") || strings.Contains(retry.Text, "ordinary operator DTO response") {
+		t.Fatalf("provider conflict leaked the cached legacy body: %s", retry.Text)
+	}
+	if got := eventCount(t, pool, domain.EventWorkItemCreated); got != 1 {
+		t.Fatalf("legacy provider retry re-executed mutation: created events=%d", got)
+	}
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.create", "legacy-provider-cache-key"); got != 1 {
+		t.Fatalf("legacy cache conflict changed idempotency rows: got %d", got)
+	}
+}
+
 func TestProviderTrackerHTTPHiddenCallsHaveNoDurableEffectsIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newMCPIntegrationPool(t)

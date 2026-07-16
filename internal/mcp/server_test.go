@@ -443,6 +443,26 @@ func TestServer_MutationIdempotencyContextCanonicalizesArguments(t *testing.T) {
 	if id3 == id1 {
 		t.Fatalf("different logical MCP mutation reused subject id %s", id3)
 	}
+
+	providerCtx, providerStripped, err := mcpCallContext(
+		withProviderSafeContext(context.Background()),
+		actor,
+		tool,
+		json.RawMessage(`{"body":"body","title":"same","idempotency_key":"idem-1"}`),
+	)
+	if err != nil {
+		t.Fatalf("mcpCallContext provider-safe: %v", err)
+	}
+	providerID, ok := idempotency.SubjectID(providerCtx, "work_item")
+	if !ok {
+		t.Fatal("provider-safe context did not contain idempotency request")
+	}
+	if providerID == id1 {
+		t.Fatalf("provider-safe response contract did not change request hash: %s", providerID)
+	}
+	if string(providerStripped) != string(stripped1) {
+		t.Fatalf("response contract changed handler arguments: ordinary=%s provider=%s", stripped1, providerStripped)
+	}
 }
 
 func TestServer_CallTool_AcceptsCursorAlias(t *testing.T) {

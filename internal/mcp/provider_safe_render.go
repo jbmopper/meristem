@@ -1,12 +1,21 @@
 package mcp
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/backlog"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
 )
+
+// providerSafeIdempotencyContract versions the response-data contract folded
+// into provider-facing mutation request hashes. Bump this only when a cached
+// provider mutation response from the previous version is no longer safe to
+// replay verbatim. The token/scope/key identity remains unchanged, so a legacy
+// row produces an idempotency conflict rather than re-running the mutation.
+const providerSafeIdempotencyContract = "provider_safe_mcp_response.v1"
 
 // Provider-safe response rendering is a fail-closed contract enforced at the
 // HTTP profile/tool boundary rather than inside each handler.
@@ -34,62 +43,35 @@ import (
 // This is deliberately not free-form JSON key redaction. Each renderer is typed
 // to its tool's carrier and rebuilds an explicit allowlisted shape.
 
-// providerSafeRenderer is the per-tool provider-safe rendering contract. Exactly
-// one of render or noReductionJustification is set.
-//
-//   - render reduces the handler's typed carrier into the provider-safe wire
-//     shape. It must fail closed (return an error) on any unexpected carrier
-//     type.
-//   - noReductionJustification marks a tool whose ordinary response carries no
-//     private DTO fields, so its handler result is emitted unchanged. This is a
-//     deliberate, reviewed exception and is documented per tool; a canary test
-//     guards each such response against regressions.
-type providerSafeRenderer struct {
-	render                   func(result any) (any, error)
-	noReductionJustification string
-}
-
-// providerSafeRenderable reports whether a renderer transforms the result (true)
-// or passes it through under a documented no-reduction exception (false).
-func (r providerSafeRenderer) providerSafeRenderable() bool {
-	return r.render != nil
-}
-
-// apply runs the renderer, failing closed on an unexpected carrier type.
-func (r providerSafeRenderer) apply(result any) (any, error) {
-	if r.render == nil {
-		return result, nil
-	}
-	return r.render(result)
-}
+// providerSafeRenderer is the per-tool provider-safe rendering contract. Every
+// reachable tool has a non-nil renderer and a typed carrier; there are no raw
+// pass-through exceptions. An unexpected carrier must fail closed.
+type providerSafeRenderer func(result any) (any, error)
 
 // providerSafeRenderers maps canonical tool names to their provider-safe
 // rendering contract. Every tool in ProviderSafeReadHTTPProfile and
 // ProviderTrackerHTTPProfile (and ReadOnlyHTTPTools) must appear here; a
 // provider-safe-guarding table test enforces that.
 var providerSafeRenderers = map[string]providerSafeRenderer{
-	"feed.read":         {render: renderProviderSafeFeed},
-	"backlog.readiness": {render: renderProviderSafeReadiness},
-	"work_items.list":   {render: renderProviderSafeWorkItemList},
-	"work_items.get":    {render: renderProviderSafeWorkItem},
+	"feed.read":         renderProviderSafeFeed,
+	"backlog.readiness": renderProviderSafeReadiness,
+	"work_items.list":   renderProviderSafeWorkItemList,
+	"work_items.get":    renderProviderSafeWorkItem,
 	// Tracker mutations echo the item as the caller just wrote it. Even so, the
 	// ordinary work-item DTO carries created_by and the free-form state_reason,
 	// which a provider must never receive, so create/spawn_child/update_metadata/
 	// transition are reduced to provider_safe_work_items.v1 like the reads.
-	"work_items.create":          {render: renderProviderSafeWorkItem},
-	"work_items.spawn_child":     {render: renderProviderSafeWorkItem},
-	"work_items.update_metadata": {render: renderProviderSafeWorkItem},
-	"work_items.transition":      {render: renderProviderSafeWorkItem},
-	// work_items.append_event returns only {work_item_id, appended}. It joins no
-	// DTO and echoes no free-form field, so it needs no reduction. The
-	// TestProviderSafeAppendEventResponseCarriesNoDTO canary keeps that true.
-	"work_items.append_event": {noReductionJustification: "acknowledgement echoes only work_item_id and a boolean; no DTO or free-form field is serialized"},
+	"work_items.create":          renderProviderSafeWorkItem,
+	"work_items.spawn_child":     renderProviderSafeWorkItem,
+	"work_items.update_metadata": renderProviderSafeWorkItem,
+	"work_items.transition":      renderProviderSafeWorkItem,
+	"work_items.append_event":    renderProviderSafeAppendEvent,
 }
 
 // providerSafeRendererFor looks up the renderer for a canonical tool name.
 func providerSafeRendererFor(tool string) (providerSafeRenderer, bool) {
 	renderer, ok := providerSafeRenderers[tool]
-	return renderer, ok
+	return renderer, ok && renderer != nil
 }
 
 // providerSafeRenderRegistered reports whether the tool has any provider-safe
@@ -97,7 +79,10 @@ func providerSafeRendererFor(tool string) (providerSafeRenderer, bool) {
 // pre-dispatch gate: a provider-allowed tool with no entry is rejected before
 // its handler can run.
 func providerSafeRenderRegistered(tool string) bool {
-	_, ok := providerSafeRenderers[tool]
+	renderer, ok := providerSafeRenderers[tool]
+	if renderer == nil {
+		return false
+	}
 	return ok
 }
 
@@ -108,7 +93,7 @@ func renderProviderSafeResult(tool string, result any) (any, *rpcError) {
 	if !ok {
 		return nil, rpcErrorf(errCodeMethodNotFound, "provider-safe response rendering not registered for tool: "+tool)
 	}
-	rendered, err := renderer.apply(result)
+	rendered, err := renderer(result)
 	if err != nil {
 		return nil, rpcErrorf(errCodeInternal, err.Error())
 	}
@@ -141,8 +126,54 @@ type providerSafeWorkItemResult struct {
 	parentID *uuid.UUID // spawn_child echoes parent_id
 }
 
+type providerSafeAppendEventResult struct {
+	workItemID uuid.UUID
+	appended   bool
+}
+
 type providerSafeReadinessResult struct {
 	summary backlog.Summary
+}
+
+// These readiness DTOs deliberately mirror the provider-approved fields one by
+// one. They must not embed backlog.Summary, Groups, or Item: those ordinary
+// domain DTOs are designed to grow, and a new field must not silently become a
+// provider-facing field merely because encoding/json discovers it.
+type providerSafeReadinessDTO struct {
+	Contract            string                         `json:"contract"`
+	Source              string                         `json:"source"`
+	Limit               int                            `json:"limit"`
+	AsOf                time.Time                      `json:"as_of"`
+	Totals              providerSafeReadinessTotalsDTO `json:"totals"`
+	StateCounts         map[domain.WorkItemState]int   `json:"state_counts"`
+	Groups              providerSafeReadinessGroupsDTO `json:"groups"`
+	SpecSeedDrift       []string                       `json:"spec_seed_drift"`
+	ClassificationRules []string                       `json:"classification_rules"`
+}
+
+type providerSafeReadinessTotalsDTO struct {
+	Visible     int `json:"visible"`
+	Terminal    int `json:"terminal"`
+	NonTerminal int `json:"non_terminal"`
+}
+
+type providerSafeReadinessGroupsDTO struct {
+	V1Substrate []providerSafeReadinessItemDTO `json:"v1_substrate"`
+	ReadyNext   []providerSafeReadinessItemDTO `json:"ready_next"`
+	Blockers    []providerSafeReadinessItemDTO `json:"blockers"`
+	Running     []providerSafeReadinessItemDTO `json:"running"`
+	StaleNoise  []providerSafeReadinessItemDTO `json:"stale_noise"`
+}
+
+type providerSafeReadinessItemDTO struct {
+	ID                         uuid.UUID                `json:"id"`
+	Title                      string                   `json:"title"`
+	State                      domain.WorkItemState     `json:"state"`
+	HumanReviewStatus          domain.HumanReviewStatus `json:"human_review_status"`
+	SuggestedConvergenceChecks []string                 `json:"suggested_convergence_checks,omitempty"`
+	StateEnteredAt             time.Time                `json:"state_entered_at"`
+	UpdatedAt                  time.Time                `json:"updated_at"`
+	Tags                       []string                 `json:"tags,omitempty"`
 }
 
 func renderProviderSafeFeed(result any) (any, error) {
@@ -197,12 +228,68 @@ func renderProviderSafeWorkItem(result any) (any, error) {
 	return out, nil
 }
 
+func renderProviderSafeAppendEvent(result any) (any, error) {
+	r, ok := result.(providerSafeAppendEventResult)
+	if !ok {
+		return nil, providerSafeRenderMismatch("work_items.append_event", result)
+	}
+	return map[string]any{
+		"work_item_id": r.workItemID,
+		"appended":     r.appended,
+	}, nil
+}
+
 func renderProviderSafeReadiness(result any) (any, error) {
 	r, ok := result.(providerSafeReadinessResult)
 	if !ok {
 		return nil, providerSafeRenderMismatch("backlog.readiness", result)
 	}
-	return providerSafeReadinessSummary(r.summary), nil
+	return toProviderSafeReadinessDTO(r.summary), nil
+}
+
+func toProviderSafeReadinessDTO(summary backlog.Summary) providerSafeReadinessDTO {
+	stateCounts := make(map[domain.WorkItemState]int, len(summary.StateCounts))
+	for state, count := range summary.StateCounts {
+		stateCounts[state] = count
+	}
+	return providerSafeReadinessDTO{
+		Contract: summary.Contract,
+		Source:   summary.Source,
+		Limit:    summary.Limit,
+		AsOf:     summary.AsOf,
+		Totals: providerSafeReadinessTotalsDTO{
+			Visible:     summary.Totals.Visible,
+			Terminal:    summary.Totals.Terminal,
+			NonTerminal: summary.Totals.NonTerminal,
+		},
+		StateCounts: stateCounts,
+		Groups: providerSafeReadinessGroupsDTO{
+			V1Substrate: projectProviderSafeReadinessItems(summary.Groups.V1Substrate),
+			ReadyNext:   projectProviderSafeReadinessItems(summary.Groups.ReadyNext),
+			Blockers:    projectProviderSafeReadinessItems(summary.Groups.Blockers),
+			Running:     projectProviderSafeReadinessItems(summary.Groups.Running),
+			StaleNoise:  projectProviderSafeReadinessItems(summary.Groups.StaleNoise),
+		},
+		SpecSeedDrift:       append([]string(nil), summary.SpecSeedDrift...),
+		ClassificationRules: append([]string(nil), summary.ClassificationRules...),
+	}
+}
+
+func projectProviderSafeReadinessItems(items []backlog.Item) []providerSafeReadinessItemDTO {
+	out := make([]providerSafeReadinessItemDTO, 0, len(items))
+	for _, item := range items {
+		out = append(out, providerSafeReadinessItemDTO{
+			ID:                         item.ID,
+			Title:                      item.Title,
+			State:                      item.State,
+			HumanReviewStatus:          item.HumanReviewStatus,
+			SuggestedConvergenceChecks: append([]string(nil), item.SuggestedConvergenceChecks...),
+			StateEnteredAt:             item.StateEnteredAt,
+			UpdatedAt:                  item.UpdatedAt,
+			Tags:                       append([]string(nil), item.Tags...),
+		})
+	}
+	return out
 }
 
 func providerSafeRenderMismatch(tool string, result any) error {
