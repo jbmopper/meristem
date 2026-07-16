@@ -1,10 +1,14 @@
 package worker
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 func TestDecideConvergenceStepAppendsFirstVerdict(t *testing.T) {
@@ -190,5 +194,95 @@ func TestDecodeEventAppendedInnerToleratesLegacyShapes(t *testing.T) {
 				t.Fatalf("innerKind = %q, want %q", innerKind, tc.wantInnerKind)
 			}
 		})
+	}
+}
+
+func TestCollectEventAppendedSignalsDerivesLatestAttributedReviewVerdict(t *testing.T) {
+	actor := uuid.New()
+	acceptedID := uuid.New()
+	blockingID := uuid.New()
+	rows := []eventAppendedSignalRow{
+		testEventAppendedRow(uuid.New(), actor, `{"inner_kind":"checklist.item:event:review.verdict_recorded","inner":{"pass":true}}`),
+		testEventAppendedRow(acceptedID, actor, `{"inner_kind":"review.verdict_recorded","inner":{"verdict":"accepted","pass":false,"reviewer":"forged","event_id":"forged"}}`),
+		testEventAppendedRow(blockingID, actor, `{"inner_kind":"review.verdict_recorded","inner":{"verdict":"blocking_finding","pass":true}}`),
+	}
+
+	signals, unusable := collectEventAppendedSignals(rows)
+	if len(unusable) != 0 {
+		t.Fatalf("unusable = %+v, want none", unusable)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("signals = %+v, want one latest review signal", signals)
+	}
+	got := signals[0]
+	if got.Kind != workitems.ReviewVerdictCheckKind || got.Pass == nil || *got.Pass {
+		t.Fatalf("latest blocking review signal = %+v, want reserved pass:false", got)
+	}
+	if got.Source.EventID != blockingID.String() {
+		t.Fatalf("source event id = %q, want %s", got.Source.EventID, blockingID)
+	}
+}
+
+func TestCollectEventAppendedSignalsAcceptedWithFindingSupersedesBlocking(t *testing.T) {
+	actor := uuid.New()
+	acceptedID := uuid.New()
+	rows := []eventAppendedSignalRow{
+		testEventAppendedRow(uuid.New(), actor, `{"inner_kind":"review.verdict_recorded","inner":{"verdict":"blocking_finding"}}`),
+		testEventAppendedRow(acceptedID, actor, `{"inner_kind":"review.verdict_recorded","inner":{"verdict":"accepted_with_finding"}}`),
+	}
+
+	signals, unusable := collectEventAppendedSignals(rows)
+	if len(unusable) != 0 || len(signals) != 1 {
+		t.Fatalf("signals/unusable = %+v/%+v, want one usable signal", signals, unusable)
+	}
+	if signals[0].Pass == nil || !*signals[0].Pass || signals[0].Source.EventID != acceptedID.String() {
+		t.Fatalf("latest accepted_with_finding signal = %+v, want attributed pass:true", signals[0])
+	}
+}
+
+func TestCollectEventAppendedSignalsLatestInvalidReviewFailsClosed(t *testing.T) {
+	actor := uuid.New()
+	invalidID := uuid.New()
+	rows := []eventAppendedSignalRow{
+		testEventAppendedRow(uuid.New(), actor, `{"inner_kind":"review.verdict_recorded","inner":{"verdict":"accepted"}}`),
+		testEventAppendedRow(invalidID, actor, `{"inner_kind":"review.verdict_recorded","inner":{"verdict":"unknown"}}`),
+	}
+
+	signals, unusable := collectEventAppendedSignals(rows)
+	if len(signals) != 0 {
+		t.Fatalf("signals = %+v, latest invalid verdict must suppress older acceptance", signals)
+	}
+	if len(unusable) != 1 || unusable[0].id != invalidID {
+		t.Fatalf("unusable = %+v, want latest invalid event %s", unusable, invalidID)
+	}
+}
+
+func TestCollectEventAppendedSignalsReviewWithoutActorFailsClosed(t *testing.T) {
+	id := uuid.New()
+	rows := []eventAppendedSignalRow{{
+		id:      id,
+		payload: json.RawMessage(`{"inner_kind":"review.verdict_recorded","inner":{"verdict":"accepted"}}`),
+	}}
+	signals, unusable := collectEventAppendedSignals(rows)
+	if len(signals) != 0 || len(unusable) != 1 || unusable[0].id != id {
+		t.Fatalf("signals/unusable = %+v/%+v, unattributed review must fail closed", signals, unusable)
+	}
+}
+
+func TestReservedReviewChecklistSignalCannotBeInjected(t *testing.T) {
+	payload := map[string]any{"pass": true}
+	if got := toConvergenceSignal(workitems.ReviewVerdictCheckKind, payload); got != nil {
+		t.Fatalf("event-appended reserved signal was accepted: %+v", got)
+	}
+	if got := toConvergenceSignalFromSignalRow(workitems.ReviewVerdictCheckKind, "external", payload); got != nil {
+		t.Fatalf("signals-table reserved signal was accepted: %+v", got)
+	}
+}
+
+func testEventAppendedRow(id, actor uuid.UUID, payload string) eventAppendedSignalRow {
+	return eventAppendedSignalRow{
+		id:           id,
+		actorTokenID: uuid.NullUUID{UUID: actor, Valid: true},
+		payload:      json.RawMessage(payload),
 	}
 }

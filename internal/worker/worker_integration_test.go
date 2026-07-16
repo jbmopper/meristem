@@ -1098,6 +1098,10 @@ func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
 	if first.DispatchCandidatesScanned != 1 || first.DispatchesRequested != 1 {
 		t.Fatalf("dispatch after review = candidates %d requested %d, want 1/1", first.DispatchCandidatesScanned, first.DispatchesRequested)
 	}
+	if first.ReviewDispatchJobsClaimed != 1 || first.ReviewDispatchJobsStarted != 1 {
+		t.Fatalf("review dispatch execution = claimed %d started %d, want 1/1",
+			first.ReviewDispatchJobsClaimed, first.ReviewDispatchJobsStarted)
+	}
 	childID := singleChildForParent(t, ctx, pool, implementation.ID)
 	if want := reviewChildID(implementation.ID); childID != want {
 		t.Fatalf("review child id = %s, want deterministic %s", childID, want)
@@ -1106,8 +1110,8 @@ func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get child: %v", err)
 	}
-	if child.State != domain.WorkItemTriaged {
-		t.Fatalf("child state = %s, want triaged", child.State)
+	if child.State != domain.WorkItemRunning {
+		t.Fatalf("child state = %s, want running", child.State)
 	}
 	if len(child.SuggestedConvergenceChecks) != 1 || child.SuggestedConvergenceChecks[0] != reviewChildCheck {
 		t.Fatalf("child checks = %v, want [%s]", child.SuggestedConvergenceChecks, reviewChildCheck)
@@ -1128,8 +1132,12 @@ func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
 		t.Fatalf("review second = candidates %d spawned %d already %d, want 1/0/1",
 			second.ReviewCandidatesScanned, second.ReviewChildrenSpawned, second.ReviewChildrenAlreadyPresent)
 	}
-	if second.DispatchesRequested != 0 || second.DispatchesAlreadyRequested != 1 {
-		t.Fatalf("dispatch second = requested %d already %d, want 0/1", second.DispatchesRequested, second.DispatchesAlreadyRequested)
+	if second.DispatchesRequested != 0 || second.DispatchesAlreadyRequested != 0 {
+		t.Fatalf("dispatch second = requested %d already %d, want 0/0", second.DispatchesRequested, second.DispatchesAlreadyRequested)
+	}
+	if second.ReviewDispatchJobsClaimed != 0 || second.ReviewDispatchJobsStarted != 0 {
+		t.Fatalf("review dispatch second = claimed %d started %d, want 0/0",
+			second.ReviewDispatchJobsClaimed, second.ReviewDispatchJobsStarted)
 	}
 	if got := countRelationsForParent(t, ctx, pool, implementation.ID); got != 1 {
 		t.Fatalf("implementation child count after repeat = %d, want 1", got)

@@ -180,6 +180,37 @@ func TestAppendEvent_RejectsBlankKind(t *testing.T) {
 	}
 }
 
+func TestAppendEvent_RejectsReservedOrMalformedReviewVerdictBeforeTransaction(t *testing.T) {
+	s := NewService(nil, nil)
+	tests := []struct {
+		name    string
+		kind    string
+		payload any
+		want    string
+	}{
+		{
+			name:    "direct derived checklist signal",
+			kind:    ReviewVerdictCheckKind,
+			payload: map[string]any{"pass": true},
+			want:    "is reserved",
+		},
+		{
+			name:    "unknown review verdict",
+			kind:    ReviewVerdictInnerKind,
+			payload: map[string]any{"verdict": "rubber_stamp"},
+			want:    "unknown review verdict",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.AppendEvent(context.Background(), uuid.New(), tc.kind, tc.payload, testActor())
+			if err == nil || !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("AppendEvent error = %v, want ErrInvalidRequest containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestUpdateMetadata_RejectsInvalidMetadata(t *testing.T) {
 	s := NewService(nil, nil)
 	cases := []struct {

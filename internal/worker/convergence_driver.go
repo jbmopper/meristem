@@ -64,6 +64,17 @@ type eventAppendedSignalEnvelope struct {
 	Inner     json.RawMessage `json:"inner"`
 }
 
+type eventAppendedSignalRow struct {
+	id           uuid.UUID
+	actorTokenID uuid.NullUUID
+	payload      json.RawMessage
+}
+
+type unusableEventAppendedSignal struct {
+	id     uuid.UUID
+	reason string
+}
+
 // decodeEventAppendedInner extracts the inner signal object from one
 // event_appended payload without ever failing the pass. The append contract
 // accepts arbitrary JSON, so inner may be an object, a string-encoded JSON
@@ -350,26 +361,22 @@ func (w *Worker) evaluateBuiltinQueryCheck(ctx context.Context, workItemID uuid.
 
 func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workItemID uuid.UUID) ([]convergence.Signal, int, error) {
 	rows, err := w.pool.Query(ctx, `
-		SELECT id, payload
+		SELECT id, actor_token_id, payload
 		FROM events
 		WHERE subject_kind = $1
 			AND subject_id = $2
 			AND kind = $3
-		ORDER BY occurred_at ASC
+		ORDER BY seq ASC
 	`, domain.SubjectWorkItem, workItemID, domain.EventWorkItemEventAppended)
 	if err != nil {
 		return nil, 0, fmt.Errorf("query event_appended signals for %s: %w", workItemID, err)
 	}
 	defer rows.Close()
 
-	type appendedRow struct {
-		id      uuid.UUID
-		payload json.RawMessage
-	}
-	var scanned []appendedRow
+	var scanned []eventAppendedSignalRow
 	for rows.Next() {
-		var row appendedRow
-		if err := rows.Scan(&row.id, &row.payload); err != nil {
+		var row eventAppendedSignalRow
+		if err := rows.Scan(&row.id, &row.actorTokenID, &row.payload); err != nil {
 			return nil, 0, fmt.Errorf("scan event_appended signal for %s: %w", workItemID, err)
 		}
 		scanned = append(scanned, row)
@@ -378,15 +385,62 @@ func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workIt
 		return nil, 0, fmt.Errorf("iterate event_appended signals for %s: %w", workItemID, err)
 	}
 
+	out, unusable := collectEventAppendedSignals(scanned)
+	for _, item := range unusable {
+		// Malformed history must not abort the pass (or suppress the breach
+		// pass behind it); it is skipped with durable evidence.
+		w.reportMalformedEventAppended(ctx, workItemID, item.id, item.reason)
+	}
+	return out, len(unusable), nil
+}
+
+// collectEventAppendedSignals deterministically folds rows ordered by event
+// seq. Review verdicts are a typed, reserved seam: only the latest verdict is
+// reduced, and direct caller-authored copies of its derived checklist kind are
+// ignored. That lets a later accepted review supersede a blocking finding
+// without weakening AllPassChecklist's strict failure semantics for every
+// other check.
+func collectEventAppendedSignals(scanned []eventAppendedSignalRow) ([]convergence.Signal, []unusableEventAppendedSignal) {
 	var out []convergence.Signal
-	malformed := 0
+	var unusable []unusableEventAppendedSignal
+	var latestReview *convergence.Signal
 	for _, row := range scanned {
 		inner, innerKind, reason := decodeEventAppendedInner(row.payload)
 		if reason != "" {
-			// Malformed history must not abort the pass (or suppress the
-			// breach pass behind it); it is skipped with durable evidence.
-			malformed++
-			w.reportMalformedEventAppended(ctx, workItemID, row.id, reason)
+			unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: reason})
+			continue
+		}
+		if innerKind == workitems.ReviewVerdictCheckKind {
+			// This signal is server-derived. Ignore any legacy/manual copy so
+			// it can never bypass the typed verdict or its event attribution.
+			continue
+		}
+		if innerKind == workitems.ReviewVerdictInnerKind {
+			// The latest review event is authoritative even when invalid: clear
+			// an older acceptance before validating so malformed history fails
+			// closed instead of silently reviving the earlier pass.
+			latestReview = nil
+			if inner == nil {
+				unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: "review verdict payload must be an object"})
+				continue
+			}
+			if !row.actorTokenID.Valid || row.actorTokenID.UUID == uuid.Nil {
+				unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: "review verdict event has no actor_token_id"})
+				continue
+			}
+			verdict, err := workitems.ParseReviewVerdict(inner)
+			if err != nil {
+				unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: err.Error()})
+				continue
+			}
+			pass := verdict.ChecklistPass()
+			latestReview = &convergence.Signal{
+				Kind: workitems.ReviewVerdictCheckKind,
+				Pass: &pass,
+				Source: convergence.SignalSource{
+					EventID: row.id.String(),
+				},
+			}
 			continue
 		}
 		if innerKind == "" || inner == nil {
@@ -398,7 +452,10 @@ func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workIt
 		}
 		out = append(out, *s)
 	}
-	return out, malformed, nil
+	if latestReview != nil {
+		out = append(out, *latestReview)
+	}
+	return out, unusable
 }
 
 // convergenceEvidenceIdentity is the fixed identity under which malformed
@@ -490,6 +547,9 @@ func (w *Worker) convergenceSignalsFromSignalsTable(ctx context.Context, workIte
 }
 
 func toConvergenceSignal(signalKind string, payload map[string]any) *convergence.Signal {
+	if signalKind == workitems.ReviewVerdictCheckKind {
+		return nil
+	}
 	raw := parseSignalRaw(payload)
 	pass, hasPass := parsePass(payload)
 	score, hasScore := parseScore(payload)
@@ -507,7 +567,7 @@ func toConvergenceSignal(signalKind string, payload map[string]any) *convergence
 }
 
 func toConvergenceSignalFromSignalRow(signalKind, sourceName string, payload map[string]any) *convergence.Signal {
-	if signalKind == "" {
+	if signalKind == "" || signalKind == workitems.ReviewVerdictCheckKind {
 		return nil
 	}
 	raw := parseSignalRaw(payload)

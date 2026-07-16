@@ -267,7 +267,7 @@ func TestRunPropagatesReducerError(t *testing.T) {
 
 func TestEventPayloadRoundTripsFields(t *testing.T) {
 	red, err := Run(Threshold{SignalKind: "conf", Accept: 0.5}, []Signal{
-		{Kind: "conf", Score: f64p(0.9), Raw: "looks good", Source: SignalSource{Model: "m", PromptVersion: "v2"}},
+		{Kind: "conf", Score: f64p(0.9), Raw: "looks good", Source: SignalSource{EventID: "11111111-1111-1111-1111-111111111111", Model: "m", PromptVersion: "v2"}},
 	}, 3)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -293,5 +293,13 @@ func TestEventPayloadRoundTripsFields(t *testing.T) {
 	signals, ok := payload["signals"].([]any)
 	if !ok || len(signals) != 1 {
 		t.Fatalf("signals not rendered: %v", payload["signals"])
+	}
+	signal, ok := signals[0].(map[string]any)
+	if !ok {
+		t.Fatalf("signal has unexpected shape: %#v", signals[0])
+	}
+	source, ok := signal["source"].(map[string]any)
+	if !ok || source["event_id"] != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("source event attribution missing from payload: %#v", signal["source"])
 	}
 }

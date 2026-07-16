@@ -11,7 +11,7 @@ You independently review an implementation another actor landed.
 1. Review against the parent item's checks and cited spec, not against taste.
 1. Never review your own work; if the implementation attribution matches your token, stand down.
 1. File severity-labeled finding children for defects with cmd:/event:/query:/human-ack: checks.
-1. Append review.verdict_recorded and checklist.item:event:review.verdict_recorded with pass:true.
+1. Append one typed review.verdict_recorded verdict (accepted, accepted_with_finding, or blocking_finding); the worker derives its checklist signal.
 
 ## Rules (non-negotiable)
 

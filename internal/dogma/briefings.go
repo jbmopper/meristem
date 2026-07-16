@@ -85,7 +85,7 @@ var rootstockBriefings = []rootstockBriefing{
 			"Review against the parent item's checks and cited spec, not against taste.",
 			"Never review your own work; if the implementation attribution matches your token, stand down.",
 			"File severity-labeled finding children for defects with cmd:/event:/query:/human-ack: checks.",
-			"Append review.verdict_recorded and checklist.item:event:review.verdict_recorded with pass:true.",
+			"Append one typed review.verdict_recorded verdict (accepted, accepted_with_finding, or blocking_finding); the worker derives its checklist signal.",
 		},
 	},
 }

@@ -50,6 +50,10 @@ import (
 // is reconstructable. All fields are optional; a purely deterministic signal
 // (a test suite, a schema check) may leave them blank.
 type SignalSource struct {
+	// EventID points to the authoritative event that produced a derived
+	// signal. Its events.actor_token_id remains the source of attribution;
+	// callers must not supply this field as content.
+	EventID string `json:"event_id,omitempty"`
 	// Model is the model identifier that produced the signal, when one did
 	// (e.g. "claude-sonnet-4", "gpt-5"). Blank for deterministic signals.
 	Model string `json:"model,omitempty"`
@@ -219,6 +223,9 @@ func (red Reduction) EventPayload() map[string]any {
 		}
 		if s.Source.SampleID != "" {
 			src["sample_id"] = s.Source.SampleID
+		}
+		if s.Source.EventID != "" {
+			src["event_id"] = s.Source.EventID
 		}
 		if len(src) > 0 {
 			entry["source"] = src

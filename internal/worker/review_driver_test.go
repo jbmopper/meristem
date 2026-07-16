@@ -60,3 +60,18 @@ func TestTruncateRuneSafe(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewChildBodyRequiresOneTypedVerdict(t *testing.T) {
+	body := reviewChildBody(reviewCandidate{}, reviewEvidence{}, "reviewer@1")
+	for _, want := range []string{
+		`"verdict_inner_kind":"review.verdict_recorded"`,
+		`"derived_check_signal_kind":"checklist.item:event:review.verdict_recorded"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("review child body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `"check_signal":`) {
+		t.Fatalf("review child body still instructs a caller-authored check signal:\n%s", body)
+	}
+}

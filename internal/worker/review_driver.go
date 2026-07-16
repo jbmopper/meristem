@@ -17,7 +17,7 @@ import (
 
 const (
 	reviewerCultivarName = "reviewer"
-	reviewChildCheck     = "event:review.verdict_recorded"
+	reviewChildCheck     = workitems.ReviewVerdictCheck
 )
 
 type reviewPassResult struct {
@@ -324,13 +324,12 @@ func reviewChildBody(candidate reviewCandidate, evidence reviewEvidence, cultiva
 		commits = []string{"<not provided; inspect implementation_ready evidence>"}
 	}
 	contract := map[string]any{
-		"parent_work_item_id": candidate.ID,
-		"review_child_id":     reviewChildID(candidate.ID),
-		"verdict_inner_kind":  "review.verdict_recorded",
-		"check_signal_kind":   "checklist.item:" + reviewChildCheck,
-		"check_signal":        map[string]any{"pass": true},
-		"verdicts":            []string{"accepted", "accepted_with_finding", "blocking_finding"},
-		"cultivar":            cultivar,
+		"parent_work_item_id":       candidate.ID,
+		"review_child_id":           reviewChildID(candidate.ID),
+		"verdict_inner_kind":        workitems.ReviewVerdictInnerKind,
+		"derived_check_signal_kind": workitems.ReviewVerdictCheckKind,
+		"verdicts":                  []string{string(workitems.ReviewVerdictAccepted), string(workitems.ReviewVerdictAcceptedWithFinding), string(workitems.ReviewVerdictBlockingFinding)},
+		"cultivar":                  cultivar,
 	}
 	encoded, _ := json.Marshal(contract)
 	return fmt.Sprintf("Parent work_item: %s\nParent state: %s\nParent title: %s\nImplementation marker present: %t\nCommit refs: %s\nParent body excerpt:\n%s\n\nReview contract: %s",

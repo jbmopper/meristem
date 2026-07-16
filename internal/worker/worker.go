@@ -25,9 +25,9 @@
 //
 // Out of scope (next slices):
 //
-//   - Job execution from the durable queue. dispatch.requested now enqueues
-//     jobs and the queue exposes a SKIP LOCKED lease primitive, but ScanOnce
-//     still performs the deterministic reconciliation pass directly.
+//   - Generic agent job execution from the durable queue. ScanOnce consumes
+//     only reviewer-child dispatches; ordinary agent jobs remain available to
+//     their external executors.
 //   - First-class resolution events such as patience.resolved. The current
 //     contract deliberately avoids redundant events because work_item.transitioned
 //     already changes the replayed state epoch that resolves a breach.
@@ -238,6 +238,25 @@ type Result struct {
 	// DispatchesSkippedMissingCultivar is 1 when the dispatch pass stood down
 	// because the default dispatch cultivar is absent from the registry.
 	DispatchesSkippedMissingCultivar int
+	// DispatchJobsReconciledCanceled is the number of terminal, stale, or
+	// malformed dispatch queue rows canceled by this tick. Human- or
+	// lifecycle-blocked rows remain pending and dormant.
+	DispatchJobsReconciledCanceled int
+	// ReviewDispatchJobsClaimed is the number of reviewer-only dispatch rows
+	// leased through SKIP LOCKED during the bounded execution batch.
+	ReviewDispatchJobsClaimed int
+	// ReviewDispatchJobsStarted is the number of review children atomically
+	// transitioned to running and whose queue rows closed done.
+	ReviewDispatchJobsStarted int
+	// ReviewDispatchJobsAlreadyDone is the number of exact retries whose
+	// transition/job completion was already durable.
+	ReviewDispatchJobsAlreadyDone int
+	// ReviewDispatchJobsCanceled is the number of claimed rows rejected by the
+	// final state-epoch/cultivar/checklist revalidation.
+	ReviewDispatchJobsCanceled int
+	// ReviewDispatchJobsDormant is the number of claimed rows returned to
+	// pending because a human/lifecycle gate appeared after claim.
+	ReviewDispatchJobsDormant int
 
 	// ConvergenceCandidatesScanned is the count of running work_items
 	// with suggested convergence checks and therefore a chance to advance
@@ -357,6 +376,17 @@ func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 		if !errors.Is(err, registry.ErrUnknownCultivar) {
 			return out, fmt.Errorf("worker: dispatch pass: %w", err)
 		}
+	}
+
+	executionResult, err := w.executeReviewDispatches(ctx)
+	out.DispatchJobsReconciledCanceled = executionResult.DispatchJobsReconciledCanceled
+	out.ReviewDispatchJobsClaimed = executionResult.ReviewDispatchJobsClaimed
+	out.ReviewDispatchJobsStarted = executionResult.ReviewDispatchJobsStarted
+	out.ReviewDispatchJobsAlreadyDone = executionResult.ReviewDispatchJobsAlreadyDone
+	out.ReviewDispatchJobsCanceled = executionResult.ReviewDispatchJobsCanceled
+	out.ReviewDispatchJobsDormant = executionResult.ReviewDispatchJobsDormant
+	if err != nil {
+		return out, fmt.Errorf("worker: review dispatch execution pass: %w", err)
 	}
 
 	convergenceResult, err := w.scanConvergence(ctx)

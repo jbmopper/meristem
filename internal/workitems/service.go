@@ -360,8 +360,17 @@ func convergenceChecksRequired(current domain.WorkItem, to domain.WorkItemState)
 }
 
 func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind string, payload any, actor domain.Token) error {
-	if strings.TrimSpace(innerKind) == "" {
+	innerKind = strings.TrimSpace(innerKind)
+	if innerKind == "" {
 		return fmt.Errorf("%w: event kind is required", ErrInvalidRequest)
+	}
+	if innerKind == ReviewVerdictCheckKind {
+		return fmt.Errorf("%w: event kind %q is reserved; append %q and let the deterministic reducer derive the check", ErrInvalidRequest, innerKind, ReviewVerdictInnerKind)
+	}
+	if innerKind == ReviewVerdictInnerKind {
+		if _, err := ParseReviewVerdict(payload); err != nil {
+			return err
+		}
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
