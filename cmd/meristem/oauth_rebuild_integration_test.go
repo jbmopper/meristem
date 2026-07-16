@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -118,5 +120,80 @@ func TestOAuthProjectionsRebuildFromApprovedGrantLifecycle(t *testing.T) {
 	}
 	if len(report.mismatches) != 0 {
 		t.Fatalf("OAuth rebuild had mismatches: %+v", report.mismatches)
+	}
+}
+
+// TestOAuthRebuildToleratesLegacyGrantIssuedWithoutCodeID proves the
+// deterministic rebuild re-folds a pre-code-linking oauth_grant.issued event
+// — one carrying no code_id, exactly as ExchangeCode wrote it before migration
+// 0034 — without aborting. Before the fix, grantIssuedProjector hard-required
+// code_id, so the whole-log re-fold (and the synchronous write-apply) rejected
+// any such legacy event.
+func TestOAuthRebuildToleratesLegacyGrantIssuedWithoutCodeID(t *testing.T) {
+	ctx := context.Background()
+	pool := newCmdIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authService := auth.NewService(pool, writer)
+	root, err := authService.CreateToken(ctx, auth.CreateTokenInput{Name: "legacy-grant-root", IsRoot: true, Source: domain.SourceHuman})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	actor, err := authService.CreateToken(ctx, auth.CreateTokenInput{Name: "legacy-grant-actor", Source: domain.SourceAgent, Actor: &root.Token})
+	if err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+
+	grantID := uuid.New()
+	accessHash := sha256.Sum256([]byte("legacy-access-token"))
+	refreshHash := sha256.Sum256([]byte("legacy-refresh-token"))
+	now := time.Now().UTC()
+	// Legacy shape: every field the projector needs EXCEPT code_id.
+	legacy := events.Spec{
+		SubjectKind:  domain.SubjectOAuthGrant,
+		SubjectID:    grantID,
+		Kind:         domain.EventOAuthGrantIssued,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &actor.Token.ID,
+		Payload: map[string]any{
+			"payload_version":         1,
+			"grant_id":                grantID,
+			"client_id":               "legacy-client",
+			"actor_token_id":          actor.Token.ID,
+			"authority_profile":       string(access.ProviderOwnerTrackerReadV1),
+			"scope":                   oauth.ScopeMCPRead,
+			"resource":                "https://mcp.example/mcp",
+			"access_token_id":         "mcpat_legacy",
+			"access_token_hash_b64":   base64.StdEncoding.EncodeToString(accessHash[:]),
+			"access_expires_at_unix":  now.Add(time.Hour).Unix(),
+			"refresh_token_id":        "mcprt_legacy",
+			"refresh_token_hash_b64":  base64.StdEncoding.EncodeToString(refreshHash[:]),
+			"refresh_expires_at_unix": now.Add(24 * time.Hour).Unix(),
+			"generation":              1,
+			// no code_id — pre-migration-0034 event payload
+		},
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, _, err := writer.Append(ctx, tx, legacy); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("append legacy code_id-less grant.issued: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit legacy event: %v", err)
+	}
+
+	// The re-fold must succeed and match: before the fix it aborted here.
+	report, err := rebuildAndDiff(ctx, pool, app.NewProjectionRegistry(), "oauth_rebuild_legacy", slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	if err != nil {
+		t.Fatalf("rebuild aborted on legacy code_id-less grant.issued: %v", err)
+	}
+	if len(report.mismatches) != 0 {
+		t.Fatalf("legacy grant rebuild had mismatches: %+v", report.mismatches)
 	}
 }

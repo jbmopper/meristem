@@ -182,9 +182,10 @@ func TestOAuthAuthorizeTokenEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(body.AccessToken, "mcpat_") || !strings.HasPrefix(body.RefreshToken, "mcprt_") {
-		t.Fatalf("token shapes: %+v", body)
+		// Do not print the token secrets themselves — report shapes only.
+		t.Fatalf("token prefixes wrong: access_len=%d refresh_len=%d (want mcpat_/mcprt_)", len(body.AccessToken), len(body.RefreshToken))
 	}
 	if body.TokenType != "Bearer" || body.Scope != oauth.ScopeMCPRead || body.ExpiresIn <= 0 {
-		t.Fatalf("token body=%+v", body)
+		t.Fatalf("token metadata: type=%q scope=%q expires_in=%d", body.TokenType, body.Scope, body.ExpiresIn)
 	}
 }
