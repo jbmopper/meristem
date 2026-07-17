@@ -98,7 +98,7 @@ func TestHandleMCPPostRejectsMissingStreamableAccept(t *testing.T) {
 	}
 }
 
-func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
+func TestHandleMCPPostExposesProviderReadOnlyToolSurface(t *testing.T) {
 	s := New(nil, nil)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
@@ -124,17 +124,26 @@ func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
 func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
 	s := New(nil, nil)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	ambiguousProvider := providerActor(t, access.ProviderOwnerTrackerReadV1)
+	ambiguousProvider.Scopes = append(ambiguousProvider.Scopes, "provider.profile:future_profile")
 
 	for _, tc := range []struct {
-		name       string
-		actor      domain.Token
-		wantStatus int
-		wantWrite  bool
+		name         string
+		actor        domain.Token
+		wantStatus   int
+		wantWrite    bool
+		wantRegistry bool
 	}{
 		{name: "sealed read", actor: providerActor(t, access.ProviderOwnerTrackerReadV1), wantStatus: http.StatusOK},
 		{name: "sealed write", actor: providerActor(t, access.ProviderOwnerTrackerWriteV1), wantStatus: http.StatusOK, wantWrite: true},
-		{name: "ordinary scoped static bearer", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeFeedRead, access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusOK},
+		{name: "ordinary broad static bearer", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent}, wantStatus: http.StatusOK, wantWrite: true, wantRegistry: true},
+		{name: "ordinary scoped static bearer", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeFeedRead, access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusOK, wantRegistry: true},
+		{name: "unmarked human stays read only", actor: domain.Token{ID: uuid.New(), Source: domain.SourceHuman}, wantStatus: http.StatusOK},
+		{name: "unmarked system stays read only", actor: domain.Token{ID: uuid.New(), Source: domain.SourceSystem}, wantStatus: http.StatusOK},
+		{name: "unmarked root stays read only", actor: domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true}, wantStatus: http.StatusOK},
+		{name: "malformed profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{"provider.profile:", access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusForbidden},
 		{name: "unknown profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{"provider.profile:future_profile", access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusForbidden},
+		{name: "extra provider marker", actor: ambiguousProvider, wantStatus: http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
@@ -154,6 +163,10 @@ func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
 			hasWrite := strings.Contains(rec.Body.String(), "work_items.create") && strings.Contains(rec.Body.String(), "work_items.transition")
 			if hasWrite != tc.wantWrite {
 				t.Fatalf("write surface=%v want=%v body=%s", hasWrite, tc.wantWrite, rec.Body.String())
+			}
+			hasRegistry := strings.Contains(rec.Body.String(), "registry.list") && strings.Contains(rec.Body.String(), "registry.get")
+			if hasRegistry != tc.wantRegistry {
+				t.Fatalf("registry surface=%v want=%v body=%s", hasRegistry, tc.wantRegistry, rec.Body.String())
 			}
 		})
 	}
@@ -328,5 +341,33 @@ func TestMCPRouteStaticBearerStillDispatches(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"serverInfo"`) {
 		t.Fatalf("initialize response missing serverInfo: %s", rec.Body.String())
+	}
+}
+
+func TestMCPRouteStaticAgentBearerGetsOrdinarySurface(t *testing.T) {
+	authenticator := &mcpRouteAuth{
+		wantSecret: "mrs_local_agent",
+		tok:        domain.Token{ID: uuid.New(), Source: domain.SourceAgent},
+	}
+	s := newMCPRouteTestServer(authenticator)
+	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer mrs_local_agent")
+	rec := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	if authenticator.calls != 1 {
+		t.Fatalf("authenticator calls = %d, want 1", authenticator.calls)
+	}
+	for _, name := range []string{"registry.list", "work_items.create", "work_items.transition"} {
+		if !strings.Contains(rec.Body.String(), name) {
+			t.Fatalf("ordinary static agent surface missing %s: %s", name, rec.Body.String())
+		}
 	}
 }

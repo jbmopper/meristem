@@ -107,9 +107,15 @@ func providerHTTPProfile(actor domain.Token) (*mcp.HTTPToolProfile, error) {
 		if access.HasProviderAuthorityMarker(actor.Scopes) {
 			return nil, err
 		}
-		// Static internal/debug bearers predate provider profiles. Preserve
-		// their provider-safe read-only HTTP surface; ordinary access policy
-		// still filters tools and objects from the token's actual scopes.
+		// An unmarked, non-root agent bearer is an ordinary local MCP actor.
+		// Leaving the profile unset gives it the same dispatch and response
+		// contract as stdio while the shared access reducer still filters tools
+		// and objects from the token's actual scopes. Human, system, and root
+		// credentials retain the previous read-only fallback; local-agent parity
+		// must not silently widen credentials intended for another role.
+		if actor.Source == domain.SourceAgent && !actor.IsRoot {
+			return nil, nil
+		}
 		return mcp.ProviderSafeReadHTTPProfile(), nil
 	}
 	switch profile {
