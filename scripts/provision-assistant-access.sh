@@ -335,7 +335,19 @@ if $session_requested; then
   # identities must be unique (never silently reuse an existing token or
   # file) and must carry explicit default-deny scopes (3818efed round 2).
   [[ -n "$session_target" ]] || die "--session requires a non-empty name"
-  [[ -n "$session_scopes" ]] || die "--session-scopes must not be empty: empty scopes select the broad legacy surface"
+  # String-level non-emptiness is not enough: the server reduces the CSV by
+  # splitting on commas and dropping empty/whitespace parts, so ',' or ' '
+  # would reach tokens create as nil scopes and mint a silent legacyUnscoped
+  # broad token. Require at least one scope that survives that reduction.
+  session_scopes_effective=false
+  IFS=',' read -r -a session_scope_parts <<< "$session_scopes"
+  for session_scope_part in "${session_scope_parts[@]}"; do
+    if [[ -n "${session_scope_part//[[:space:]]/}" ]]; then
+      session_scopes_effective=true
+      break
+    fi
+  done
+  $session_scopes_effective || die "--session-scopes must contain at least one non-empty scope: empty scopes select the broad legacy surface"
   $apply_claude_code && die "--session cannot be combined with --apply-claude-code"
   sanitize_target "$session_target"
 

@@ -94,6 +94,25 @@ else
   pass "empty --session-scopes fails closed"
 fi
 
+# 6b. Degenerate scope strings that the server would reduce to nil scopes are
+# refused too: comma-only and whitespace-only pass a naive string check but
+# splitCSV drops every part, which would mint a broad legacy token.
+if run --session s3b --session-scopes ',' >/dev/null 2>&1; then
+  fail "comma-only --session-scopes fails closed"
+else
+  pass "comma-only --session-scopes fails closed"
+fi
+if run --session s3c --session-scopes '  ' >/dev/null 2>&1; then
+  fail "whitespace-only --session-scopes fails closed"
+else
+  pass "whitespace-only --session-scopes fails closed"
+fi
+if run --session s3d --session-scopes ' ,, ' >/dev/null 2>&1; then
+  fail "commas-and-spaces --session-scopes fails closed"
+else
+  pass "commas-and-spaces --session-scopes fails closed"
+fi
+
 # 7. --session touches no shared wrapper config.
 if [[ ! -e "$tmp/tok/generated/claude-code-meristem-command.sh" ]]; then
   pass "session mode regenerates no wrappers"
