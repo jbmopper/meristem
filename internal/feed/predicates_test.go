@@ -33,6 +33,36 @@ func TestNormalizeReadFilter(t *testing.T) {
 	}
 }
 
+func TestNormalizeReadFilterExcludeActor(t *testing.T) {
+	caller := uuid.New()
+	excludedA := uuid.New()
+	excludedB := uuid.New()
+	filter, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateExcludeActor, TokenID: excludedB},
+		{Kind: PredicateAssignedOrAddressed, TokenID: caller},
+		{Kind: PredicateExcludeActor, TokenID: excludedA},
+		{Kind: PredicateExcludeActor, TokenID: excludedA},
+	}})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(filter.Predicates) != 3 {
+		t.Fatalf("normalized predicates = %+v, want assigned + 2 deduped exclusions", filter.Predicates)
+	}
+	if filter.Predicates[0].Kind != PredicateAssignedOrAddressed {
+		t.Fatalf("canonical order does not lead with %s: %+v", PredicateAssignedOrAddressed, filter.Predicates)
+	}
+	for _, predicate := range filter.Predicates[1:] {
+		if predicate.Kind != PredicateExcludeActor {
+			t.Fatalf("unexpected predicate kind in canonical order: %+v", filter.Predicates)
+		}
+	}
+
+	if _, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{{Kind: PredicateExcludeActor}}}); !errors.Is(err, ErrInvalidPredicate) {
+		t.Fatalf("nil excluded token error = %v, want ErrInvalidPredicate", err)
+	}
+}
+
 func TestReadFilterAssignmentControlKindsAreRuntimeOnly(t *testing.T) {
 	tokenID := uuid.New()
 	runtime := ReadFilter{Predicates: []Predicate{{Kind: PredicateAssignedOrAddressed, TokenID: tokenID}}}

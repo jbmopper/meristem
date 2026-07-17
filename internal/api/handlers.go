@@ -200,6 +200,10 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	excludeActors, ok := requestedActorExclusions(w, r, actor)
+	if !ok {
+		return
+	}
 	projectionName := q.Get("projection")
 	var projection *projectiondefs.Projection
 	if projectionName != "" {
@@ -214,7 +218,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		projection = &item
 	}
-	readFilter, err := s.feedReadFilter(actor, projection, assigned)
+	readFilter, err := s.feedReadFilter(actor, projection, assigned, excludeActors)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
 		return
@@ -222,7 +226,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 
 	if cursor == "" && waitStr == "" {
 		var items []feed.Item
-		if !assigned && projection == nil {
+		if !assigned && projection == nil && len(excludeActors) == 0 {
 			// Preserve the legacy snapshot's byte-for-byte ordering for full
 			// readers. Assigned-only actors can never reach this branch.
 			items, err = s.feed.List(r.Context(), limit)
@@ -347,12 +351,40 @@ func requestedAssignedFeed(w http.ResponseWriter, r *http.Request, actor domain.
 	}
 }
 
-func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.Projection, assigned bool) (feed.ReadFilter, error) {
+// requestedActorExclusions parses the repeatable exclude_actor query param
+// into explicit token identities. "self" names the caller; any other value
+// must be a token UUID. Malformed values fail the request closed instead of
+// silently widening the view.
+func requestedActorExclusions(w http.ResponseWriter, r *http.Request, actor domain.Token) ([]uuid.UUID, bool) {
+	values := r.URL.Query()["exclude_actor"]
+	excluded := make([]uuid.UUID, 0, len(values))
+	for _, value := range values {
+		if value == "self" {
+			excluded = append(excluded, actor.ID)
+			continue
+		}
+		id, err := uuid.Parse(strings.TrimSpace(value))
+		if err != nil || id == uuid.Nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_exclude_actor", "exclude_actor must be self or a token id")
+			return nil, false
+		}
+		excluded = append(excluded, id)
+	}
+	return excluded, true
+}
+
+func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.Projection, assigned bool, excludeActors []uuid.UUID) (feed.ReadFilter, error) {
 	filter := feed.ReadFilter{Projection: projectionFilterForFeed(projection)}
 	if assigned {
 		filter.Predicates = append(filter.Predicates, feed.Predicate{
 			Kind:    feed.PredicateAssignedOrAddressed,
 			TokenID: actor.ID,
+		})
+	}
+	for _, id := range excludeActors {
+		filter.Predicates = append(filter.Predicates, feed.Predicate{
+			Kind:    feed.PredicateExcludeActor,
+			TokenID: id,
 		})
 	}
 	filter.Reduce = func(ctx context.Context, items []feed.Item) ([]feed.Item, error) {

@@ -62,6 +62,10 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	excludeActors, ok := requestedActorExclusions(w, r, actor)
+	if !ok {
+		return
+	}
 
 	// Last-Event-ID is the SSE-standard header browsers and well-behaved
 	// CLI clients send on reconnect. Fall back to ?cursor= for callers
@@ -91,7 +95,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		projectionVersion = projection.Version
 		projectionForRead = &projection
 	}
-	readFilter, err := s.feedReadFilter(actor, projectionForRead, assigned)
+	readFilter, err := s.feedReadFilter(actor, projectionForRead, assigned, excludeActors)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
 		return

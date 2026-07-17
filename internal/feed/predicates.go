@@ -19,7 +19,18 @@ import (
 // branches.
 type PredicateKind string
 
-const PredicateAssignedOrAddressed PredicateKind = "assigned_or_addressed"
+const (
+	PredicateAssignedOrAddressed PredicateKind = "assigned_or_addressed"
+
+	// PredicateExcludeActor removes events authored by TokenID from the view.
+	// Directed signals outrank authorship quieting: an event the excluded
+	// actor explicitly addressed to a DIFFERENT token (assignment controls,
+	// structured addressee fields, terminal-handback bindings) survives, so
+	// excluding a chatty coordinator can never swallow the caller's own
+	// assignment or handback wake. Events the excluded actor addressed to
+	// itself are removed with the rest of its authorship.
+	PredicateExcludeActor PredicateKind = "exclude_actor"
+)
 
 var (
 	ErrUnknownPredicate = errors.New("feed: unknown predicate")
@@ -56,7 +67,7 @@ func NormalizeReadFilter(in ReadFilter) (ReadFilter, error) {
 	seen := make(map[string]bool, len(in.Predicates))
 	for _, predicate := range in.Predicates {
 		switch predicate.Kind {
-		case PredicateAssignedOrAddressed:
+		case PredicateAssignedOrAddressed, PredicateExcludeActor:
 			if predicate.TokenID == uuid.Nil {
 				return ReadFilter{}, fmt.Errorf("%w: %s requires token identity", ErrInvalidPredicate, predicate.Kind)
 			}
@@ -155,6 +166,34 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 					}
 				}
 			}
+		case PredicateExcludeActor:
+			// Only-removes: this case may clear matches, never set them. The
+			// carve-outs below keep directed signals (explicit addressee or
+			// terminal-handback binding to a token other than the excluded
+			// one); a malformed address never rescues an event from exclusion.
+			authored := make([]bool, len(items))
+			directed := make([]bool, len(items))
+			undirected := make([]uuid.UUID, 0, len(items))
+			for i, item := range items {
+				if !matches[i] || item.ActorTokenID == nil || *item.ActorTokenID != predicate.TokenID {
+					continue
+				}
+				authored[i] = true
+				address := parseExplicitAddressee(item)
+				directed[i] = !address.invalid && address.present && address.tokenID != predicate.TokenID
+				if !address.invalid && !address.present {
+					undirected = append(undirected, item.EventID)
+				}
+			}
+			handback, err := s.terminalAddressedElsewhere(ctx, predicate.TokenID, undirected)
+			if err != nil {
+				return nil, err
+			}
+			for i, item := range items {
+				if authored[i] && !directed[i] && !handback[item.EventID] {
+					matches[i] = false
+				}
+			}
 		default:
 			return nil, fmt.Errorf("%w: %s", ErrUnknownPredicate, predicate.Kind)
 		}
@@ -218,6 +257,41 @@ func (s *Service) terminalAddressedEvents(ctx context.Context, tokenID uuid.UUID
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("feed: resolve terminal addressed events: %w", err)
+	}
+	return matched, nil
+}
+
+// terminalAddressedElsewhere reports which of the given events are terminal
+// transitions the handback projection binds to a former holder OTHER than the
+// excluded token. Those events are directed wake signals for that holder, so
+// actor exclusion must not remove them; a binding to the excluded token itself
+// stays removable (self-quieting covers self-directed signals).
+func (s *Service) terminalAddressedElsewhere(ctx context.Context, excluded uuid.UUID, eventIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
+	matched := make(map[uuid.UUID]bool, len(eventIDs))
+	if len(eventIDs) == 0 {
+		return matched, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT state_event_id
+		FROM work_item_assignment_state
+		WHERE terminal_addressee_token_id IS NOT NULL
+		  AND terminal_addressee_token_id <> $1
+		  AND terminal_state IS NOT NULL
+		  AND state_event_id = ANY($2::uuid[])
+	`, excluded, eventIDs)
+	if err != nil {
+		return nil, fmt.Errorf("feed: resolve terminal handbacks under actor exclusion: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var eventID uuid.UUID
+		if err := rows.Scan(&eventID); err != nil {
+			return nil, fmt.Errorf("feed: scan terminal handback under actor exclusion: %w", err)
+		}
+		matched[eventID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("feed: resolve terminal handbacks under actor exclusion: %w", err)
 	}
 	return matched, nil
 }
