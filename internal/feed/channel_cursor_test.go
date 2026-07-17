@@ -24,6 +24,13 @@ func TestCursorIdentityBindsFilterFingerprint(t *testing.T) {
 	if (ReadFilter{}).FingerprintHash() != "" {
 		t.Fatal("empty filter has a fingerprint")
 	}
+	// Contract: the fingerprint is exactly 128 bits (32 hex chars). Narrower
+	// widths make accidental channel-identity collisions feasible; changing
+	// the width invalidates every issued filtered cursor, so it must be a
+	// deliberate reviewed act.
+	if len(fp) != 32 {
+		t.Fatalf("fingerprint width = %d hex chars, contract pins 32 (128 bits)", len(fp))
+	}
 
 	issued := encodeCursorFor(42, "", 0, fp)
 	decoded, err := decodeCursorForIdentity(issued, "", 0, fp)

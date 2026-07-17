@@ -191,15 +191,18 @@ func knownEventKind(kind string) bool {
 }
 
 // FingerprintHash is the compact channel-identity form of the canonical
-// predicate key: empty when no predicates apply (plain feed), else a
-// truncated SHA-256 of CanonicalPredicateKey. Cursor identity binds it so a
-// resume cannot silently change filters. Same stability contract as the key.
+// predicate key: empty when no predicates apply (plain feed), else the first
+// 128 bits of SHA-256(CanonicalPredicateKey). 128 bits matches the
+// deterministic event-id collision margin: with UUID-valued predicates a
+// birthday collision needs ~2^64 candidate filters, so equality of the
+// fingerprint is safe to treat as filter identity. Same stability contract
+// as the key; the width is pinned by contract test.
 func (f ReadFilter) FingerprintHash() string {
 	if len(f.Predicates) == 0 {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(f.CanonicalPredicateKey()))
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:16])
 }
 
 // CanonicalPredicateKey is the deterministic encoding of the normalized
