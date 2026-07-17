@@ -73,6 +73,9 @@ func TestRESTScopedWorkItemTreeAccessIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create scoped token: %v", err)
 	}
+	if _, err := workSvc.Claim(ctx, a1.ID, scopedResult.Token); err != nil {
+		t.Fatalf("claim A1 for assigned-feed actor: %v", err)
+	}
 	server := New(pool, nil)
 
 	incompleteResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{

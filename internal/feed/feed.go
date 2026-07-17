@@ -162,13 +162,14 @@ type ListOptions struct {
 	ProjectionName    string
 	ProjectionVersion int
 	Filter            *ProjectionFilter
+	ReadFilter        *ReadFilter
 }
 
 // Page is the watcher-mode response. NextCursor MUST be round-tripped
 // verbatim by the consumer; the encoding is a server-side implementation
-// detail. When the page has no items but the wait timed out, NextCursor
-// is the same cursor the caller sent (so the next call resumes from the
-// same point).
+// detail. An empty timeout preserves the caller cursor when nothing was
+// scanned. If selected events were scanned but reduced away, NextCursor
+// advances across them so the next call does not rescan invisible traffic.
 type Page struct {
 	Items      []Item `json:"items"`
 	NextCursor string `json:"next_cursor"`
@@ -188,17 +189,24 @@ func (s *Service) List(ctx context.Context, limit int) ([]Item, error) {
 }
 
 func (s *Service) ListFiltered(ctx context.Context, filter ProjectionFilter, limit int) ([]Item, error) {
+	return s.ListWithReadFilter(ctx, ReadFilter{Projection: &filter}, limit)
+}
+
+// ListWithReadFilter applies the same normalized filter contract used by
+// watcher and stream reads while preserving snapshot's newest-first order.
+func (s *Service) ListWithReadFilter(ctx context.Context, filter ReadFilter, limit int) ([]Item, error) {
 	if limit <= 0 || limit > maxLimit {
 		limit = defaultLimit
 	}
-	return s.list(ctx, limit, &filter)
+	normalized, err := NormalizeReadFilter(filter)
+	if err != nil {
+		return nil, err
+	}
+	return s.list(ctx, limit, normalized)
 }
 
-func (s *Service) list(ctx context.Context, limit int, filter *ProjectionFilter) ([]Item, error) {
-	kinds := IncludedKinds
-	if filter != nil {
-		kinds = filter.QueryKinds()
-	}
+func (s *Service) list(ctx context.Context, limit int, filter ReadFilter) ([]Item, error) {
+	kinds := filter.queryKinds()
 	beforeSeq := int64(0)
 	out := make([]Item, 0, limit)
 	for len(out) < limit {
@@ -213,28 +221,34 @@ func (s *Service) list(ctx context.Context, limit int, filter *ProjectionFilter)
 		if err != nil {
 			return nil, err
 		}
-		scanned := 0
+		batch := make([]Item, 0, maxLimit)
 		for rows.Next() {
-			scanned++
 			item, err := scanItem(rows, true)
 			if err != nil {
 				rows.Close()
 				return nil, err
 			}
 			beforeSeq = item.Seq
-			if filter == nil || filter.Matches(item) {
-				out = append(out, item)
-				if len(out) == limit {
-					break
-				}
-			}
+			batch = append(batch, item)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		rows.Close()
-		if scanned < maxLimit {
+		matches, err := s.matchingItems(ctx, filter, batch)
+		if err != nil {
+			return nil, err
+		}
+		for i, item := range batch {
+			if matches[i] {
+				out = append(out, item)
+				if len(out) == limit {
+					break
+				}
+			}
+		}
+		if len(batch) < maxLimit {
 			break
 		}
 	}
@@ -305,9 +319,17 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 
 	projectionName := opts.ProjectionName
 	projectionVersion := opts.ProjectionVersion
-	var filter *ProjectionFilter
+	var readFilter ReadFilter
 	if opts.Filter != nil && projectionName != "" {
-		filter = opts.Filter
+		readFilter.Projection = opts.Filter
+	}
+	if opts.ReadFilter != nil {
+		readFilter = *opts.ReadFilter
+	}
+	var err error
+	readFilter, err = NormalizeReadFilter(readFilter)
+	if err != nil {
+		return Page{}, err
 	}
 
 	var cur cursor
@@ -341,7 +363,7 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 
 	deadline := time.Now().Add(wait)
 	for {
-		page, err := s.queryAfter(ctx, cur, limit, filter)
+		page, err := s.queryAfter(ctx, cur, limit, readFilter)
 		if err != nil {
 			return Page{}, err
 		}
@@ -472,14 +494,35 @@ func (s *Service) Tail(ctx context.Context, fromSeq int64, limit int) ([]Item, e
 }
 
 func (s *Service) TailFiltered(ctx context.Context, fromSeq int64, limit int, filter *ProjectionFilter) ([]Item, error) {
-	if limit <= 0 || limit > maxLimit {
-		limit = defaultLimit
-	}
-	page, err := s.queryAfter(ctx, cursor{seq: fromSeq}, limit, filter)
+	readFilter := ReadFilter{Projection: filter}
+	batch, err := s.TailWithReadFilter(ctx, fromSeq, limit, readFilter)
 	if err != nil {
 		return nil, err
 	}
-	return page.Items, nil
+	return batch.Items, nil
+}
+
+// TailBatch separates emitted items from the highest event sequence examined.
+// SSE advances ScannedThrough even when every candidate was reduced away,
+// preventing an invisible event from being rescanned forever.
+type TailBatch struct {
+	Items          []Item
+	ScannedThrough int64
+}
+
+func (s *Service) TailWithReadFilter(ctx context.Context, fromSeq int64, limit int, filter ReadFilter) (TailBatch, error) {
+	if limit <= 0 || limit > maxLimit {
+		limit = defaultLimit
+	}
+	normalized, err := NormalizeReadFilter(filter)
+	if err != nil {
+		return TailBatch{}, err
+	}
+	page, err := s.queryAfter(ctx, cursor{seq: fromSeq}, limit, normalized)
+	if err != nil {
+		return TailBatch{}, err
+	}
+	return TailBatch{Items: page.Items, ScannedThrough: page.nextSeq}, nil
 }
 
 // queryAfter runs a single after-cursor SELECT against the seq column.
@@ -490,11 +533,8 @@ func (s *Service) TailFiltered(ctx context.Context, fromSeq int64, limit int, fi
 // id ordering.
 //
 // limit+1 is fetched to compute HasMore without a separate COUNT query.
-func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int, filter *ProjectionFilter) (Page, error) {
-	kinds := IncludedKinds
-	if filter != nil {
-		kinds = filter.QueryKinds()
-	}
+func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int, filter ReadFilter) (Page, error) {
+	kinds := filter.queryKinds()
 	batchLimit := maxLimit + 1
 	items := make([]Item, 0, limit+1)
 	fromSeq := cur.seq
@@ -511,28 +551,34 @@ func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int, filter 
 		if err != nil {
 			return Page{}, err
 		}
-		scanned := 0
+		batch := make([]Item, 0, batchLimit)
 		for rows.Next() {
-			scanned++
 			item, err := scanItem(rows, true)
 			if err != nil {
 				rows.Close()
 				return Page{}, err
 			}
 			scannedSeq = item.Seq
-			if filter == nil || filter.Matches(item) {
-				items = append(items, item)
-				if len(items) > limit {
-					break
-				}
-			}
+			batch = append(batch, item)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			return Page{}, err
 		}
 		rows.Close()
-		if len(items) > limit || scanned < batchLimit {
+		matches, err := s.matchingItems(ctx, filter, batch)
+		if err != nil {
+			return Page{}, err
+		}
+		for i, item := range batch {
+			if matches[i] {
+				items = append(items, item)
+				if len(items) > limit {
+					break
+				}
+			}
+		}
+		if len(items) > limit || len(batch) < batchLimit {
 			break
 		}
 		fromSeq = scannedSeq

@@ -147,6 +147,24 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 	}
 }
 
+func TestAssignedFeedAuthorityAndDefaultNormalization(t *testing.T) {
+	rootID := uuid.New()
+	assignedOnly := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{
+		ScopeFeedReadAssigned, scopeWorkItemsTreePrefix + rootID.String(),
+	}}
+	if !CanReadAssignedFeed(assignedOnly) || !RequiresAssignedFeed(assignedOnly) {
+		t.Fatal("assigned-only tree-scoped actor must be authorized and normalized to assigned feed")
+	}
+	full := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{ScopeFeedRead}}
+	if !CanReadAssignedFeed(full) || RequiresAssignedFeed(full) {
+		t.Fatal("full-feed actor may request the reducing preset but must not be normalized by default")
+	}
+	incomplete := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{ScopeFeedReadAssigned}}
+	if CanReadAssignedFeed(incomplete) {
+		t.Fatal("feed.read_assigned without a work-item tree must fail closed")
+	}
+}
+
 func TestToolVisible_RegistryWriteRequiresScope(t *testing.T) {
 	if ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true}, "registry.define_tropism") ||
 		ToolVisible(domain.Token{ID: uuid.New(), Source: domain.SourceHuman, IsRoot: true}, "projections.define") {

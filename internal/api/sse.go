@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/jbmopper/meristem/internal/feed"
+	"github.com/jbmopper/meristem/internal/projectiondefs"
 )
 
 const (
@@ -57,6 +58,10 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 	if !s.canReadFeed(w, r, actor) {
 		return
 	}
+	assigned, ok := requestedAssignedFeed(w, r, actor)
+	if !ok {
+		return
+	}
 
 	// Last-Event-ID is the SSE-standard header browsers and well-behaved
 	// CLI clients send on reconnect. Fall back to ?cursor= for callers
@@ -68,7 +73,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 	projectionName := r.URL.Query().Get("projection")
 	var projectionNameForCursor string
 	var projectionVersion int
-	var projectionFilter *feed.ProjectionFilter
+	var projectionForRead *projectiondefs.Projection
 	if projectionName != "" {
 		if s.projections == nil {
 			writeAPIError(w, http.StatusServiceUnavailable, "projections_unavailable", "projection service is not configured")
@@ -84,7 +89,12 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		}
 		projectionNameForCursor = projection.Name
 		projectionVersion = projection.Version
-		projectionFilter = &projection.Filter
+		projectionForRead = &projection
+	}
+	readFilter, err := s.feedReadFilter(actor, projectionForRead, assigned)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
+		return
 	}
 
 	fromSeq, err := s.feed.ResolveStreamStartForProjection(r.Context(), cursorStr, projectionNameForCursor, projectionVersion)
@@ -164,7 +174,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		if s.buildStatus().Blocking() {
 			return
 		}
-		items, err := s.feed.TailFiltered(r.Context(), fromSeq, sseBatchSize, projectionFilter)
+		batch, err := s.feed.TailWithReadFilter(r.Context(), fromSeq, sseBatchSize, readFilter)
 		if err != nil {
 			// Don't write an error frame; the client can't do anything
 			// useful with mid-stream errors anyway. Just drop the
@@ -175,14 +185,10 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		items := batch.Items
+		fromSeq = batch.ScannedThrough
 
 		if len(items) > 0 {
-			allItems := items
-			items, err = s.filterFeedItems(r.Context(), actor, items)
-			if err != nil {
-				s.logger.Warn("sse: access filter failed", "error", err.Error())
-				return
-			}
 			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 			for i := range items {
 				// Recheck after the tail and access filter, immediately before
@@ -195,11 +201,8 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			fromSeq = allItems[len(allItems)-1].Seq
-			if len(items) > 0 {
-				flusher.Flush()
-				lastWriteAt = time.Now()
-			}
+			flusher.Flush()
+			lastWriteAt = time.Now()
 			// Loop without sleeping when we just drained a batch — there
 			// may be more events queued behind us. The sleep below only
 			// fires after an empty Tail.
