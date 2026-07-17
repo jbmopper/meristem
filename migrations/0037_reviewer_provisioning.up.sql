@@ -39,6 +39,12 @@ ALTER TABLE job_queue
     ADD COLUMN lease_owner UUID,
     ADD COLUMN lease_generation BIGINT NOT NULL DEFAULT 0;
 
+-- succeeded means the reviewer PROCESS IS RUNNING for the exact binding; it
+-- is not terminal and keeps holding capacity. exited is the terminal
+-- confirmed-death/normal-exit record (Wait, or adopted pid+start-time
+-- absence). termination_due is the server-side deadline mark: the deadline
+-- pass may demand termination but must never terminally free a handled or
+-- succeeded run without confirmed death.
 CREATE TABLE review_launch (
     work_item_id UUID NOT NULL REFERENCES work_items(id),
     round_seq BIGINT NOT NULL,
@@ -46,10 +52,14 @@ CREATE TABLE review_launch (
     job_id UUID NOT NULL,
     assignment_event_id UUID NOT NULL,
     reviewer_token_id UUID NOT NULL REFERENCES tokens(id),
+    issuer_token_id UUID NOT NULL REFERENCES tokens(id),
+    lease_owner UUID NOT NULL,
+    lease_generation BIGINT NOT NULL,
     state TEXT NOT NULL CHECK (
-        state IN ('reserved', 'handled', 'succeeded', 'failed', 'abandoned')
+        state IN ('reserved', 'handled', 'succeeded', 'exited', 'failed', 'abandoned')
     ),
     stage TEXT,
+    termination_due BOOLEAN NOT NULL DEFAULT FALSE,
     handle_pid BIGINT,
     handle_pgid BIGINT,
     handle_start_token TEXT,
@@ -65,7 +75,15 @@ CREATE TABLE review_launch (
 -- deadline; keep them off a sequential scan as launches accumulate.
 CREATE INDEX review_launch_live_idx
     ON review_launch (deadline)
-    WHERE state IN ('reserved', 'handled', 'abandoned');
+    WHERE state IN ('reserved', 'handled', 'succeeded', 'abandoned');
+
+-- Portable capacity serialization: provisioning locks this singleton row
+-- (SELECT ... FOR UPDATE) before counting live launches. No advisory locks:
+-- the storage contract must survive a future SQLite-per-node mode.
+CREATE TABLE review_launch_capacity (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton)
+);
+INSERT INTO review_launch_capacity (singleton) VALUES (TRUE);
 
 -- Single-use enforcement: a reviewer identity binds at most once, ever.
 -- AssignSpawned refuses an assignee that appears in any prior

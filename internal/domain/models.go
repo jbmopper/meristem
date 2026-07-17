@@ -35,12 +35,19 @@ const (
 	// commits this before releasing the bootstrap, so reviewer code can never
 	// run without an adoptable handle.
 	EventReviewLaunchHandleRecorded = "work_item.review_launch_handle_recorded"
-	// EventReviewLaunchResolved terminally resolves one launch attempt:
-	// succeeded (the only outcome that lets the queue job complete), failed
-	// (confirmed dead or never ran; frees capacity), or abandoned (handle-less
-	// supervisor loss; authority is revoked at once but capacity stays
-	// reserved until the durable deadline).
-	EventReviewLaunchResolved         = "work_item.review_launch_resolved"
+	// EventReviewLaunchResolved advances one launch attempt: succeeded (the
+	// reviewer process is RUNNING; the only outcome that lets the queue job
+	// complete), exited (confirmed death or normal exit; frees the capacity
+	// a running launch holds), failed (confirmed dead or never ran; frees
+	// capacity), or abandoned (handle-less supervisor loss; authority is
+	// revoked at once but capacity stays reserved until the durable
+	// deadline).
+	EventReviewLaunchResolved = "work_item.review_launch_resolved"
+	// EventReviewLaunchTerminationDue is the server-side deadline demand for
+	// a handled or running launch: termination is due, but nothing is freed
+	// until confirmed death — the deadline pass must never terminally
+	// resolve a launch whose process tree may still be alive.
+	EventReviewLaunchTerminationDue   = "work_item.review_launch_termination_due"
 	EventXylemExhausted               = "xylem.exhausted"
 	EventSignalReceived               = "signal.received"
 	EventDeterministicErrorReported   = "deterministic_error.reported"
@@ -209,6 +216,7 @@ var AllEventKinds = []string{
 	EventReviewLaunchReserved,
 	EventReviewLaunchHandleRecorded,
 	EventReviewLaunchResolved,
+	EventReviewLaunchTerminationDue,
 	EventXylemExhausted,
 	EventSignalReceived,
 	EventDeterministicErrorReported,

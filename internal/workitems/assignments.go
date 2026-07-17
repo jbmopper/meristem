@@ -81,6 +81,16 @@ func (s *Service) Claim(ctx context.Context, id uuid.UUID, actor domain.Token) (
 	if err := claimableWorkItem(item); err != nil {
 		return domain.WorkItemAssignment{}, err
 	}
+	// Structural no-self-review holds for EVERY attachment strategy (round-1
+	// finding): on a review child — an item whose checklist consumes
+	// review.verdict_recorded — the author of the current round marker can
+	// neither be spawn-bound nor volunteer via its own claim. Ordinary work
+	// items are untouched: self-claiming your own lane stays legal.
+	if hasReviewVerdictCheck(item.SuggestedConvergenceChecks) {
+		if err := refuseSpawnRoundImplementer(ctx, tx, id, actor.ID); err != nil {
+			return domain.WorkItemAssignment{}, err
+		}
+	}
 	state, err := scanAssignmentStateForUpdate(ctx, tx, id)
 	if err != nil {
 		return domain.WorkItemAssignment{}, err

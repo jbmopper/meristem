@@ -24,6 +24,7 @@ func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(reviewLaunchReservedProjector{})
 	registry.Register(reviewLaunchHandleProjector{})
 	registry.Register(reviewLaunchResolvedProjector{})
+	registry.Register(reviewLaunchTerminationDueProjector{})
 }
 
 type createdProjector struct{}

@@ -253,7 +253,22 @@ func (s *Server) handleRaw(ctx context.Context, raw []byte, w *syncWriter) error
 }
 
 func (s *Server) dispatch(ctx context.Context, msg rpcMessage) (any, *rpcError) {
-	return s.dispatchWithActor(ctx, msg, s.actorToken())
+	actor := s.actorToken()
+	// The stdio session authenticates once but may live for hours; cached
+	// authority must not outlive the token, so every protected method
+	// revalidates revocation and database-clock expiry by token id
+	// (ee916614 slice 3a round-1 finding).
+	switch msg.Method {
+	case "tools/list", "tools/call":
+		if actor.ID != (domain.Token{}).ID && s.deps.Auth != nil {
+			live, err := s.deps.Auth.ValidateLive(ctx, actor.ID)
+			if err != nil {
+				return nil, rpcErrorf(errCodeInvalidRequest, "token no longer valid: "+err.Error())
+			}
+			actor = live
+		}
+	}
+	return s.dispatchWithActor(ctx, msg, actor)
 }
 
 func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor domain.Token) (any, *rpcError) {

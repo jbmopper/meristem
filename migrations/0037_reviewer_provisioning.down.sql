@@ -1,5 +1,6 @@
 DROP INDEX IF EXISTS events_assigned_assignee_idx;
 DROP INDEX IF EXISTS review_launch_live_idx;
+DROP TABLE IF EXISTS review_launch_capacity;
 DROP TABLE IF EXISTS review_launch;
 ALTER TABLE job_queue
     DROP COLUMN IF EXISTS lease_generation,

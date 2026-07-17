@@ -110,6 +110,22 @@ func (s *Service) ReconcileDispatchJobs(ctx context.Context) (int, error) {
 			    jq.state = 'pending'
 			    OR (jq.state = 'leased' AND jq.lease_until <= now())
 			  )
+			  -- Launch-protocol lane (ee916614 slice 3a): an admitted review
+			  -- child is running with its queue row deliberately open until a
+			  -- launch outcome; its payload epoch no longer matches by design,
+			  -- so the generic staleness sweep must not cancel it.
+			  AND NOT (
+			    wi.state = 'running'
+			    AND wi.suggested_convergence_checks ? $3
+			    AND EXISTS (
+			      SELECT 1
+			      FROM events launch_created
+			      WHERE launch_created.subject_kind = 'work_item'
+			        AND launch_created.subject_id = wi.id
+			        AND launch_created.kind = 'work_item.created'
+			        AND split_part(btrim(COALESCE(launch_created.payload->>'cultivar', '')), '@', 1) = $2
+			    )
+			  )
 			  AND (
 			    wi.id IS NULL
 			    OR wi.state IN ('done', 'failed', 'canceled')
@@ -192,6 +208,84 @@ func (s *Service) ClaimNextReviewAs(ctx context.Context, owner uuid.UUID, lease 
 		return Job{}, false, fmt.Errorf("jobqueue: claim owner is required")
 	}
 	return s.claimNextReview(ctx, &owner, lease)
+}
+
+// ClaimAdmittedReviewAs reclaims a dispatch job whose review child was
+// already admitted to running under the launch protocol and whose lease was
+// lost (worker crash) or returned (capacity dormancy). The ordinary claim
+// predicate demands a pre-admission lifecycle state and a matching payload
+// epoch, both of which admission legitimately moved past; this path instead
+// requires the running state, the reviewer cultivar recorded at creation,
+// and the verdict check — and stamps the concrete owner/generation fence
+// every launch operation demands.
+func (s *Service) ClaimAdmittedReviewAs(ctx context.Context, owner uuid.UUID, lease time.Duration) (Job, bool, error) {
+	if owner == uuid.Nil {
+		return Job{}, false, fmt.Errorf("jobqueue: claim owner is required")
+	}
+	if lease <= 0 {
+		return Job{}, false, ErrInvalidLease
+	}
+	leaseMillis := lease.Milliseconds()
+	if leaseMillis <= 0 {
+		leaseMillis = 1
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Job{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx, `
+		WITH candidate AS (
+			SELECT jq.id
+			FROM job_queue jq
+			JOIN work_items wi ON wi.id = jq.work_item_id
+			WHERE jq.kind = $2
+			  AND (
+			    jq.state = 'pending'
+			    OR (jq.state = 'leased' AND jq.lease_until <= now())
+			  )
+			  AND wi.state = 'running'
+			  AND wi.human_review_status <> 'blocked'
+			  AND wi.suggested_convergence_checks ? $4
+			  AND EXISTS (
+			    SELECT 1
+			    FROM events created
+			    WHERE created.subject_kind = 'work_item'
+			      AND created.subject_id = wi.id
+			      AND created.kind = 'work_item.created'
+			      AND split_part(btrim(COALESCE(created.payload->>'cultivar', '')), '@', 1) = $3
+			  )
+			ORDER BY jq.created_at ASC, jq.id ASC
+			FOR UPDATE OF jq SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE job_queue jq
+		SET state = 'leased',
+		    attempts = attempts + 1,
+		    lease_until = now() + ($1::bigint * interval '1 millisecond'),
+		    lease_owner = $5,
+		    lease_generation = jq.lease_generation + 1,
+		    updated_at = now()
+		FROM candidate
+		WHERE jq.id = candidate.id
+		RETURNING jq.id, jq.kind, jq.work_item_id, jq.state, jq.payload,
+		          jq.attempts, jq.lease_until, jq.lease_owner, jq.lease_generation,
+		          jq.created_at, jq.updated_at
+	`, leaseMillis, KindDispatch, reviewerCultivarRoot, reviewVerdictCheck, owner)
+	job, err := scanJob(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			if err := tx.Commit(ctx); err != nil {
+				return Job{}, false, err
+			}
+			return Job{}, false, nil
+		}
+		return Job{}, false, fmt.Errorf("jobqueue: claim admitted review: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Job{}, false, err
+	}
+	return job, true, nil
 }
 
 func (s *Service) claimNextReview(ctx context.Context, owner *uuid.UUID, lease time.Duration) (Job, bool, error) {

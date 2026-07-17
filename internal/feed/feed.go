@@ -88,6 +88,7 @@ var ExcludedKinds = []string{
 	domain.EventReviewLaunchReserved,
 	domain.EventReviewLaunchHandleRecorded,
 	domain.EventReviewLaunchResolved,
+	domain.EventReviewLaunchTerminationDue,
 	// Node registry maintenance is fleet-topology audit, not the human
 	// activity narrative; it belongs to the log, not /v1/feed.
 	domain.EventNodeRegistered,

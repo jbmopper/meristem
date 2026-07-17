@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -170,23 +171,26 @@ func (s *Service) CreateDelegatedToken(ctx context.Context, tx pgx.Tx, in Create
 }
 
 // MintReviewerCredentialInput describes one single-use reviewer credential
-// (ee916614 slice 3a). ExpiresAt is required and comes from the caller's
-// single database-clock observation so token expiry and the binding's
-// ExpiresAt are equal by construction.
+// (ee916614 slice 3a). TemplateScopes is the cultivar's raw ScopesTemplate;
+// auth itself resolves every {root} placeholder to ChildID and refuses any
+// tree scope that names anything else, so no caller can widen a credential
+// past its exact review child. ExpiresAt is required and comes from the
+// caller's single database-clock observation so token expiry and the
+// binding's ExpiresAt are equal by construction.
 type MintReviewerCredentialInput struct {
-	Name      string
-	Scopes    []string
-	ExpiresAt time.Time
-	Actor     domain.Token
+	Name           string
+	ChildID        uuid.UUID
+	TemplateScopes []string
+	ExpiresAt      time.Time
+	Actor          domain.Token
 }
 
 // MintReviewerCredential appends token.created inside the caller-owned
 // provisioning transaction. The caller must be a non-root system actor
 // holding the dedicated reviewer_credentials.issue capability; the minted
-// token is always a non-root agent identity with a hard expiry. This is the
-// only minting path a launcher-side flow may reach, and it cannot influence
-// scopes: the provisioning operation resolves them from the cultivar
-// template before calling here.
+// token is always a non-root agent identity with a hard future expiry whose
+// tree authority names exactly the one review child. This is the only
+// minting path a launcher-side flow may reach.
 func (s *Service) MintReviewerCredential(ctx context.Context, tx pgx.Tx, in MintReviewerCredentialInput) (CreateTokenResult, error) {
 	if in.Actor.ID == uuid.Nil || in.Actor.IsRoot || in.Actor.RevokedAt != nil {
 		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential minting requires a live non-root actor")
@@ -197,17 +201,36 @@ func (s *Service) MintReviewerCredential(ctx context.Context, tx pgx.Tx, in Mint
 	if !hasScope(in.Actor.Scopes, ScopeReviewerCredentialsIssue) {
 		return CreateTokenResult{}, fmt.Errorf("auth: actor %s lacks the %s capability", in.Actor.ID, ScopeReviewerCredentialsIssue)
 	}
+	if in.ChildID == uuid.Nil {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential requires the exact review child")
+	}
 	if in.ExpiresAt.IsZero() {
 		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential requires an expiry")
 	}
-	if len(in.Scopes) == 0 {
-		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential requires resolved scopes")
+	var expired bool
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() >= $1::timestamptz`, in.ExpiresAt).Scan(&expired); err != nil {
+		return CreateTokenResult{}, fmt.Errorf("auth: check reviewer credential expiry: %w", err)
+	}
+	if expired {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential expiry must be in the future")
+	}
+	if len(in.TemplateScopes) == 0 {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential requires a scopes template")
+	}
+	const treePrefix = "work_items.tree:"
+	scopes := make([]string, 0, len(in.TemplateScopes))
+	for _, scope := range in.TemplateScopes {
+		resolved := strings.ReplaceAll(scope, "{root}", in.ChildID.String())
+		if strings.HasPrefix(resolved, treePrefix) && resolved != treePrefix+in.ChildID.String() {
+			return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential tree scope %q does not name the exact review child", scope)
+		}
+		scopes = append(scopes, resolved)
 	}
 	expiresAt := in.ExpiresAt.UTC()
 	return s.appendTokenCreated(ctx, tx, appendTokenInput{
 		Name:      in.Name,
 		IsRoot:    false,
-		Scopes:    in.Scopes,
+		Scopes:    scopes,
 		Source:    domain.SourceAgent,
 		Actor:     &in.Actor,
 		ExpiresAt: &expiresAt,
@@ -235,6 +258,23 @@ func (s *Service) RevokeInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor
 	}
 	if tok.IsRoot && !actor.IsRoot {
 		return ErrRootRequired
+	}
+	if systemIssuer && actor.ID != id && !actor.IsRoot {
+		// The issuer retires only the credentials it provisioned: agent
+		// tokens linked to a review_launch reservation. Human, system, and
+		// unrelated agent tokens are out of its authority entirely.
+		if tok.Source != domain.SourceAgent {
+			return fmt.Errorf("auth: issuer revocation is limited to reviewer credentials, not source=%q tokens", tok.Source)
+		}
+		var linked bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM review_launch WHERE reviewer_token_id = $1)
+		`, id).Scan(&linked); err != nil {
+			return fmt.Errorf("auth: check reviewer credential linkage: %w", err)
+		}
+		if !linked {
+			return fmt.Errorf("auth: token %s is not a provisioned reviewer credential", id)
+		}
 	}
 	if tok.RevokedAt != nil {
 		return nil
@@ -450,6 +490,35 @@ func (s *Service) Authenticate(ctx context.Context, secret string) (domain.Token
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (domain.Token, error) {
 	return scanToken(ctx, s.pool, id)
+}
+
+// ValidateLive re-reads a token by id and refuses revoked or expired ones
+// against the database clock. Long-lived sessions (the stdio MCP server)
+// call this on every protected dispatch so a cached authentication can
+// never outlive the token's durable authority (ee916614 slice 3a round-1
+// finding: expiry and revocation must bite mid-session, not only at the
+// initial handshake).
+func (s *Service) ValidateLive(ctx context.Context, id uuid.UUID) (domain.Token, error) {
+	if id == uuid.Nil {
+		return domain.Token{}, ErrInvalidToken
+	}
+	var expired bool
+	tok, err := scanTokenRowExtra(s.pool.QueryRow(ctx, `
+		SELECT id, name, hash, is_root, scopes, source, created_at, revoked_at, expires_at,
+		       (expires_at IS NOT NULL AND expires_at <= now())
+		FROM tokens
+		WHERE id = $1
+	`, id), &expired)
+	if err != nil {
+		return domain.Token{}, err
+	}
+	if tok.RevokedAt != nil {
+		return domain.Token{}, ErrTokenRevoked
+	}
+	if expired {
+		return domain.Token{}, ErrTokenExpired
+	}
+	return tok, nil
 }
 
 func (s *Service) List(ctx context.Context) ([]domain.Token, error) {

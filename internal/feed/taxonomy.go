@@ -132,6 +132,7 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 		domain.EventReviewLaunchReserved,
 		domain.EventReviewLaunchHandleRecorded,
 		domain.EventReviewLaunchResolved,
+		domain.EventReviewLaunchTerminationDue,
 		domain.EventDeterministicErrorReported,
 		domain.EventDeterministicErrorMasked,
 		domain.EventDeterministicErrorUnmasked,

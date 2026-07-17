@@ -174,6 +174,17 @@ func (s *Service) startReviewDispatch(ctx context.Context, jobID uuid.UUID, acto
 		return ReviewDispatchResult{}, err
 	}
 	if transitionExists {
+		if launchProtocol {
+			// Launch-protocol retry (round-1 finding): the admission already
+			// happened, but the job is NOT complete until a launch outcome —
+			// commit with the lease intact so the caller proceeds to
+			// provisioning against the same admitted child.
+			result.Outcome = ReviewDispatchStarted
+			if err := tx.Commit(ctx); err != nil {
+				return ReviewDispatchResult{}, err
+			}
+			return result, nil
+		}
 		// This also repairs a job left leased by an older non-atomic executor:
 		// the exact transition identity is already durable, so closing the lease
 		// cannot duplicate lifecycle state.

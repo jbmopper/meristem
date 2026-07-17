@@ -74,6 +74,11 @@ const (
 	// released at once, but the reservation keeps counting against capacity
 	// until its durable deadline bounds any pathological remnant.
 	ReviewLaunchAbandoned ReviewLaunchOutcome = "abandoned"
+	// ReviewLaunchExited is the terminal confirmed-death/normal-exit record
+	// for a launched reviewer: the supervisor's Wait returned, or an adopter
+	// confirmed pid+start-time absence. Only this outcome frees the capacity
+	// a succeeded (running) launch holds.
+	ReviewLaunchExited ReviewLaunchOutcome = "exited"
 )
 
 const (
@@ -83,12 +88,9 @@ const (
 	reviewLaunchStateFailed    = "failed"
 	reviewLaunchStateAbandoned = "abandoned"
 
-	reviewLaunchPayloadVersion = 1
+	reviewLaunchStateExited = "exited"
 
-	// reviewLaunchCapacityLockKey serializes concurrent capacity checks; the
-	// durable truth is the projected rows, the advisory lock only prevents
-	// two same-instant provisions from both observing a free slot.
-	reviewLaunchCapacityLockKey = int64(0x6ee9166140000037)
+	reviewLaunchPayloadVersion = 1
 )
 
 // ReviewerCredentialService is the narrow slice of internal/auth that
@@ -129,6 +131,9 @@ type reviewLaunchReservedPayload struct {
 	Attempt           int       `json:"attempt"`
 	AssignmentEventID uuid.UUID `json:"assignment_event_id"`
 	ReviewerTokenID   uuid.UUID `json:"reviewer_token_id"`
+	IssuerTokenID     uuid.UUID `json:"issuer_token_id"`
+	LeaseOwner        uuid.UUID `json:"lease_owner"`
+	LeaseGeneration   int64     `json:"lease_generation"`
 	Deadline          time.Time `json:"deadline"`
 }
 
@@ -148,6 +153,12 @@ type reviewLaunchResolvedPayload struct {
 	Attempt        int                 `json:"attempt"`
 	Outcome        ReviewLaunchOutcome `json:"outcome"`
 	Stage          string              `json:"stage,omitempty"`
+}
+
+type reviewLaunchTerminationDuePayload struct {
+	PayloadVersion int   `json:"payload_version"`
+	RoundSeq       int64 `json:"round_seq"`
+	Attempt        int   `json:"attempt"`
 }
 
 // ProvisionSpawnedReview is the single admission transaction of the accepted
@@ -228,18 +239,23 @@ func (s *Service) ProvisionSpawnedReview(ctx context.Context, creds ReviewerCred
 		return result, nil
 	}
 
-	// Durable capacity: the advisory lock serializes same-instant checks; the
-	// projected rows are the truth and survive queue re-lease and supervisor
-	// death.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, reviewLaunchCapacityLockKey); err != nil {
-		return ProvisionSpawnedReviewResult{}, fmt.Errorf("workitems: acquire launch capacity lock: %w", err)
+	// Durable capacity: the singleton capacity row serializes same-instant
+	// checks portably (no advisory locks — the storage contract must survive
+	// SQLite-per-node); the projected rows are the truth and survive queue
+	// re-lease and supervisor death. A running reviewer (succeeded, not yet
+	// exited) still holds its slot: launch success is process creation, not
+	// process exit. clock_timestamp is read after the blocking lock so a lock
+	// wait cannot smuggle in a stale deadline comparison.
+	var capacitySingleton bool
+	if err := tx.QueryRow(ctx, `SELECT singleton FROM review_launch_capacity FOR UPDATE`).Scan(&capacitySingleton); err != nil {
+		return ProvisionSpawnedReviewResult{}, fmt.Errorf("workitems: lock launch capacity row: %w", err)
 	}
 	var live int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		FROM review_launch
-		WHERE state IN ('reserved', 'handled', 'abandoned')
-		  AND deadline > now()
+		WHERE state IN ('reserved', 'handled', 'succeeded')
+		   OR (state = 'abandoned' AND deadline > clock_timestamp())
 	`).Scan(&live); err != nil {
 		return ProvisionSpawnedReviewResult{}, fmt.Errorf("workitems: count live review launches: %w", err)
 	}
@@ -287,15 +303,16 @@ func (s *Service) ProvisionSpawnedReview(ctx context.Context, creds ReviewerCred
 	}
 	deadline := claimedAt.Add(lease)
 
-	scopes, err := resolveReviewerScopes(ctx, tx, in.WorkItemID)
+	template, err := reviewerScopesTemplate(ctx, tx, in.WorkItemID)
 	if err != nil {
 		return ProvisionSpawnedReviewResult{}, err
 	}
 	minted, err := creds.MintReviewerCredential(ctx, tx, auth.MintReviewerCredentialInput{
-		Name:      fmt.Sprintf("reviewer:%s:r%da%d", in.WorkItemID, roundSeq, in.Attempt),
-		Scopes:    scopes,
-		ExpiresAt: deadline,
-		Actor:     actor,
+		Name:           fmt.Sprintf("reviewer:%s:r%da%d", in.WorkItemID, roundSeq, in.Attempt),
+		ChildID:        in.WorkItemID,
+		TemplateScopes: template,
+		ExpiresAt:      deadline,
+		Actor:          actor,
 	})
 	if err != nil {
 		return ProvisionSpawnedReviewResult{}, err
@@ -320,6 +337,9 @@ func (s *Service) ProvisionSpawnedReview(ctx context.Context, creds ReviewerCred
 			Attempt:           in.Attempt,
 			AssignmentEventID: assignment.AssignmentEventID,
 			ReviewerTokenID:   minted.Token.ID,
+			IssuerTokenID:     actor.ID,
+			LeaseOwner:        actor.ID,
+			LeaseGeneration:   in.LeaseGeneration,
 			Deadline:          deadline,
 		},
 	}
@@ -358,7 +378,7 @@ func verifyReviewLease(ctx context.Context, tx pgx.Tx, in ProvisionSpawnedReview
 	)
 	err := tx.QueryRow(ctx, `
 		SELECT kind, work_item_id, state, attempts, lease_owner, lease_generation,
-		       (lease_until IS NOT NULL AND lease_until > now())
+		       (lease_until IS NOT NULL AND lease_until > clock_timestamp())
 		FROM job_queue
 		WHERE id = $1
 		FOR UPDATE
@@ -417,11 +437,11 @@ func currentReviewRound(ctx context.Context, tx pgx.Tx, id uuid.UUID) (int64, st
 	return roundSeq, commit, nil
 }
 
-// resolveReviewerScopes renders the child's cultivar ScopesTemplate against
-// the exact review child: every {root} placeholder becomes the child id, so
-// the credential's tree scope names one item and nothing wider. The launcher
-// never touches this resolution.
-func resolveReviewerScopes(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID) ([]string, error) {
+// reviewerScopesTemplate loads the child's raw cultivar ScopesTemplate; the
+// {root} resolution and exact-child validation live inside
+// auth.MintReviewerCredential so no caller can widen a credential's tree
+// authority (round-1 P2 finding).
+func reviewerScopesTemplate(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID) ([]string, error) {
 	meta, err := workItemLaunchMetadata(ctx, tx, workItemID)
 	if err != nil {
 		return nil, err
@@ -437,11 +457,7 @@ func resolveReviewerScopes(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID)
 	if len(profile.ScopesTemplate) == 0 {
 		return nil, fmt.Errorf("%w: cultivar %s has no scopes_template", ErrProvisionRoundInvalid, resolvedRef)
 	}
-	scopes := make([]string, 0, len(profile.ScopesTemplate))
-	for _, scope := range profile.ScopesTemplate {
-		scopes = append(scopes, strings.ReplaceAll(scope, "{root}", workItemID.String()))
-	}
-	return scopes, nil
+	return profile.ScopesTemplate, nil
 }
 
 // cultivarProfileForRefInTx resolves the immutable profile payload through
@@ -487,8 +503,15 @@ type reviewLaunchRow struct {
 	JobID             uuid.UUID
 	AssignmentEventID uuid.UUID
 	ReviewerTokenID   uuid.UUID
+	IssuerTokenID     uuid.UUID
+	LeaseOwner        uuid.UUID
+	LeaseGeneration   int64
 	State             string
 	Stage             *string
+	TerminationDue    bool
+	HandlePid         *int64
+	HandlePgid        *int64
+	HandleStartToken  *string
 	Deadline          time.Time
 }
 
@@ -496,13 +519,17 @@ func scanReviewLaunchForUpdate(ctx context.Context, tx pgx.Tx, workItemID uuid.U
 	var row reviewLaunchRow
 	err := tx.QueryRow(ctx, `
 		SELECT work_item_id, round_seq, attempt, job_id, assignment_event_id,
-		       reviewer_token_id, state, stage, deadline
+		       reviewer_token_id, issuer_token_id, lease_owner, lease_generation,
+		       state, stage, termination_due, handle_pid, handle_pgid,
+		       handle_start_token, deadline
 		FROM review_launch
 		WHERE work_item_id = $1 AND round_seq = $2 AND attempt = $3
 		FOR UPDATE
 	`, workItemID, roundSeq, attempt).Scan(
 		&row.WorkItemID, &row.RoundSeq, &row.Attempt, &row.JobID, &row.AssignmentEventID,
-		&row.ReviewerTokenID, &row.State, &row.Stage, &row.Deadline,
+		&row.ReviewerTokenID, &row.IssuerTokenID, &row.LeaseOwner, &row.LeaseGeneration,
+		&row.State, &row.Stage, &row.TerminationDue, &row.HandlePid, &row.HandlePgid,
+		&row.HandleStartToken, &row.Deadline,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -549,11 +576,24 @@ func (s *Service) RecordReviewLaunchHandle(ctx context.Context, in ReviewLaunchH
 	if !found {
 		return fmt.Errorf("%w: (%s, %d, %d)", ErrReviewLaunchNotFound, in.WorkItemID, in.RoundSeq, in.Attempt)
 	}
+	// The handle is a live-supervisor act: only the exact issuer that
+	// provisioned this reservation may record it.
+	if row.IssuerTokenID != actor.ID {
+		return fmt.Errorf("%w: handle actor %s is not reservation issuer %s", ErrReviewLaunchState, actor.ID, row.IssuerTokenID)
+	}
 	if row.State == reviewLaunchStateHandled {
-		if err := tx.Commit(ctx); err != nil {
-			return err
+		// An exact retry must match every identity field; a conflicting
+		// replay claiming the same lifecycle key fails closed.
+		if row.AssignmentEventID == in.AssignmentEventID &&
+			row.HandlePid != nil && *row.HandlePid == in.Pid &&
+			row.HandlePgid != nil && *row.HandlePgid == in.Pgid &&
+			row.HandleStartToken != nil && *row.HandleStartToken == strings.TrimSpace(in.StartToken) {
+			if err := tx.Commit(ctx); err != nil {
+				return err
+			}
+			return nil
 		}
-		return nil
+		return fmt.Errorf("%w: conflicting handle replay for (%s, %d, %d)", ErrReviewLaunchState, in.WorkItemID, in.RoundSeq, in.Attempt)
 	}
 	if row.State != reviewLaunchStateReserved {
 		return fmt.Errorf("%w: state %s cannot take a handle", ErrReviewLaunchState, row.State)
@@ -561,8 +601,10 @@ func (s *Service) RecordReviewLaunchHandle(ctx context.Context, in ReviewLaunchH
 	if row.AssignmentEventID != in.AssignmentEventID {
 		return fmt.Errorf("%w: handle names assignment %s, reservation has %s", ErrReviewLaunchState, in.AssignmentEventID, row.AssignmentEventID)
 	}
+	// clock_timestamp after the blocking locks: a lock wait must not let a
+	// stale transaction-start clock pass the deadline gate.
 	var live bool
-	if err := tx.QueryRow(ctx, `SELECT now() < $1::timestamptz`, row.Deadline).Scan(&live); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() < $1::timestamptz`, row.Deadline).Scan(&live); err != nil {
 		return fmt.Errorf("workitems: check launch deadline: %w", err)
 	}
 	if !live {
@@ -599,10 +641,19 @@ type ResolveReviewLaunchInput struct {
 	Stage      string
 }
 
-// ResolveReviewLaunch terminally resolves one launch attempt. A non-succeeded
-// outcome releases the exact bound generation (reason launch_failed) and
-// revokes the reviewer credential in the same transaction; a stale
-// generation — something already rebound — is left alone.
+// ResolveReviewLaunch advances one launch attempt: succeeded marks the
+// reviewer process RUNNING for the exact binding (capacity stays held);
+// exited is the confirmed-death/normal-exit terminal that frees it; failed
+// and abandoned release the exact bound generation (reason launch_failed)
+// and revoke the credential in the same transaction. A stale generation —
+// something already rebound — is left alone.
+//
+// Fencing (round-1 finding): succeeded and exited are live-supervisor acts
+// and require the exact reservation issuer; failed and abandoned are also
+// open to an explicitly authorized recovery actor — any non-root system
+// token holding reviewer_credentials.issue. Succeeded additionally verifies
+// the reservation still owns the job lease generation and that its binding
+// is the item's current unexpired assignment.
 func (s *Service) ResolveReviewLaunch(ctx context.Context, creds ReviewerCredentialService, in ResolveReviewLaunchInput, actor domain.Token) error {
 	if creds == nil {
 		return fmt.Errorf("%w: reviewer credential service is required", ErrInvalidRequest)
@@ -611,7 +662,7 @@ func (s *Service) ResolveReviewLaunch(ctx context.Context, creds ReviewerCredent
 		return fmt.Errorf("%w: launch resolution requires a dedicated non-root system actor", ErrInvalidRequest)
 	}
 	switch in.Outcome {
-	case ReviewLaunchSucceeded, ReviewLaunchFailed, ReviewLaunchAbandoned:
+	case ReviewLaunchSucceeded, ReviewLaunchExited, ReviewLaunchFailed, ReviewLaunchAbandoned:
 	default:
 		return fmt.Errorf("%w: unknown launch outcome %q", ErrInvalidRequest, in.Outcome)
 	}
@@ -634,12 +685,28 @@ func (s *Service) ResolveReviewLaunch(ctx context.Context, creds ReviewerCredent
 	if !found {
 		return fmt.Errorf("%w: (%s, %d, %d)", ErrReviewLaunchNotFound, in.WorkItemID, in.RoundSeq, in.Attempt)
 	}
+	switch in.Outcome {
+	case ReviewLaunchSucceeded, ReviewLaunchExited:
+		if row.IssuerTokenID != actor.ID {
+			return fmt.Errorf("%w: %s is a live-supervisor outcome; actor %s is not reservation issuer %s", ErrReviewLaunchState, in.Outcome, actor.ID, row.IssuerTokenID)
+		}
+	default:
+		if row.IssuerTokenID != actor.ID && !actorHasScope(actor, auth.ScopeReviewerCredentialsIssue) {
+			return fmt.Errorf("%w: recovery resolution requires the reservation issuer or the %s capability", ErrReviewLaunchState, auth.ScopeReviewerCredentialsIssue)
+		}
+	}
 	switch row.State {
 	case reviewLaunchStateReserved, reviewLaunchStateHandled:
-		// Resolvable.
+		// Resolvable below.
+	case reviewLaunchStateSucceeded:
+		// A running reviewer terminates via exited (confirmed) or failed
+		// (confirmed death during recovery); nothing else.
+		if in.Outcome != ReviewLaunchExited && in.Outcome != ReviewLaunchFailed {
+			return fmt.Errorf("%w: a running launch can only exit or be confirmed failed", ErrReviewLaunchState)
+		}
 	case reviewLaunchStateAbandoned:
-		// An abandoned launch may still be confirmed failed later (e.g. the
-		// deadline reconciler); any other transition is refused.
+		// An abandoned launch may still be confirmed failed later; any other
+		// transition is refused.
 		if in.Outcome != ReviewLaunchFailed {
 			return fmt.Errorf("%w: abandoned launch can only be confirmed failed", ErrReviewLaunchState)
 		}
@@ -651,10 +718,40 @@ func (s *Service) ResolveReviewLaunch(ctx context.Context, creds ReviewerCredent
 	default:
 		return fmt.Errorf("%w: launch already resolved %s", ErrReviewLaunchState, row.State)
 	}
-	if in.Outcome == ReviewLaunchSucceeded && row.State != reviewLaunchStateHandled {
+	if in.Outcome == ReviewLaunchSucceeded {
 		// Success requires the containment handshake: no durable handle, no
 		// succeeded launch (design revision 4).
-		return fmt.Errorf("%w: launch cannot succeed without a recorded handle", ErrReviewLaunchState)
+		if row.State != reviewLaunchStateHandled {
+			return fmt.Errorf("%w: launch cannot succeed without a recorded handle", ErrReviewLaunchState)
+		}
+		// The reservation must still own the job: a renewed lease means a
+		// newer attempt supersedes this one and a stale success must fail
+		// closed rather than complete the newer attempt's job.
+		var currentOwner *uuid.UUID
+		var currentGeneration int64
+		if err := tx.QueryRow(ctx, `
+			SELECT lease_owner, lease_generation FROM job_queue WHERE id = $1 FOR UPDATE
+		`, row.JobID).Scan(&currentOwner, &currentGeneration); err != nil {
+			return fmt.Errorf("workitems: read job lease for launch success: %w", err)
+		}
+		if currentOwner == nil || *currentOwner != row.LeaseOwner || currentGeneration != row.LeaseGeneration {
+			return fmt.Errorf("%w: job lease moved past this reservation (generation %d, current %d)", ErrReviewLaunchState, row.LeaseGeneration, currentGeneration)
+		}
+		// And its binding must be the item's current, unexpired assignment.
+		state, err := scanAssignmentStateForUpdate(ctx, tx, in.WorkItemID)
+		if err != nil {
+			return err
+		}
+		observed, err := readAssignmentClock(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if state.Assignment == nil || state.Assignment.AssignmentEventID != row.AssignmentEventID || !state.Assignment.ExpiresAt.After(observed) {
+			return fmt.Errorf("%w: reservation binding is not the current live assignment", ErrReviewLaunchState)
+		}
+	}
+	if in.Outcome == ReviewLaunchExited && row.State != reviewLaunchStateSucceeded {
+		return fmt.Errorf("%w: exited is only legal from a running (succeeded) launch", ErrReviewLaunchState)
 	}
 
 	spec := events.Spec{
@@ -676,7 +773,10 @@ func (s *Service) ResolveReviewLaunch(ctx context.Context, creds ReviewerCredent
 		return err
 	}
 
-	if in.Outcome != ReviewLaunchSucceeded {
+	switch in.Outcome {
+	case ReviewLaunchFailed, ReviewLaunchAbandoned:
+		// The launch never produced (or no longer has) a live reviewer:
+		// release the exact bound generation and retire the credential.
 		state, err := scanAssignmentStateForUpdate(ctx, tx, in.WorkItemID)
 		if err != nil {
 			return err
@@ -693,39 +793,100 @@ func (s *Service) ResolveReviewLaunch(ctx context.Context, creds ReviewerCredent
 		if err := creds.RevokeInTx(ctx, tx, row.ReviewerTokenID, actor, "review_launch_"+string(in.Outcome)); err != nil {
 			return err
 		}
+	case ReviewLaunchExited:
+		// Normal confirmed exit: the process is gone, so its single-use
+		// credential retires; the binding is not disturbed — verdict and
+		// checklist machinery own its remaining lifecycle.
+		if err := creds.RevokeInTx(ctx, tx, row.ReviewerTokenID, actor, "review_launch_exited"); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
 
-// ReconcileReviewLaunches is the durable-state recovery pass: launches past
-// their deadline resolve failed (the deadline is the outer bound after which
-// enforced token expiry and the bootstrap/watchdog guarantees make the tree
-// inert), and succeeded launches whose queue job is still leased get the job
-// completion the crashed worker never issued. Everything derives from
-// projected rows; no process memory participates.
+// MarkReviewLaunchTerminationDue is the server-side deadline demand: a
+// handled or succeeded (running) launch past its deadline is flagged for
+// termination, but its capacity, credential linkage, and state are NOT
+// freed — only confirmed death (exited, or an explicitly attested failed)
+// terminally resolves a launch that may still have a live process tree
+// (round-1 finding: the deadline pass must never violate confirmed-death).
+func (s *Service) MarkReviewLaunchTerminationDue(ctx context.Context, workItemID uuid.UUID, roundSeq int64, attempt int, actor domain.Token) error {
+	if actor.ID == uuid.Nil || actor.IsRoot || actor.Source != domain.SourceSystem {
+		return fmt.Errorf("%w: termination marking requires a dedicated non-root system actor", ErrInvalidRequest)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := scanWorkItemForUpdate(ctx, tx, workItemID); err != nil {
+		return err
+	}
+	row, found, err := scanReviewLaunchForUpdate(ctx, tx, workItemID, roundSeq, attempt)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: (%s, %d, %d)", ErrReviewLaunchNotFound, workItemID, roundSeq, attempt)
+	}
+	if row.TerminationDue {
+		return tx.Commit(ctx)
+	}
+	if row.State != reviewLaunchStateHandled && row.State != reviewLaunchStateSucceeded {
+		return fmt.Errorf("%w: termination_due applies to handled or running launches, not %s", ErrReviewLaunchState, row.State)
+	}
+	spec := events.Spec{
+		SubjectKind:   domain.SubjectWorkItem,
+		SubjectID:     workItemID,
+		Kind:          domain.EventReviewLaunchTerminationDue,
+		Source:        domain.SourceSystem,
+		ActorTokenID:  &actor.ID,
+		Discriminator: fmt.Sprintf("review_launch_termination_due:%s:%d:%d", workItemID, roundSeq, attempt),
+		Payload: reviewLaunchTerminationDuePayload{
+			PayloadVersion: reviewLaunchPayloadVersion,
+			RoundSeq:       roundSeq,
+			Attempt:        attempt,
+		},
+	}
+	if _, _, err := s.writer.Append(ctx, tx, spec); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ReconcileReviewLaunches is the durable-state recovery pass. Reserved rows
+// past deadline resolve failed: phase gating guarantees no reviewer code
+// ever ran, and the wrapper watchdog plus enforced token expiry bound the
+// inert bootstrap. Handled and running rows past deadline are only MARKED
+// termination-due — a supervisor or adopter must kill and confirm before
+// anything is freed. Succeeded launches whose queue job is still leased on
+// the reservation's own lease generation get the completion the crashed
+// worker never issued. Everything derives from projected rows.
 func (s *Service) ReconcileReviewLaunches(ctx context.Context, creds ReviewerCredentialService, actor domain.Token) (int, error) {
 	if creds == nil {
 		return 0, fmt.Errorf("%w: reviewer credential service is required", ErrInvalidRequest)
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT work_item_id, round_seq, attempt
-		FROM review_launch
-		WHERE state IN ('reserved', 'handled', 'abandoned')
-		  AND deadline <= now()
-		ORDER BY deadline ASC
-	`)
-	if err != nil {
-		return 0, fmt.Errorf("workitems: list expired review launches: %w", err)
 	}
 	type key struct {
 		workItemID uuid.UUID
 		roundSeq   int64
 		attempt    int
+		state      string
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT work_item_id, round_seq, attempt, state
+		FROM review_launch
+		WHERE state IN ('reserved', 'handled', 'succeeded')
+		  AND deadline <= clock_timestamp()
+		  AND NOT termination_due
+		ORDER BY deadline ASC
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("workitems: list expired review launches: %w", err)
 	}
 	var expired []key
 	for rows.Next() {
 		var k key
-		if err := rows.Scan(&k.workItemID, &k.roundSeq, &k.attempt); err != nil {
+		if err := rows.Scan(&k.workItemID, &k.roundSeq, &k.attempt, &k.state); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -739,22 +900,26 @@ func (s *Service) ReconcileReviewLaunches(ctx context.Context, creds ReviewerCre
 
 	resolved := 0
 	for _, k := range expired {
-		err := s.ResolveReviewLaunch(ctx, creds, ResolveReviewLaunchInput{
-			WorkItemID: k.workItemID,
-			RoundSeq:   k.roundSeq,
-			Attempt:    k.attempt,
-			Outcome:    ReviewLaunchFailed,
-			Stage:      "deadline_expired",
-		}, actor)
+		if k.state == reviewLaunchStateReserved {
+			err = s.ResolveReviewLaunch(ctx, creds, ResolveReviewLaunchInput{
+				WorkItemID: k.workItemID,
+				RoundSeq:   k.roundSeq,
+				Attempt:    k.attempt,
+				Outcome:    ReviewLaunchFailed,
+				Stage:      "deadline_expired",
+			}, actor)
+		} else {
+			err = s.MarkReviewLaunchTerminationDue(ctx, k.workItemID, k.roundSeq, k.attempt, actor)
+		}
 		if err != nil {
 			return resolved, err
 		}
 		resolved++
 	}
 
-	// Completion repair: a worker that crashed between a committed succeeded
-	// outcome and marking its job done left a leased row; the durable launch
-	// state is the truth, so finish the operational step it proves.
+	// Completion repair, fenced to the reservation's own lease incarnation: a
+	// renewed lease means a newer attempt owns the job and a stale success
+	// must never complete it.
 	if _, err := s.pool.Exec(ctx, `
 		UPDATE job_queue jq
 		SET state = 'done',
@@ -764,6 +929,8 @@ func (s *Service) ReconcileReviewLaunches(ctx context.Context, creds ReviewerCre
 		WHERE rl.job_id = jq.id
 		  AND rl.state = 'succeeded'
 		  AND jq.state = 'leased'
+		  AND jq.lease_owner = rl.lease_owner
+		  AND jq.lease_generation = rl.lease_generation
 	`); err != nil {
 		return resolved, fmt.Errorf("workitems: repair succeeded launch jobs: %w", err)
 	}
