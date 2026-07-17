@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -195,6 +196,10 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cursor := q.Get("cursor")
 	waitStr := q.Get("wait")
+	assigned, ok := requestedAssignedFeed(w, r, actor)
+	if !ok {
+		return
+	}
 	projectionName := q.Get("projection")
 	var projection *projectiondefs.Projection
 	if projectionName != "" {
@@ -209,24 +214,27 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		projection = &item
 	}
+	readFilter, err := s.feedReadFilter(actor, projection, assigned)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
+		return
+	}
 
 	if cursor == "" && waitStr == "" {
-		var (
-			items []feed.Item
-			err   error
-		)
-		if projection != nil {
-			items, err = s.feed.ListFiltered(r.Context(), projection.Filter, limit)
-		} else {
+		var items []feed.Item
+		if !assigned && projection == nil {
+			// Preserve the legacy snapshot's byte-for-byte ordering for full
+			// readers. Assigned-only actors can never reach this branch.
 			items, err = s.feed.List(r.Context(), limit)
+		} else {
+			items, err = s.feed.ListWithReadFilter(r.Context(), readFilter, limit)
 		}
 		if err != nil {
+			if errors.Is(err, access.ErrDenied) {
+				writeAccessError(w, err, "token cannot read feed")
+				return
+			}
 			writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
-			return
-		}
-		items, err = s.filterFeedItems(r.Context(), actor, items)
-		if err != nil {
-			writeAccessError(w, err, "token cannot read feed")
 			return
 		}
 		if !s.allowAuthoritativeReadResponse(w) {
@@ -260,7 +268,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		Limit:             limit,
 		ProjectionName:    projectionNameForFeed(projection),
 		ProjectionVersion: projectionVersionForFeed(projection),
-		Filter:            projectionFilterForFeed(projection),
+		ReadFilter:        &readFilter,
 	})
 	if err != nil {
 		if errors.Is(err, feed.ErrInvalidCursor) {
@@ -271,12 +279,11 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "cursor_projection_mismatch", "cursor was issued for a different feed projection")
 			return
 		}
+		if errors.Is(err, access.ErrDenied) {
+			writeAccessError(w, err, "token cannot read feed")
+			return
+		}
 		writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not read feed")
-		return
-	}
-	page, err = s.filterFeedPage(r.Context(), actor, page)
-	if err != nil {
-		writeAccessError(w, err, "token cannot read feed")
 		return
 	}
 	if !s.allowAuthoritativeReadResponse(w) {
@@ -318,6 +325,40 @@ func projectionFilterForFeed(p *projectiondefs.Projection) *feed.ProjectionFilte
 		return nil
 	}
 	return &p.Filter
+}
+
+func requestedAssignedFeed(w http.ResponseWriter, r *http.Request, actor domain.Token) (bool, bool) {
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	switch scope {
+	case "":
+		if access.RequiresAssignedFeed(actor) {
+			return true, true
+		}
+		return false, true
+	case "assigned":
+		if !access.CanReadAssignedFeed(actor) {
+			writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read assigned feed")
+			return false, false
+		}
+		return true, true
+	default:
+		writeAPIError(w, http.StatusBadRequest, "invalid_feed_scope", "scope must be assigned when present")
+		return false, false
+	}
+}
+
+func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.Projection, assigned bool) (feed.ReadFilter, error) {
+	filter := feed.ReadFilter{Projection: projectionFilterForFeed(projection)}
+	if assigned {
+		filter.Predicates = append(filter.Predicates, feed.Predicate{
+			Kind:    feed.PredicateAssignedOrAddressed,
+			TokenID: actor.ID,
+		})
+	}
+	filter.Reduce = func(ctx context.Context, items []feed.Item) ([]feed.Item, error) {
+		return s.filterFeedItems(ctx, actor, items)
+	}
+	return feed.NormalizeReadFilter(filter)
 }
 
 func (s *Server) handleListWorkItems(w http.ResponseWriter, r *http.Request) {

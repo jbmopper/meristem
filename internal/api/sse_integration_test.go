@@ -204,9 +204,25 @@ type sseFrameForTest struct {
 // are logged via t.Log but don't fail the test (the test asserts on
 // what arrived in the channel).
 func consumeSSEForTest(t *testing.T, ctx context.Context, url, token, lastID string, out chan<- sseFrameForTest) {
+	consumeSSEForTestReady(t, ctx, url, token, lastID, nil, out)
+}
+
+// consumeSSEForTestReady is consumeSSEForTest with a response-header
+// synchronization point. When ready is non-nil, it receives nil only after
+// the server has committed a successful SSE response; setup failures are sent
+// instead so callers never need timing sleeps to infer connection readiness.
+func consumeSSEForTestReady(t *testing.T, ctx context.Context, url, token, lastID string, ready chan<- error, out chan<- sseFrameForTest) {
 	defer close(out)
+	signalReady := func(err error) {
+		if ready != nil {
+			ready <- err
+			close(ready)
+			ready = nil
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		signalReady(err)
 		t.Logf("sse new req: %v", err)
 		return
 	}
@@ -219,6 +235,7 @@ func consumeSSEForTest(t *testing.T, ctx context.Context, url, token, lastID str
 	// long-lived stream. Cancellation rides on ctx.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		signalReady(err)
 		if ctx.Err() == nil {
 			t.Logf("sse do: %v", err)
 		}
@@ -226,9 +243,11 @@ func consumeSSEForTest(t *testing.T, ctx context.Context, url, token, lastID str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		signalReady(fmt.Errorf("sse status %d", resp.StatusCode))
 		t.Logf("sse non-200: %d", resp.StatusCode)
 		return
 	}
+	signalReady(nil)
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)

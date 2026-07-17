@@ -8,7 +8,6 @@ package access
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -151,6 +150,28 @@ func RequiresScopedPolicy(actor domain.Token) bool {
 	return !actor.IsRoot && !legacyUnscoped(actor)
 }
 
+// CanReadAssignedFeed authorizes the reducing assigned/addressed preset. A
+// full-feed reader may always request a narrower view; an assigned-only reader
+// must retain the preexisting tree scope requirement.
+func CanReadAssignedFeed(actor domain.Token) bool {
+	if actor.IsRoot || legacyUnscoped(actor) {
+		return true
+	}
+	scopes := scopeSet(actor.Scopes)
+	return scopes[ScopeFeedRead] || (scopes[ScopeFeedReadAssigned] && hasWorkItemTreeScope(actor))
+}
+
+// RequiresAssignedFeed reports whether the assigned/addressed preset is the
+// actor's only feed authority. REST uses this to fail closed by normalization:
+// omitting scope=assigned cannot expose the legacy broad feed.
+func RequiresAssignedFeed(actor domain.Token) bool {
+	if actor.IsRoot || legacyUnscoped(actor) {
+		return false
+	}
+	scopes := scopeSet(actor.Scopes)
+	return !scopes[ScopeFeedRead] && scopes[ScopeFeedReadAssigned]
+}
+
 func (s *Service) FilterWorkItems(ctx context.Context, actor domain.Token, items []domain.WorkItem) ([]domain.WorkItem, error) {
 	if actor.IsRoot || legacyUnscoped(actor) || hasPortfolioWorkItemAccess(scopeSet(actor.Scopes)) {
 		return items, nil
@@ -230,7 +251,7 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 	anchorsByIndex := make([][]uuid.UUID, len(items))
 	var candidates []uuid.UUID
 	for i, item := range items {
-		anchorsByIndex[i] = feedItemAnchors(item)
+		anchorsByIndex[i] = feed.WorkItemAnchors(item)
 		candidates = append(candidates, anchorsByIndex[i]...)
 	}
 	visible, err := s.workItemsInAnyTree(ctx, actor, candidates)
@@ -275,60 +296,7 @@ func (s *Service) FilterFeedItems(ctx context.Context, actor domain.Token, items
 //     governed by logs.* scopes, and a tree-scoped feed deliberately drops
 //     them rather than inventing a work_item relationship they do not have.
 func feedItemAnchors(item feed.Item) []uuid.UUID {
-	switch item.Kind {
-	case domain.EventWorkItemRelationAdded:
-		return relationIDs(item)
-	case domain.EventConvergenceChecksProposed:
-		return []uuid.UUID{item.SubjectID}
-	case domain.EventConvergenceVerdictRecorded:
-		return []uuid.UUID{item.SubjectID}
-	case domain.EventMessageCaptured,
-		domain.EventSignalReceived,
-		domain.EventEscalationRequested,
-		domain.EventSubactorGrantRequested,
-		domain.EventSubactorGrantGranted,
-		domain.EventSubactorGrantDenied,
-		domain.EventSubactorGrantEscalated,
-		domain.EventCultivarActivationRequested,
-		domain.EventCultivarActivationGranted,
-		domain.EventCultivarActivationDenied,
-		domain.EventCultivarActivationEscalated,
-		domain.EventApprovalCreated,
-		domain.EventApprovalDecided,
-		domain.EventApprovalExpired,
-		domain.EventHTTPConnectorActionRequested,
-		domain.EventHTTPConnectorActionApproved,
-		domain.EventHTTPConnectorActionSent:
-		return payloadWorkItemIDs(item)
-	case domain.EventTropismDefined,
-		domain.EventCultivarDefined,
-		domain.EventProjectionDefined:
-		return nil
-	default:
-		if item.SubjectKind == domain.SubjectWorkItem {
-			return []uuid.UUID{item.SubjectID}
-		}
-		return nil
-	}
-}
-
-// payloadWorkItemIDs extracts the work_item anchors that event writers
-// record in payloads whose subject is not a work_item.
-func payloadWorkItemIDs(item feed.Item) []uuid.UUID {
-	var payload struct {
-		WorkItemID      uuid.UUID `json:"work_item_id"`
-		HumanWorkItemID uuid.UUID `json:"human_work_item_id"`
-	}
-	var ids []uuid.UUID
-	if err := json.Unmarshal(item.Payload, &payload); err == nil {
-		if payload.WorkItemID != uuid.Nil {
-			ids = append(ids, payload.WorkItemID)
-		}
-		if payload.HumanWorkItemID != uuid.Nil {
-			ids = append(ids, payload.HumanWorkItemID)
-		}
-	}
-	return ids
+	return feed.WorkItemAnchors(item)
 }
 
 func (s *Service) FilterFeedPage(ctx context.Context, actor domain.Token, page feed.Page) (feed.Page, error) {
@@ -338,23 +306,6 @@ func (s *Service) FilterFeedPage(ctx context.Context, actor domain.Token, page f
 	}
 	page.Items = items
 	return page, nil
-}
-
-func relationIDs(item feed.Item) []uuid.UUID {
-	ids := []uuid.UUID{item.SubjectID}
-	var payload struct {
-		ParentID uuid.UUID `json:"parent_id"`
-		ChildID  uuid.UUID `json:"child_id"`
-	}
-	if err := json.Unmarshal(item.Payload, &payload); err == nil {
-		if payload.ParentID != uuid.Nil {
-			ids = append(ids, payload.ParentID)
-		}
-		if payload.ChildID != uuid.Nil {
-			ids = append(ids, payload.ChildID)
-		}
-	}
-	return ids
 }
 
 func (s *Service) workItemInAnyTree(ctx context.Context, actor domain.Token, id uuid.UUID) (bool, error) {
