@@ -168,9 +168,12 @@ var ErrVerdictWrongArtifact = errors.New("workitems: review verdict does not nam
 func (s *Service) requireVerdictAuthority(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor domain.Token, detail ReviewVerdictDetail) error {
 	state, err := scanAssignmentStateForUpdate(ctx, tx, id)
 	if err != nil {
-		if errors.Is(err, ErrAssignmentStateMissing) {
-			return nil
-		}
+		// Migration 0035 gives every work item a permanent assignment
+		// placeholder at creation; a missing row is a corrupted projection,
+		// never a legacy item, so the gate fails closed instead of waving the
+		// verdict through holder/generation checks (finding e0165213).
+		// Legacy latest-verdict-wins lives in the placeholder-exists,
+		// never-bound branch below.
 		return err
 	}
 

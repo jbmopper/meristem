@@ -236,6 +236,18 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 		t.Fatalf("rebound verdict for round B: %v", err)
 	}
 
+	// A missing assignment placeholder is a corrupted projection, never a
+	// legacy item (migration 0035 backfills every work item): the gate fails
+	// closed instead of waving the verdict past holder/generation authority
+	// (finding e0165213).
+	corrupted := createClaimableItem(t, ctx, svc, actorA, "corrupted placeholder item")
+	if _, err := pool.Exec(ctx, `DELETE FROM work_item_assignment_state WHERE work_item_id = $1`, corrupted.ID); err != nil {
+		t.Fatalf("corrupt placeholder: %v", err)
+	}
+	if err := svc.AppendEvent(ctx, corrupted.ID, ReviewVerdictInnerKind, verdict(uuid.Nil), actorB); !errors.Is(err, ErrAssignmentStateMissing) {
+		t.Fatalf("verdict on corrupted placeholder = %v, want fail-closed ErrAssignmentStateMissing", err)
+	}
+
 	// Yield releases the binding; the gap fails closed until a rebind.
 	yielded := createClaimableItem(t, ctx, svc, actorA, "yielded verdict item")
 	yBound, err := svc.AssignSpawned(ctx, yielded.ID, reviewerX.ID, spawner)
