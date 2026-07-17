@@ -320,6 +320,135 @@ func TestAssignedFeedExpiredUnsweptTruthAndExpiryControlIntegration(t *testing.T
 	}
 }
 
+func TestAssignedFeedTerminalHandbackIsExactAndTreeScopedIntegration(t *testing.T) {
+	fixture := newAssignedFeedFixture(t)
+	spawnRunning := func(title string) domain.WorkItem {
+		t.Helper()
+		item, err := fixture.work.SpawnChild(fixture.ctx, fixture.tree.ID, workitems.CreateInput{
+			Title: title, State: domain.WorkItemRunning,
+			SuggestedConvergenceChecks: []string{"terminal handback is visible"},
+			HumanReviewStatus:          domain.HumanReviewWavedThrough,
+			Actor:                      fixture.root.Token,
+		})
+		if err != nil {
+			t.Fatalf("spawn %s: %v", title, err)
+		}
+		return item
+	}
+	coordinator, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{
+		Name: "terminal-handback-coordinator", Source: domain.SourceHuman,
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeWorkItemsWrite,
+			"work_items.tree:" + fixture.tree.ID.String(),
+		},
+		Actor: &fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create coordinator: %v", err)
+	}
+
+	handback := spawnRunning("terminal-handback-other-actor")
+	if _, err := fixture.work.Claim(fixture.ctx, handback.ID, fixture.actorA.Token); err != nil {
+		t.Fatalf("claim handback item: %v", err)
+	}
+	appendAssignedFeedNote(t, fixture, handback.ID, "terminal-handback-prior-history", uuid.Nil)
+	path := "/v1/work-items/" + handback.ID.String() + "/transition"
+	body := []byte(`{"to":"done","reason":"terminal-handback-other-actor"}`)
+	first := doREST(t, fixture.server.Handler(), http.MethodPost, path, coordinator.Secret, "terminal-handback-transition", body)
+	assertRESTStatus(t, first, http.StatusOK)
+	replay := doREST(t, fixture.server.Handler(), http.MethodPost, path, coordinator.Secret, "terminal-handback-transition", body)
+	assertRESTStatus(t, replay, http.StatusOK)
+	if replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("terminal handback retry was not replayed: headers=%v", replay.Header())
+	}
+
+	var transitions int
+	if err := fixture.pool.QueryRow(fixture.ctx, `
+		SELECT count(*) FROM events
+		WHERE subject_id=$1 AND kind=$2 AND payload->>'reason'=$3
+	`, handback.ID, domain.EventWorkItemTransitioned, "terminal-handback-other-actor").Scan(&transitions); err != nil {
+		t.Fatalf("count terminal transitions: %v", err)
+	}
+	if transitions != 1 {
+		t.Fatalf("terminal handback transitions = %d, want 1", transitions)
+	}
+	var releases int
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM events WHERE subject_id=$1 AND kind=$2`, handback.ID, domain.EventWorkItemAssignmentReleased).Scan(&releases); err != nil {
+		t.Fatalf("count terminal releases: %v", err)
+	}
+	if releases != 0 {
+		t.Fatalf("terminal handback emitted %d assignment releases, want 0", releases)
+	}
+	noOp := doREST(
+		t,
+		fixture.server.Handler(),
+		http.MethodPost,
+		path,
+		coordinator.Secret,
+		"terminal-handback-later-noop",
+		[]byte(`{"to":"done","reason":"terminal-handback-later-noop"}`),
+	)
+	assertRESTStatus(t, noOp, http.StatusOK)
+
+	assignedA := doREST(t, fixture.server.Handler(), http.MethodGet, "/v1/feed?scope=assigned&limit=100", fixture.actorA.Secret, "", nil)
+	assertRESTStatus(t, assignedA, http.StatusOK)
+	if !strings.Contains(assignedA.Body.String(), "terminal-handback-other-actor") {
+		t.Fatalf("former holder feed omitted other-actor terminal handback: %s", assignedA.Body.String())
+	}
+	for _, widened := range []string{"terminal-handback-prior-history", "terminal-handback-later-noop"} {
+		if strings.Contains(assignedA.Body.String(), widened) {
+			t.Fatalf("terminal address widened to %q: %s", widened, assignedA.Body.String())
+		}
+	}
+	assignedB := doREST(t, fixture.server.Handler(), http.MethodGet, "/v1/feed?scope=assigned&limit=100", fixture.actorB.Secret, "", nil)
+	assertRESTStatus(t, assignedB, http.StatusOK)
+	for _, hidden := range []string{"terminal-handback-other-actor", "terminal-handback-later-noop"} {
+		if strings.Contains(assignedB.Body.String(), hidden) {
+			t.Fatalf("other token received %q: %s", hidden, assignedB.Body.String())
+		}
+	}
+
+	self := spawnRunning("terminal-handback-same-actor-item")
+	if _, err := fixture.work.Claim(fixture.ctx, self.ID, fixture.actorA.Token); err != nil {
+		t.Fatalf("claim same-actor item: %v", err)
+	}
+	if _, err := fixture.work.Transition(fixture.ctx, self.ID, domain.WorkItemDone, "terminal-handback-same-actor", fixture.actorA.Token); err != nil {
+		t.Fatalf("same actor terminalize: %v", err)
+	}
+	assignedA = doREST(t, fixture.server.Handler(), http.MethodGet, "/v1/feed?scope=assigned&limit=100", fixture.actorA.Secret, "", nil)
+	assertRESTStatus(t, assignedA, http.StatusOK)
+	if !strings.Contains(assignedA.Body.String(), "terminal-handback-same-actor") {
+		t.Fatalf("same holder feed omitted its terminal handback: %s", assignedA.Body.String())
+	}
+
+	outside, err := fixture.work.Create(fixture.ctx, workitems.CreateInput{
+		Title: "terminal-handback-outside", State: domain.WorkItemRunning,
+		SuggestedConvergenceChecks: []string{"outside remains hidden"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create outside item: %v", err)
+	}
+	if _, err := fixture.work.Claim(fixture.ctx, outside.ID, fixture.actorA.Token); err != nil {
+		t.Fatalf("claim outside item fixture: %v", err)
+	}
+	if _, err := fixture.work.Transition(fixture.ctx, outside.ID, domain.WorkItemDone, "terminal-handback-outside-hidden", fixture.root.Token); err != nil {
+		t.Fatalf("terminalize outside item: %v", err)
+	}
+	if _, err := fixture.work.Transition(fixture.ctx, fixture.unassigned.ID, domain.WorkItemCanceled, "terminal-handback-unassigned-hidden", fixture.root.Token); err != nil {
+		t.Fatalf("terminalize unassigned item: %v", err)
+	}
+	assignedA = doREST(t, fixture.server.Handler(), http.MethodGet, "/v1/feed?scope=assigned&limit=100", fixture.actorA.Secret, "", nil)
+	assertRESTStatus(t, assignedA, http.StatusOK)
+	for _, hidden := range []string{"terminal-handback-outside-hidden", "terminal-handback-unassigned-hidden"} {
+		if strings.Contains(assignedA.Body.String(), hidden) {
+			t.Fatalf("former holder feed leaked %q: %s", hidden, assignedA.Body.String())
+		}
+	}
+}
+
 func TestAssignedFeedIncompleteScopeFailsBeforeSSEHeadersIntegration(t *testing.T) {
 	fixture := newAssignedFeedFixture(t)
 	incomplete, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{

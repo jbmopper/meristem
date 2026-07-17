@@ -205,12 +205,13 @@ func TestDirectTerminalTransitionReleasesAssignment(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = tx.Rollback(ctx) }()
-			if _, _, err := writer.Append(ctx, tx, events.Spec{
+			transitionID, _, err := writer.Append(ctx, tx, events.Spec{
 				SubjectKind: domain.SubjectWorkItem, SubjectID: item.ID,
 				Kind: domain.EventWorkItemTransitioned, Source: actor.Source, ActorTokenID: &actor.ID,
 				Discriminator: "direct-terminal-" + string(terminal),
 				Payload:       map[string]any{"from": item.State, "to": terminal, "reason": "direct event proof"},
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatalf("append direct transition: %v", err)
 			}
 			if err := tx.Commit(ctx); err != nil {
@@ -221,13 +222,277 @@ func TestDirectTerminalTransitionReleasesAssignment(t *testing.T) {
 			}
 			var reason string
 			var gotTerminal string
-			if err := pool.QueryRow(ctx, `SELECT last_release_reason, terminal_state FROM work_item_assignment_state WHERE work_item_id=$1`, item.ID).Scan(&reason, &gotTerminal); err != nil {
+			var addressee uuid.UUID
+			var stateEventID uuid.UUID
+			if err := pool.QueryRow(ctx, `
+				SELECT last_release_reason, terminal_state,
+				       terminal_addressee_token_id, state_event_id
+				FROM work_item_assignment_state
+				WHERE work_item_id=$1
+			`, item.ID).Scan(&reason, &gotTerminal, &addressee, &stateEventID); err != nil {
 				t.Fatalf("read terminal assignment state: %v", err)
 			}
-			if reason != string(domain.AssignmentReleaseDone) || gotTerminal != string(terminal) {
-				t.Fatalf("terminal assignment state = reason %q terminal %q", reason, gotTerminal)
+			if reason != string(domain.AssignmentReleaseDone) || gotTerminal != string(terminal) || addressee != actor.ID || stateEventID != transitionID {
+				t.Fatalf("terminal assignment state = reason %q terminal %q addressee %s state_event %s", reason, gotTerminal, addressee, stateEventID)
+			}
+			if got := countAssignmentEvents(t, ctx, pool, item.ID, domain.EventWorkItemAssignmentReleased); got != 0 {
+				t.Fatalf("terminal transition emitted %d assignment release events, want 0", got)
+			}
+
+			// Exact projector replay preserves the terminal address even though the
+			// active holder fields were cleared by the first fold.
+			transitionEvent := loadAssignmentEvent(t, ctx, pool, transitionID)
+			applyAssignmentProjector(t, ctx, pool, transitionedProjector{}, transitionEvent, false)
+			var replayedAddressee uuid.UUID
+			if err := pool.QueryRow(ctx, `SELECT terminal_addressee_token_id FROM work_item_assignment_state WHERE work_item_id=$1`, item.ID).Scan(&replayedAddressee); err != nil || replayedAddressee != actor.ID {
+				t.Fatalf("replayed terminal addressee = %s, %v; want %s", replayedAddressee, err, actor.ID)
+			}
+
+			// A later legal terminal same-state event is a lifecycle no-op. It
+			// must not replace the entering-terminal event identity, or a later
+			// assigned-feed snapshot could no longer find the handback.
+			if _, err := svc.Transition(ctx, item.ID, terminal, "terminal same-state no-op", actor); err != nil {
+				t.Fatalf("same-state terminal transition: %v", err)
+			}
+			var afterNoopAddressee uuid.UUID
+			var afterNoopEventID uuid.UUID
+			if err := pool.QueryRow(ctx, `
+				SELECT terminal_addressee_token_id, state_event_id
+				FROM work_item_assignment_state WHERE work_item_id=$1
+			`, item.ID).Scan(&afterNoopAddressee, &afterNoopEventID); err != nil {
+				t.Fatalf("read assignment state after terminal no-op: %v", err)
+			}
+			if afterNoopAddressee != actor.ID || afterNoopEventID != transitionID {
+				t.Fatalf("terminal no-op moved handback: addressee=%s state_event=%s; want %s/%s", afterNoopAddressee, afterNoopEventID, actor.ID, transitionID)
 			}
 		})
+	}
+}
+
+func TestTerminalTransitionAddressUsesAssignmentNotTransitionActor(t *testing.T) {
+	ctx := context.Background()
+	pool, writer, _, holder, closer := newAssignmentTestStack(t, ctx)
+	svc := NewService(pool, writer)
+
+	assigned := createClaimableItem(t, ctx, svc, holder, "other actor terminal handback")
+	if _, err := svc.Claim(ctx, assigned.ID, holder); err != nil {
+		t.Fatalf("claim assigned item: %v", err)
+	}
+	if _, err := svc.Transition(ctx, assigned.ID, domain.WorkItemDone, "closed by coordinator", closer); err != nil {
+		t.Fatalf("terminalize assigned item: %v", err)
+	}
+	transition := loadLatestAssignmentEvent(t, ctx, pool, assigned.ID, domain.EventWorkItemTransitioned)
+	if transition.ActorTokenID == nil || *transition.ActorTokenID != closer.ID {
+		t.Fatalf("transition attribution = %v, want closer %s", transition.ActorTokenID, closer.ID)
+	}
+	var addressee uuid.UUID
+	var stateEventID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT terminal_addressee_token_id, state_event_id
+		FROM work_item_assignment_state WHERE work_item_id=$1
+	`, assigned.ID).Scan(&addressee, &stateEventID); err != nil {
+		t.Fatalf("read assigned terminal address: %v", err)
+	}
+	if addressee != holder.ID || stateEventID != transition.ID {
+		t.Fatalf("assigned terminal address = %s at %s, want holder %s at transition %s", addressee, stateEventID, holder.ID, transition.ID)
+	}
+
+	unassigned := createClaimableItem(t, ctx, svc, holder, "unassigned terminal")
+	if _, err := svc.Transition(ctx, unassigned.ID, domain.WorkItemDone, "no holder", closer); err != nil {
+		t.Fatalf("terminalize unassigned item: %v", err)
+	}
+	var noAddressee *uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT terminal_addressee_token_id FROM work_item_assignment_state WHERE work_item_id=$1`, unassigned.ID).Scan(&noAddressee); err != nil {
+		t.Fatalf("read unassigned terminal address: %v", err)
+	}
+	if noAddressee != nil {
+		t.Fatalf("unassigned terminal address = %s, want NULL", *noAddressee)
+	}
+}
+
+func TestTerminalAtCreateRemainsUnaddressedAcrossSameStateTransition(t *testing.T) {
+	ctx := context.Background()
+	pool, writer, _, actor, _ := newAssignmentTestStack(t, ctx)
+	svc := NewService(pool, writer)
+	item, err := svc.Create(ctx, CreateInput{
+		Title: "terminal at create", State: domain.WorkItemDone,
+		SuggestedConvergenceChecks: []string{"already terminal"},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      actor,
+	})
+	if err != nil {
+		t.Fatalf("create terminal item: %v", err)
+	}
+	created := loadLatestAssignmentEvent(t, ctx, pool, item.ID, domain.EventWorkItemCreated)
+	if _, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "terminal create no-op", actor); err != nil {
+		t.Fatalf("terminal same-state transition: %v", err)
+	}
+	var addressee *uuid.UUID
+	var stateEventID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT terminal_addressee_token_id, state_event_id
+		FROM work_item_assignment_state WHERE work_item_id=$1
+	`, item.ID).Scan(&addressee, &stateEventID); err != nil {
+		t.Fatalf("read terminal-at-create assignment state: %v", err)
+	}
+	if addressee != nil || stateEventID != created.ID {
+		t.Fatalf("terminal-at-create state = addressee %v event %s, want NULL/%s", addressee, stateEventID, created.ID)
+	}
+}
+
+func TestTerminalPayloadCannotForgeAssignmentLifecycle(t *testing.T) {
+	ctx := context.Background()
+	pool, writer, _, holder, closer := newAssignmentTestStack(t, ctx)
+	svc := NewService(pool, writer)
+	item := createClaimableItem(t, ctx, svc, holder, "forged terminal payload")
+	if _, err := svc.Claim(ctx, item.ID, holder); err != nil {
+		t.Fatalf("claim fixture: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		to   domain.WorkItemState
+	}{
+		{name: "terminal to nonterminal", to: domain.WorkItemRunning},
+		{name: "terminal to different terminal", to: domain.WorkItemFailed},
+		{name: "terminal same-state while projection running", to: domain.WorkItemDone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			_, _, err = writer.Append(ctx, tx, events.Spec{
+				SubjectKind: domain.SubjectWorkItem, SubjectID: item.ID,
+				Kind: domain.EventWorkItemTransitioned, Source: closer.Source, ActorTokenID: &closer.ID,
+				Discriminator: "forged-terminal-payload:" + tc.name,
+				Payload: map[string]any{
+					"from":   domain.WorkItemDone,
+					"to":     tc.to,
+					"reason": "caller payload must not override projected lifecycle",
+				},
+			})
+			if err == nil {
+				t.Fatal("forged terminal payload was accepted")
+			}
+		})
+	}
+
+	if got := countAssignmentEvents(t, ctx, pool, item.ID, domain.EventWorkItemTransitioned); got != 0 {
+		t.Fatalf("forged terminal payload committed %d transitions, want 0", got)
+	}
+	current, err := svc.GetAssignment(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read assignment after forged transitions: %v", err)
+	}
+	if current.HolderTokenID != holder.ID {
+		t.Fatalf("forged terminal payload changed holder to %s, want %s", current.HolderTokenID, holder.ID)
+	}
+	workItem, err := svc.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read work item after forged transitions: %v", err)
+	}
+	if workItem.State != domain.WorkItemRunning {
+		t.Fatalf("forged terminal payload changed work item state to %s", workItem.State)
+	}
+
+	legitimate, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "legitimate terminal entry", closer)
+	if err != nil {
+		t.Fatalf("terminalize fixture: %v", err)
+	}
+	if legitimate.State != domain.WorkItemDone {
+		t.Fatalf("legitimate terminal state = %s", legitimate.State)
+	}
+	terminalEntry := loadLatestAssignmentEvent(t, ctx, pool, item.ID, domain.EventWorkItemTransitioned)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: item.ID,
+		Kind: domain.EventWorkItemTransitioned, Source: closer.Source, ActorTokenID: &closer.ID,
+		Discriminator: "forged-nonterminal-from-terminal",
+		Payload: map[string]any{
+			"from": domain.WorkItemRunning, "to": domain.WorkItemPlanned,
+			"reason": "event history, not caller payload, owns from",
+		},
+	}); err == nil {
+		t.Fatal("forged nonterminal from escaped terminal event history")
+	}
+	afterForgery, err := svc.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read work item after terminal escape attempt: %v", err)
+	}
+	if afterForgery.State != domain.WorkItemDone {
+		t.Fatalf("terminal escape attempt changed work item state to %s", afterForgery.State)
+	}
+	var addressee uuid.UUID
+	var stateEventID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT terminal_addressee_token_id, state_event_id
+		FROM work_item_assignment_state WHERE work_item_id=$1
+	`, item.ID).Scan(&addressee, &stateEventID); err != nil {
+		t.Fatalf("read assignment after terminal escape attempt: %v", err)
+	}
+	if addressee != holder.ID || stateEventID != terminalEntry.ID {
+		t.Fatalf("terminal escape attempt changed handback to %s/%s, want %s/%s", addressee, stateEventID, holder.ID, terminalEntry.ID)
+	}
+}
+
+func TestLegacyTransitionWithoutFromUsesEventHistory(t *testing.T) {
+	ctx := context.Background()
+	pool, writer, _, holder, closer := newAssignmentTestStack(t, ctx)
+	svc := NewService(pool, writer)
+	item := createClaimableItem(t, ctx, svc, holder, "legacy missing-from transition")
+	if _, err := svc.Claim(ctx, item.ID, holder); err != nil {
+		t.Fatalf("claim fixture: %v", err)
+	}
+
+	appendLegacy := func(discriminator, reason string) domain.Event {
+		t.Helper()
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		eventID, _, err := writer.Append(ctx, tx, events.Spec{
+			SubjectKind: domain.SubjectWorkItem, SubjectID: item.ID,
+			Kind: domain.EventWorkItemTransitioned, Source: closer.Source, ActorTokenID: &closer.ID,
+			Discriminator: discriminator,
+			Payload:       map[string]any{"to": domain.WorkItemDone, "reason": reason},
+		})
+		if err != nil {
+			t.Fatalf("append legacy transition: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit legacy transition: %v", err)
+		}
+		return loadAssignmentEvent(t, ctx, pool, eventID)
+	}
+
+	terminalEntry := appendLegacy("legacy-missing-from-terminal-entry", "legacy terminal entry")
+	applyAssignmentProjector(t, ctx, pool, transitionedProjector{}, terminalEntry, false)
+	appendLegacy("legacy-missing-from-terminal-noop", "legacy terminal no-op")
+
+	workItem, err := svc.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read legacy transition result: %v", err)
+	}
+	if workItem.State != domain.WorkItemDone {
+		t.Fatalf("legacy transition state = %s", workItem.State)
+	}
+	var addressee uuid.UUID
+	var stateEventID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT terminal_addressee_token_id, state_event_id
+		FROM work_item_assignment_state WHERE work_item_id=$1
+	`, item.ID).Scan(&addressee, &stateEventID); err != nil {
+		t.Fatalf("read legacy transition handback: %v", err)
+	}
+	if addressee != holder.ID || stateEventID != terminalEntry.ID {
+		t.Fatalf("legacy transition handback = %s/%s, want %s/%s", addressee, stateEventID, holder.ID, terminalEntry.ID)
 	}
 }
 
