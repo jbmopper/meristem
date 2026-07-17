@@ -2,8 +2,10 @@ package workitems
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -146,6 +148,12 @@ var ErrVerdictStaleRound = errors.New("workitems: the reviewer binding predates 
 // name the current round's exact artifact commit.
 var ErrVerdictWrongArtifact = errors.New("workitems: review verdict does not name the current round's exact reviewed commit")
 
+// ErrVerdictRoundArtifactInvalid refuses verdicts while the current review
+// round does not declare exactly one valid commit: a round whose artifact is
+// missing, blank, malformed, or self-conflicting carries no verdict
+// authority — declare a well-formed round rather than falling open.
+var ErrVerdictRoundArtifactInvalid = errors.New("workitems: current review round does not declare exactly one valid reviewed commit")
+
 // requireVerdictAuthority is the verdict-authority gate (ee916614 slice 2),
 // enforced here in the one canonical domain operation REST, MCP, and worker
 // paths share. Authority is fenced to the binding GENERATION, not just the
@@ -219,10 +227,9 @@ func (s *Service) requireVerdictAuthority(ctx context.Context, tx pgx.Tx, id uui
 // commit B. Items that declare no rounds are unaffected.
 func (s *Service) requireCurrentReviewRound(ctx context.Context, tx pgx.Tx, id uuid.UUID, bindingSeq int64, detail ReviewVerdictDetail) error {
 	var roundSeq int64
-	var roundCommit string
+	var rawInner []byte
 	err := tx.QueryRow(ctx, `
-		SELECT seq,
-		       COALESCE(payload->'inner'->>'commit', payload->'inner'->>'exact_commit', '')
+		SELECT seq, payload->'inner'
 		FROM events
 		WHERE subject_kind = 'work_item'
 		  AND subject_id = $1
@@ -230,7 +237,7 @@ func (s *Service) requireCurrentReviewRound(ctx context.Context, tx pgx.Tx, id u
 		  AND payload->>'inner_kind' = 'implementation.ready_for_review'
 		ORDER BY seq DESC
 		LIMIT 1
-	`, id, domain.EventWorkItemEventAppended).Scan(&roundSeq, &roundCommit)
+	`, id, domain.EventWorkItemEventAppended).Scan(&roundSeq, &rawInner)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -240,10 +247,74 @@ func (s *Service) requireCurrentReviewRound(ctx context.Context, tx pgx.Tx, id u
 	if roundSeq > bindingSeq {
 		return fmt.Errorf("%w: round seq %d postdates binding seq %d", ErrVerdictStaleRound, roundSeq, bindingSeq)
 	}
-	if roundCommit != "" && detail.ReviewedCommit != roundCommit {
+	roundCommit, err := reviewRoundCommit(rawInner)
+	if err != nil {
+		return err
+	}
+	if detail.ReviewedCommit != roundCommit {
 		return fmt.Errorf("%w: verdict names %q, current round is %s", ErrVerdictWrongArtifact, detail.ReviewedCommit, roundCommit)
 	}
 	return nil
+}
+
+// reviewRoundCommit resolves the current round's exact commit from the
+// ready-for-review inner payload, which live handoffs record either as a
+// JSON object or as a JSON-encoded STRING of that object (the shape the MCP
+// append path produces). Both decode deterministically; everything else
+// fails closed: a declared round must carry exactly one valid, unambiguous
+// commit or it carries no verdict authority at all — an empty result must
+// never silently disable the artifact fence (finding on 8ef04eb).
+func reviewRoundCommit(rawInner []byte) (string, error) {
+	if len(rawInner) == 0 {
+		return "", fmt.Errorf("%w: round has no payload", ErrVerdictRoundArtifactInvalid)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(rawInner, &object); err != nil {
+		// A JSON-encoded string wrapping the object is the live MCP shape.
+		var encoded string
+		if err := json.Unmarshal(rawInner, &encoded); err != nil {
+			return "", fmt.Errorf("%w: round payload is neither object nor encoded object", ErrVerdictRoundArtifactInvalid)
+		}
+		if err := json.Unmarshal([]byte(encoded), &object); err != nil || object == nil {
+			return "", fmt.Errorf("%w: round payload string does not decode to an object", ErrVerdictRoundArtifactInvalid)
+		}
+	}
+	decodeField := func(key string) (string, bool, error) {
+		raw, present := object[key]
+		if !present {
+			return "", false, nil
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return "", true, fmt.Errorf("%w: %s is not a string", ErrVerdictRoundArtifactInvalid, key)
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", true, fmt.Errorf("%w: %s is blank", ErrVerdictRoundArtifactInvalid, key)
+		}
+		return value, true, nil
+	}
+	commit, hasCommit, err := decodeField("commit")
+	if err != nil {
+		return "", err
+	}
+	exact, hasExact, err := decodeField("exact_commit")
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case hasCommit && hasExact:
+		if commit != exact {
+			return "", fmt.Errorf("%w: commit %q conflicts with exact_commit %q", ErrVerdictRoundArtifactInvalid, commit, exact)
+		}
+		return commit, nil
+	case hasCommit:
+		return commit, nil
+	case hasExact:
+		return exact, nil
+	default:
+		return "", fmt.Errorf("%w: round declares neither commit nor exact_commit", ErrVerdictRoundArtifactInvalid)
+	}
 }
 
 // validateSpawnAssignee requires the assignee to be a live non-root agent

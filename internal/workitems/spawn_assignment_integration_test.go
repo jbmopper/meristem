@@ -2,6 +2,7 @@ package workitems
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -234,6 +235,57 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	}
 	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(reboundRound.AssignmentEventID, "bbbb222"), reviewerX); err != nil {
 		t.Fatalf("rebound verdict for round B: %v", err)
+	}
+
+	// The live MCP handoff records the ready-for-review inner payload as a
+	// JSON-encoded STRING; the artifact fence must decode it identically to
+	// the object form, never silently disable (finding on 8ef04eb). And a
+	// round that declares no valid commit carries no verdict authority.
+	liveShape := createClaimableItem(t, ctx, svc, actorA, "string-shaped round item")
+	encodedRound, err := json.Marshal(map[string]any{"commit": "cccc333", "branch": "claude/live-shape"})
+	if err != nil {
+		t.Fatalf("encode live-shape round: %v", err)
+	}
+	// AppendEvent with a string payload stores inner as a JSON string — the
+	// exact shape live MCP deliveries produce.
+	if err := svc.AppendEvent(ctx, liveShape.ID, "implementation.ready_for_review", string(encodedRound), actorA); err != nil {
+		t.Fatalf("declare string-shaped round: %v", err)
+	}
+	liveBound, err := svc.AssignSpawned(ctx, liveShape.ID, reviewerX.ID, spawner)
+	if err != nil {
+		t.Fatalf("bind string-shaped round: %v", err)
+	}
+	if err := svc.AppendEvent(ctx, liveShape.ID, ReviewVerdictInnerKind, withCommit(liveBound.AssignmentEventID, "wrong999"), reviewerX); !errors.Is(err, ErrVerdictWrongArtifact) {
+		t.Fatalf("string-shape wrong-commit verdict = %v, want ErrVerdictWrongArtifact", err)
+	}
+	if err := svc.AppendEvent(ctx, liveShape.ID, ReviewVerdictInnerKind, withCommit(liveBound.AssignmentEventID, "cccc333"), reviewerX); err != nil {
+		t.Fatalf("string-shape correct verdict: %v", err)
+	}
+
+	// A declared round with no commit at all fails closed for every verdict.
+	noCommit := createClaimableItem(t, ctx, svc, actorA, "commitless round item")
+	if err := svc.AppendEvent(ctx, noCommit.ID, "implementation.ready_for_review", map[string]any{"branch": "claude/no-commit"}, actorA); err != nil {
+		t.Fatalf("declare commitless round: %v", err)
+	}
+	ncBound, err := svc.AssignSpawned(ctx, noCommit.ID, reviewerX.ID, spawner)
+	if err != nil {
+		t.Fatalf("bind commitless round: %v", err)
+	}
+	if err := svc.AppendEvent(ctx, noCommit.ID, ReviewVerdictInnerKind, withCommit(ncBound.AssignmentEventID, "anything"), reviewerX); !errors.Is(err, ErrVerdictRoundArtifactInvalid) {
+		t.Fatalf("commitless-round verdict = %v, want ErrVerdictRoundArtifactInvalid", err)
+	}
+
+	// Conflicting commit vs exact_commit declarations also fail closed.
+	conflicted := createClaimableItem(t, ctx, svc, actorA, "conflicting round item")
+	if err := svc.AppendEvent(ctx, conflicted.ID, "implementation.ready_for_review", map[string]any{"commit": "dddd444", "exact_commit": "eeee555"}, actorA); err != nil {
+		t.Fatalf("declare conflicting round: %v", err)
+	}
+	cfBound, err := svc.AssignSpawned(ctx, conflicted.ID, reviewerX.ID, spawner)
+	if err != nil {
+		t.Fatalf("bind conflicting round: %v", err)
+	}
+	if err := svc.AppendEvent(ctx, conflicted.ID, ReviewVerdictInnerKind, withCommit(cfBound.AssignmentEventID, "dddd444"), reviewerX); !errors.Is(err, ErrVerdictRoundArtifactInvalid) {
+		t.Fatalf("conflicting-round verdict = %v, want ErrVerdictRoundArtifactInvalid", err)
 	}
 
 	// A missing assignment placeholder is a corrupted projection, never a
