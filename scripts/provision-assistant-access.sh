@@ -44,6 +44,11 @@ targets=("${DEFAULT_TARGETS[@]}")
 apply_claude_code=false
 print_remote=false
 session_target=""
+session_requested=false
+# Default-deny session credential scopes: what a working agent session needs,
+# nothing more. Empty scopes would select the broad legacy MCP surface
+# (access.legacyUnscoped), so --session refuses an empty override (3818efed).
+session_scopes="feed.read,work_items.read_all,work_items.write_all,work_items.create"
 
 usage() {
   cat <<'USAGE'
@@ -55,9 +60,19 @@ options:
   --session NAME        Mint one per-session credential (source=agent) named
                         NAME, write .meristem/NAME.token, and print the
                         MERISTEM_TOKEN_FILE export for this session. Touches
-                        no shared wrapper config. Name the credential under
+                        no shared wrapper config. NAME must be unique: an
+                        existing token file or active token of that name is
+                        refused, because two live sessions must never share
+                        one actor token (3818efed). Name the credential under
                         the agent persona's lineage (claude-fork, codex-0716)
-                        so principal rollup stays a naming query (3818efed).
+                        so principal rollup stays a naming query. Wrappers
+                        sample MERISTEM_TOKEN_FILE once at MCP process start;
+                        restart the MCP process to adopt a new credential
+                        (live reauthentication is 7313e2ab).
+  --session-scopes CSV  Scope list for --session credentials. Default:
+                        feed.read,work_items.read_all,work_items.write_all,
+                        work_items.create. Must be non-empty: empty scopes
+                        would grant the broad legacy surface.
   --apply-claude-code   Run `claude mcp add ...` if the Claude CLI is installed.
   --print-remote        Print remote-only targets that are intentionally not minted.
   -h, --help            Show this help.
@@ -94,10 +109,20 @@ while (($#)); do
       ;;
     --session)
       session_target="${2:?--session requires a name}"
+      session_requested=true
       shift 2
       ;;
     --session=*)
       session_target="${1#--session=}"
+      session_requested=true
+      shift
+      ;;
+    --session-scopes)
+      session_scopes="${2:?--session-scopes requires a comma-separated scope list}"
+      shift 2
+      ;;
+    --session-scopes=*)
+      session_scopes="${1#--session-scopes=}"
       shift
       ;;
     --print-remote)
@@ -302,15 +327,32 @@ apply_claude_code_config() {
 mkdir -p "$TOKEN_DIR"
 chmod 700 "$TOKEN_DIR"
 
-if [[ -n "$session_target" ]]; then
+if $session_requested; then
   # Per-session credential: one mint, no shared wrapper regeneration, no
   # claude-mcp registration. The session exports MERISTEM_TOKEN_FILE so the
   # existing generated wrappers pick up its credential; every other session
-  # keeps its own.
+  # keeps its own. This deliberately does NOT reuse mint_target: session
+  # identities must be unique (never silently reuse an existing token or
+  # file) and must carry explicit default-deny scopes (3818efed round 2).
+  [[ -n "$session_target" ]] || die "--session requires a non-empty name"
+  [[ -n "$session_scopes" ]] || die "--session-scopes must not be empty: empty scopes select the broad legacy surface"
   $apply_claude_code && die "--session cannot be combined with --apply-claude-code"
-  log "provisioning per-session credential $session_target"
-  mint_target "$session_target"
+  sanitize_target "$session_target"
+
   session_file="$(token_file_for "$session_target")"
+  [[ -e "$session_file" ]] && die "$session_file already exists; per-session names must be unique - pick a new name (e.g. append a date or counter)"
+  if active_token_exists "$session_target"; then
+    die "an active token named $session_target already exists; two live sessions must never share an actor token - pick a unique name"
+  fi
+
+  log "provisioning per-session credential $session_target (scopes: $session_scopes)"
+  session_tmp="$(mktemp)"
+  MERISTEM_TOKEN="$(cat "$ROOT_TOKEN_FILE")" \
+    $MERISTEM_BIN tokens create --name "$session_target" --source agent --scopes "$session_scopes" > "$session_tmp"
+  write_secret_from_capture "$session_tmp" "$session_file"
+  rm -f "$session_tmp"
+  [[ -s "$session_file" ]] || die "session credential file $session_file was not written"
+
   case "$session_file" in
     /*) session_file_abs="$session_file" ;;
     *)  session_file_abs="$REPO_ROOT/$session_file" ;;
@@ -321,7 +363,9 @@ done. Point this session's MCP wrapper at its own credential with:
 
   export MERISTEM_TOKEN_FILE=$session_file_abs
 
-The shared per-app tokens and generated wrappers are unchanged.
+Wrappers read this once at MCP process start: restart the MCP process (not
+just the shell) to adopt it. The shared per-app tokens and generated wrappers
+are unchanged.
 EOF
   exit 0
 fi
