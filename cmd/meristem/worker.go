@@ -266,6 +266,7 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 	logger.Info(msg,
 		slog.String("token_id", actor.ID.String()),
 		slog.String("token_source", string(actor.Source)),
+		slog.Int("assignments_expired", result.AssignmentsExpired),
 		slog.Int("network_commands_expired", result.NetworkCommandsExpired),
 		slog.Int("scanned", result.Scanned),
 		slog.Int("breaches_emitted", result.BreachesEmitted),
@@ -304,7 +305,8 @@ func logWorkerResult(logger *slog.Logger, msg string, actor domain.Token, result
 }
 
 func formatWorkerOnceResult(result worker.Result) string {
-	return fmt.Sprintf("worker --once: network_commands_expired=%d scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d review_candidates=%d review_children_spawned=%d review_children_already_present=%d review_skipped_missing_cultivar=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d dispatch_jobs_reconciled_canceled=%d review_dispatch_jobs_claimed=%d review_dispatch_jobs_started=%d review_dispatch_jobs_already_done=%d review_dispatch_jobs_canceled=%d review_dispatch_jobs_dormant=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d malformed_payloads_skipped=%d",
+	return fmt.Sprintf("worker --once: assignments_expired=%d network_commands_expired=%d scanned=%d emitted=%d already_recorded=%d patience_escalations=%d patience_escalations_already_requested=%d patience_escalations_skipped_awaiting_human=%d patience_dispatches=%d patience_dispatches_already_requested=%d scribe_candidates=%d scribe_children_spawned=%d scribe_children_already_present=%d review_candidates=%d review_children_spawned=%d review_children_already_present=%d review_skipped_missing_cultivar=%d dispatch_candidates=%d dispatch_requested=%d dispatch_already_requested=%d dispatch_skipped_missing_cultivar=%d dispatch_jobs_reconciled_canceled=%d review_dispatch_jobs_claimed=%d review_dispatch_jobs_started=%d review_dispatch_jobs_already_done=%d review_dispatch_jobs_canceled=%d review_dispatch_jobs_dormant=%d convergence_candidates=%d convergence_verdicts=%d stale_inputs_skipped=%d accepts=%d retries=%d escalations=%d malformed_payloads_skipped=%d",
+		result.AssignmentsExpired,
 		result.NetworkCommandsExpired,
 		result.Scanned,
 		result.BreachesEmitted,

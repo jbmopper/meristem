@@ -62,6 +62,7 @@ func TestProjectionTables_Coverage(t *testing.T) {
 	want := map[string]bool{
 		"tokens":                         true,
 		"work_items":                     true,
+		"work_item_assignment_state":     true,
 		"work_item_relations":            true,
 		"messages":                       true,
 		"message_parts":                  true,

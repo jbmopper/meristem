@@ -127,6 +127,8 @@ func StaticKindClass(kind string) (class string, dynamic bool, ok bool) {
 	case domain.EventTokenCreated,
 		domain.EventTokenRevoked,
 		domain.EventIdempotencyRecorded,
+		domain.EventWorkItemAssigned,
+		domain.EventWorkItemAssignmentReleased,
 		domain.EventDeterministicErrorReported,
 		domain.EventDeterministicErrorMasked,
 		domain.EventDeterministicErrorUnmasked,

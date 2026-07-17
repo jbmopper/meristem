@@ -656,7 +656,11 @@ func (s *Service) appendWorkItemEventWithRateBudget(ctx context.Context, tx pgx.
 		}
 		return false, nil, nil
 	}
-	class, ok := feed.ClassifyEvent(spec.Kind, spec.Payload)
+	rawPayload, err := json.Marshal(spec.Payload)
+	if err != nil {
+		return false, nil, fmt.Errorf("workitems: marshal event kind %q for xylem budget: %w", spec.Kind, err)
+	}
+	class, ok := workItemEventBudgetClass(spec.Kind, rawPayload)
 	if !ok {
 		return false, nil, fmt.Errorf("workitems: classify event kind %q for xylem budget", spec.Kind)
 	}
@@ -671,6 +675,19 @@ func (s *Service) appendWorkItemEventWithRateBudget(ctx context.Context, tx pgx.
 		return false, nil, err
 	}
 	return false, nil, nil
+}
+
+// workItemEventBudgetClass is the single xylem accounting classifier for both
+// attempted and persisted events. Assignment lifecycle remains admin and
+// non-projectable in the feed until Assigned Lane ships, but it must consume
+// the lifecycle event budget here so claim/yield churn is bounded.
+func workItemEventBudgetClass(kind string, payload json.RawMessage) (string, bool) {
+	switch kind {
+	case domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased:
+		return feed.KindClassLifecycle, true
+	default:
+		return feed.ClassifyItem(feed.Item{Kind: kind, Payload: payload})
+	}
 }
 
 func (s *Service) enforceEventRateBudget(ctx context.Context, tx pgx.Tx, item domain.WorkItem, attemptedEventID uuid.UUID, attemptedKind string, attemptedInnerKind string, class string, actor domain.Token) (bool, error, error) {
@@ -751,13 +768,13 @@ func (s *Service) resolveEventRateBudget(ctx context.Context, tx pgx.Tx, workIte
 	if cultivarRef == "" {
 		return budget, nil
 	}
-	item, err := registry.NewService(s.pool, nil).GetCultivarRef(ctx, cultivarRef)
+	xylem, resolvedRef, err := cultivarXylemForRefInTx(ctx, tx, cultivarRef)
 	if err != nil {
 		return eventRateBudget{}, err
 	}
-	budget.Cultivar = fmt.Sprintf("%s@%d", item.Name, item.Version)
-	if item.Xylem.MaxEventsPerItemPerHourByClass[class] > 0 {
-		budget.Max = item.Xylem.MaxEventsPerItemPerHourByClass[class]
+	budget.Cultivar = resolvedRef
+	if xylem.MaxEventsPerItemPerHourByClass[class] > 0 {
+		budget.Max = xylem.MaxEventsPerItemPerHourByClass[class]
 		budget.Source = "cultivar:" + budget.Cultivar
 	}
 	return budget, nil
@@ -826,7 +843,7 @@ func countedEventsInLastHourByClass(ctx context.Context, tx pgx.Tx, workItemID u
 		if err := rows.Scan(&item.Kind, &item.Payload); err != nil {
 			return 0, fmt.Errorf("workitems: scan event for xylem budget: %w", err)
 		}
-		got, ok := feed.ClassifyItem(item)
+		got, ok := workItemEventBudgetClass(item.Kind, item.Payload)
 		if ok && got == class {
 			count++
 		}

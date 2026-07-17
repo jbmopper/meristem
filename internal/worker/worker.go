@@ -161,6 +161,9 @@ func EvaluateBreaches(now time.Time, candidates []Candidate) []Breach {
 
 // Result is the outcome of a single ScanOnce call.
 type Result struct {
+	// AssignmentsExpired is the number of bounded work_item assignments this
+	// tick released after their persisted lease elapsed.
+	AssignmentsExpired int
 	// NetworkCommandsExpired is the number of pending cross-node commands this
 	// worker tick moved to the deterministic expired terminal state.
 	NetworkCommandsExpired int
@@ -339,6 +342,12 @@ func New(pool *pgxpool.Pool, writer *events.Writer, budgets Budgets, actor *uuid
 func (w *Worker) ScanOnce(ctx context.Context) (Result, error) {
 	now := w.clock().UTC()
 	out := Result{}
+
+	assignmentsExpired, err := w.expireAssignments(ctx)
+	out.AssignmentsExpired = assignmentsExpired
+	if err != nil {
+		return out, fmt.Errorf("worker: assignment expiry pass: %w", err)
+	}
 
 	scribeResult, err := w.scanScribes(ctx)
 	out.ScribeCandidatesScanned = scribeResult.ScribeCandidatesScanned

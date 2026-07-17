@@ -46,6 +46,7 @@ import (
 var projectionTables = []string{
 	"tokens",
 	"work_items",
+	"work_item_assignment_state",
 	"work_item_relations",
 	"messages",
 	"message_parts",

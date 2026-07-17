@@ -7,15 +7,24 @@ import (
 )
 
 const (
-	EventTokenCreated                 = "token.created"
-	EventTokenRevoked                 = "token.revoked"
-	EventIdempotencyRecorded          = "idempotency.recorded"
-	EventMessageCaptured              = "message.captured"
-	EventWorkItemCreated              = "work_item.created"
-	EventWorkItemTransitioned         = "work_item.transitioned"
-	EventWorkItemEventAppended        = "work_item.event_appended"
-	EventWorkItemRelationAdded        = "work_item.relation_added"
-	EventWorkItemMetadataUpdated      = "work_item.metadata_updated"
+	EventTokenCreated            = "token.created"
+	EventTokenRevoked            = "token.revoked"
+	EventIdempotencyRecorded     = "idempotency.recorded"
+	EventMessageCaptured         = "message.captured"
+	EventWorkItemCreated         = "work_item.created"
+	EventWorkItemTransitioned    = "work_item.transitioned"
+	EventWorkItemEventAppended   = "work_item.event_appended"
+	EventWorkItemRelationAdded   = "work_item.relation_added"
+	EventWorkItemMetadataUpdated = "work_item.metadata_updated"
+	// EventWorkItemAssigned records a bounded assignment epoch. Its mode is
+	// one of claim|spawn|handoff; the claim ledger emits only claim, while the
+	// shared vocabulary leaves spawn/handoff admission to their own slices.
+	EventWorkItemAssigned = "work_item.assigned"
+	// EventWorkItemAssignmentReleased closes one exact assignment epoch. Its
+	// payload names the work_item.assigned event it releases and one of the
+	// closed reasons (done, yield, expired), so a stale release can never erase
+	// a later assignment during replay or concurrent execution.
+	EventWorkItemAssignmentReleased   = "work_item.assignment_released"
 	EventXylemExhausted               = "xylem.exhausted"
 	EventSignalReceived               = "signal.received"
 	EventDeterministicErrorReported   = "deterministic_error.reported"
@@ -179,6 +188,8 @@ var AllEventKinds = []string{
 	EventWorkItemEventAppended,
 	EventWorkItemRelationAdded,
 	EventWorkItemMetadataUpdated,
+	EventWorkItemAssigned,
+	EventWorkItemAssignmentReleased,
 	EventXylemExhausted,
 	EventSignalReceived,
 	EventDeterministicErrorReported,
@@ -423,6 +434,60 @@ type WorkItem struct {
 	CreatedAt                  time.Time
 	StateEnteredAt             time.Time
 	UpdatedAt                  time.Time
+}
+
+// AssignmentReleaseReason is the closed vocabulary for ending one bounded
+// work_item assignment. Done is the projection sentinel derived exclusively
+// from an authoritative terminal work_item.transitioned event; v1
+// work_item.assignment_released payloads accept only yield|expired.
+type AssignmentReleaseReason string
+
+const (
+	AssignmentReleaseDone    AssignmentReleaseReason = "done"
+	AssignmentReleaseYield   AssignmentReleaseReason = "yield"
+	AssignmentReleaseExpired AssignmentReleaseReason = "expired"
+)
+
+func (r AssignmentReleaseReason) Valid() bool {
+	switch r {
+	case AssignmentReleaseDone, AssignmentReleaseYield, AssignmentReleaseExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+// WorkItemAssignmentMode describes how a holder was selected. Claim Ledger
+// writes only claim; spawn and handoff are reserved for later admission paths
+// that share this projection and event vocabulary.
+type WorkItemAssignmentMode string
+
+const (
+	WorkItemAssignmentClaim   WorkItemAssignmentMode = "claim"
+	WorkItemAssignmentSpawn   WorkItemAssignmentMode = "spawn"
+	WorkItemAssignmentHandoff WorkItemAssignmentMode = "handoff"
+)
+
+func (m WorkItemAssignmentMode) Valid() bool {
+	switch m {
+	case WorkItemAssignmentClaim, WorkItemAssignmentSpawn, WorkItemAssignmentHandoff:
+		return true
+	default:
+		return false
+	}
+}
+
+// WorkItemAssignment is the current holder projection for one work_item.
+// AssignmentEventID is the stable assignment epoch identity; release events
+// name it so they cannot act on a replacement lease.
+type WorkItemAssignment struct {
+	WorkItemID        uuid.UUID
+	HolderTokenID     uuid.UUID
+	Mode              WorkItemAssignmentMode
+	AssignmentEventID uuid.UUID
+	ClaimedAt         time.Time
+	ExpiresAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // Message is the v0 text-only inbox projection.

@@ -78,6 +78,10 @@ var ExcludedKinds = []string{
 	domain.EventTokenCreated,
 	domain.EventTokenRevoked,
 	domain.EventIdempotencyRecorded,
+	// Assignment events carry actor identity and remain audit-only until
+	// Assigned Lane defines their filtered/default-feed projection.
+	domain.EventWorkItemAssigned,
+	domain.EventWorkItemAssignmentReleased,
 	// Node registry maintenance is fleet-topology audit, not the human
 	// activity narrative; it belongs to the log, not /v1/feed.
 	domain.EventNodeRegistered,

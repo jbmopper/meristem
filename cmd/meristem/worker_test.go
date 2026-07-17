@@ -21,6 +21,7 @@ import (
 
 func TestFormatWorkerOnceResultIncludesDispatchCounters(t *testing.T) {
 	line := formatWorkerOnceResult(worker.Result{
+		AssignmentsExpired:                      33,
 		NetworkCommandsExpired:                  26,
 		Scanned:                                 10,
 		BreachesEmitted:                         1,
@@ -57,6 +58,7 @@ func TestFormatWorkerOnceResultIncludesDispatchCounters(t *testing.T) {
 	})
 
 	for _, want := range []string{
+		"assignments_expired=33",
 		"network_commands_expired=26",
 		"patience_dispatches=6",
 		"patience_dispatches_already_requested=7",
@@ -203,13 +205,14 @@ func TestLogWorkerResultIncludesSystemTokenFields(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	actor := systemTestToken()
 
-	logWorkerResult(logger, "worker tick complete", actor, worker.Result{Scanned: 3})
+	logWorkerResult(logger, "worker tick complete", actor, worker.Result{AssignmentsExpired: 4, Scanned: 3})
 
 	out := buf.String()
 	for _, want := range []string{
 		`"msg":"worker tick complete"`,
 		`"token_id":"` + actor.ID.String() + `"`,
 		`"token_source":"system"`,
+		`"assignments_expired":4`,
 		`"scanned":3`,
 	} {
 		if !strings.Contains(out, want) {

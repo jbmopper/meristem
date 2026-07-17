@@ -19,6 +19,8 @@ func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(checksProposedProjector{})
 	registry.Register(relationAddedProjector{})
 	registry.Register(metadataUpdatedProjector{})
+	registry.Register(assignedProjector{})
+	registry.Register(assignmentReleasedProjector{})
 }
 
 type createdProjector struct{}
@@ -70,6 +72,26 @@ func (createdProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event
 		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $8, $8)
 		ON CONFLICT (id) DO NOTHING
 	`, event.SubjectID, payload.Title, payload.Body, state, checksJSON, humanReview, event.ActorTokenID, event.OccurredAt)
+	if err != nil {
+		return err
+	}
+	// The assignment placeholder is part of the work_item.created projection.
+	// Keeping one row even while unassigned gives work_items.claim a stable row
+	// to lock, closing the race that an absent active-assignment row cannot.
+	var releaseReason any
+	var terminalState any
+	if domain.WorkItemState(state).Terminal() {
+		releaseReason = domain.AssignmentReleaseDone
+		terminalState = state
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO work_item_assignment_state (
+			work_item_id, last_release_reason, terminal_state,
+			state_event_id, state_event_seq, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (work_item_id) DO NOTHING
+	`, event.SubjectID, releaseReason, terminalState, event.ID, event.Seq, event.OccurredAt)
 	return err
 }
 
@@ -100,7 +122,13 @@ func (transitionedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 		    updated_at = $4
 		WHERE id = $1
 	`, event.SubjectID, payload.To, payload.Reason, event.OccurredAt, payload.From)
-	return err
+	if err != nil {
+		return err
+	}
+	// One event drives one projector even when it updates multiple projection
+	// tables. Lifecycle state is folded first, then its terminal assignment
+	// cleanup, under the same transaction and lock order.
+	return applyTerminalAssignmentTransition(ctx, tx, event, domain.WorkItemState(payload.To))
 }
 
 type eventAppendedProjector struct{}
