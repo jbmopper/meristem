@@ -32,7 +32,10 @@ const (
 	PredicateExcludeActor PredicateKind = "exclude_actor"
 
 	// PredicateActor keeps only events authored by TokenID — the inclusion
-	// counterpart of exclude_actor, for watching one agent's activity.
+	// counterpart of exclude_actor, for watching one agent's activity. Like
+	// kind predicates it is a content filter: items the assigned lane matched
+	// as addressed survive it, so lensing to one author cannot swallow a
+	// system-authored release or handback directed at the reader.
 	PredicateActor PredicateKind = "actor"
 
 	// PredicateWorkItem and PredicateWorkItemTree keep only events anchored
@@ -234,12 +237,25 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 		matches[i] = filter.matchesProjection(items[i])
 	}
 	// protected marks items the assigned lane matched as ADDRESSED (explicit
-	// addressee, assignment control, terminal handback). Kind predicates skip
-	// protected items so a kind-lensed listener keeps its wake signals; the
-	// canonical predicate order sorts assigned_or_addressed before kind_*, so
-	// protection is always computed before it is consulted.
+	// addressee, assignment control, terminal handback). Content predicates
+	// (actor, kind_include, kind_exclude) skip protected items so a lensed
+	// listener keeps its wake signals. Evaluation runs in two structural
+	// phases — assigned_or_addressed first, everything else after — so
+	// protection is computed before it is consulted regardless of canonical
+	// predicate ordering.
 	protected := make([]bool, len(items))
+	ordered := make([]Predicate, 0, len(filter.Predicates))
 	for _, predicate := range filter.Predicates {
+		if predicate.Kind == PredicateAssignedOrAddressed {
+			ordered = append(ordered, predicate)
+		}
+	}
+	for _, predicate := range filter.Predicates {
+		if predicate.Kind != PredicateAssignedOrAddressed {
+			ordered = append(ordered, predicate)
+		}
+	}
+	for _, predicate := range ordered {
 		switch predicate.Kind {
 		case PredicateAssignedOrAddressed:
 			addresses := make([]explicitAddress, len(items))
@@ -314,7 +330,7 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 			}
 		case PredicateActor:
 			for i, item := range items {
-				if matches[i] && (item.ActorTokenID == nil || *item.ActorTokenID != predicate.TokenID) {
+				if matches[i] && !protected[i] && (item.ActorTokenID == nil || *item.ActorTokenID != predicate.TokenID) {
 					matches[i] = false
 				}
 			}

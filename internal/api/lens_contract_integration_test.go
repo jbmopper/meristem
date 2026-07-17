@@ -126,4 +126,18 @@ func TestLensContractKindNarrowingKeepsWakeSignalsIntegration(t *testing.T) {
 	if strings.Contains(body, "lens-nonterminal-reason") {
 		t.Fatalf("kind_exclude kept a non-addressed transitioned event: %s", body)
 	}
+
+	// The wake-bridge case: a listener lensed to one author (its allowlist)
+	// must still receive directed signals other actors send it. The
+	// root-authored terminal handback survives an actor lens for A; root's
+	// non-addressed transition does not.
+	body = lensRead(t, fixture, assigned, feed.Predicate{Kind: feed.PredicateActor, TokenID: fixture.actorA.Token.ID})
+	for _, visible := range []string{"lens-terminal-handback-reason", "lens-included-note"} {
+		if !strings.Contains(body, visible) {
+			t.Fatalf("actor lens swallowed %q: %s", visible, body)
+		}
+	}
+	if strings.Contains(body, "lens-nonterminal-reason") {
+		t.Fatalf("actor lens kept root's non-addressed transition: %s", body)
+	}
 }
