@@ -63,6 +63,132 @@ func TestNormalizeReadFilterExcludeActor(t *testing.T) {
 	}
 }
 
+func TestNormalizeReadFilterLensVocabulary(t *testing.T) {
+	tokenID := uuid.New()
+	itemID := uuid.New()
+	valid := []Predicate{
+		{Kind: PredicateActor, TokenID: tokenID},
+		{Kind: PredicateWorkItem, WorkItemID: itemID},
+		{Kind: PredicateWorkItemTree, WorkItemID: itemID},
+		{Kind: PredicateKindInclude, EventKinds: []string{" b ", "a", "b"}},
+		{Kind: PredicateKindExclude, EventKinds: []string{"c"}},
+	}
+	filter, err := NormalizeReadFilter(ReadFilter{Predicates: valid})
+	if err != nil {
+		t.Fatalf("normalize lens vocabulary: %v", err)
+	}
+	if len(filter.Predicates) != len(valid) {
+		t.Fatalf("normalized %d predicates, want %d: %+v", len(filter.Predicates), len(valid), filter.Predicates)
+	}
+	for _, predicate := range filter.Predicates {
+		if predicate.Kind == PredicateKindInclude {
+			if len(predicate.EventKinds) != 2 || predicate.EventKinds[0] != "a" || predicate.EventKinds[1] != "b" {
+				t.Fatalf("EventKinds not canonicalized: %+v", predicate.EventKinds)
+			}
+		}
+	}
+
+	invalid := []Predicate{
+		{Kind: PredicateActor},
+		{Kind: PredicateActor, TokenID: tokenID, WorkItemID: itemID},
+		{Kind: PredicateActor, TokenID: tokenID, EventKinds: []string{"a"}},
+		{Kind: PredicateWorkItem},
+		{Kind: PredicateWorkItem, WorkItemID: itemID, TokenID: tokenID},
+		{Kind: PredicateWorkItemTree, WorkItemID: itemID, EventKinds: []string{"a"}},
+		{Kind: PredicateKindInclude},
+		{Kind: PredicateKindInclude, EventKinds: []string{""}},
+		{Kind: PredicateKindInclude, EventKinds: []string{"  "}},
+		{Kind: PredicateKindExclude, EventKinds: []string{"a"}, TokenID: tokenID},
+		{Kind: PredicateKindExclude, EventKinds: []string{"a"}, WorkItemID: itemID},
+	}
+	for i, predicate := range invalid {
+		if _, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{predicate}}); !errors.Is(err, ErrInvalidPredicate) {
+			t.Errorf("invalid[%d] %+v error = %v, want ErrInvalidPredicate", i, predicate, err)
+		}
+	}
+}
+
+func TestCanonicalPredicateKeyIsOrderAndDuplicateInsensitive(t *testing.T) {
+	tokenID := uuid.New()
+	itemID := uuid.New()
+	a, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateKindInclude, EventKinds: []string{"y", "x"}},
+		{Kind: PredicateActor, TokenID: tokenID},
+		{Kind: PredicateWorkItemTree, WorkItemID: itemID},
+		{Kind: PredicateActor, TokenID: tokenID},
+	}})
+	if err != nil {
+		t.Fatalf("normalize a: %v", err)
+	}
+	b, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateWorkItemTree, WorkItemID: itemID},
+		{Kind: PredicateKindInclude, EventKinds: []string{"x", "y", "x"}},
+		{Kind: PredicateActor, TokenID: tokenID},
+	}})
+	if err != nil {
+		t.Fatalf("normalize b: %v", err)
+	}
+	if a.CanonicalPredicateKey() != b.CanonicalPredicateKey() {
+		t.Fatalf("equivalent filters differ:\n%s\n%s", a.CanonicalPredicateKey(), b.CanonicalPredicateKey())
+	}
+	c, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateActor, TokenID: tokenID},
+	}})
+	if err != nil {
+		t.Fatalf("normalize c: %v", err)
+	}
+	if a.CanonicalPredicateKey() == c.CanonicalPredicateKey() {
+		t.Fatal("different filters share a canonical key")
+	}
+}
+
+func TestQueryKindsPushdownRetainsWakeKindsForAssignedLane(t *testing.T) {
+	tokenID := uuid.New()
+	narrow, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateAssignedOrAddressed, TokenID: tokenID},
+		{Kind: PredicateKindInclude, EventKinds: []string{domain.EventMessageCaptured}},
+	}})
+	if err != nil {
+		t.Fatalf("normalize narrow: %v", err)
+	}
+	kinds := narrow.queryKinds()
+	for _, required := range []string{
+		domain.EventMessageCaptured,
+		domain.EventWorkItemTransitioned,
+		domain.EventWorkItemAssigned,
+		domain.EventWorkItemAssignmentReleased,
+	} {
+		if !slices.Contains(kinds, required) {
+			t.Errorf("assigned narrow pushdown dropped wake kind %s: %v", required, kinds)
+		}
+	}
+	if slices.Contains(kinds, domain.EventWorkItemCreated) {
+		t.Errorf("pushdown retained non-included content kind: %v", kinds)
+	}
+
+	broad, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateKindInclude, EventKinds: []string{domain.EventMessageCaptured}},
+	}})
+	if err != nil {
+		t.Fatalf("normalize broad: %v", err)
+	}
+	kinds = broad.queryKinds()
+	if len(kinds) != 1 || kinds[0] != domain.EventMessageCaptured {
+		t.Errorf("literal pushdown without assigned lane = %v, want only %s", kinds, domain.EventMessageCaptured)
+	}
+
+	excluded, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateAssignedOrAddressed, TokenID: tokenID},
+		{Kind: PredicateKindExclude, EventKinds: []string{domain.EventWorkItemTransitioned}},
+	}})
+	if err != nil {
+		t.Fatalf("normalize excluded: %v", err)
+	}
+	if !slices.Contains(excluded.queryKinds(), domain.EventWorkItemTransitioned) {
+		t.Errorf("assigned kind_exclude pushdown dropped transitioned: %v", excluded.queryKinds())
+	}
+}
+
 func TestReadFilterAssignmentControlKindsAreRuntimeOnly(t *testing.T) {
 	tokenID := uuid.New()
 	runtime := ReadFilter{Predicates: []Predicate{{Kind: PredicateAssignedOrAddressed, TokenID: tokenID}}}

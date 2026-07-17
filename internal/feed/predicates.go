@@ -30,6 +30,29 @@ const (
 	// assignment or handback wake. Events the excluded actor addressed to
 	// itself are removed with the rest of its authorship.
 	PredicateExcludeActor PredicateKind = "exclude_actor"
+
+	// PredicateActor keeps only events authored by TokenID — the inclusion
+	// counterpart of exclude_actor, for watching one agent's activity.
+	PredicateActor PredicateKind = "actor"
+
+	// PredicateWorkItem and PredicateWorkItemTree keep only events anchored
+	// (via WorkItemAnchors) to WorkItemID exactly, or to any item in the
+	// subtree rooted at WorkItemID. Anchor scoping is deliberate spatial
+	// narrowing, so directed-signal protection does NOT apply: a watcher
+	// lensed to one tree accepts missing wakes from elsewhere — those still
+	// arrive on its unscoped assigned lane.
+	PredicateWorkItem     PredicateKind = "work_item"
+	PredicateWorkItemTree PredicateKind = "work_item_tree"
+
+	// PredicateKindInclude and PredicateKindExclude narrow by event kind
+	// without defining a named projection. Kind predicates are content
+	// filters: when composed with the assigned lane they never remove an
+	// event the lane matched as ADDRESSED (explicit addressee, assignment
+	// control, or terminal handback), and query-level kind pushdown retains
+	// those kinds, so a kind-lensed listener cannot silently lose its wake
+	// signals at either level.
+	PredicateKindInclude PredicateKind = "kind_include"
+	PredicateKindExclude PredicateKind = "kind_exclude"
 )
 
 var (
@@ -39,10 +62,21 @@ var (
 
 // Predicate is one reducer in a ReadFilter. Predicates are ANDed; any OR
 // relationship belongs inside a named predicate's definition. TokenID is
-// explicit identity, never a name or a value inferred from prose.
+// explicit identity, never a name or a value inferred from prose. Each
+// PredicateKind uses exactly one field group — token identity, work-item
+// identity, or event kinds — and normalization rejects any other shape.
 type Predicate struct {
-	Kind    PredicateKind
-	TokenID uuid.UUID
+	Kind       PredicateKind
+	TokenID    uuid.UUID
+	WorkItemID uuid.UUID
+	EventKinds []string
+}
+
+// canonicalKey is the normalized predicate's identity: dedupe, deterministic
+// ordering, and the filter fingerprint all derive from it. EventKinds must be
+// canonicalized (trimmed, sorted, deduped) before this is meaningful.
+func (p Predicate) canonicalKey() string {
+	return string(p.Kind) + "|" + p.TokenID.String() + "|" + p.WorkItemID.String() + "|" + strings.Join(p.EventKinds, ",")
 }
 
 // BatchReducer applies an authorization or policy reduction to a candidate
@@ -66,49 +100,125 @@ func NormalizeReadFilter(in ReadFilter) (ReadFilter, error) {
 	out := ReadFilter{Projection: in.Projection, Reduce: in.Reduce}
 	seen := make(map[string]bool, len(in.Predicates))
 	for _, predicate := range in.Predicates {
-		switch predicate.Kind {
-		case PredicateAssignedOrAddressed, PredicateExcludeActor:
-			if predicate.TokenID == uuid.Nil {
-				return ReadFilter{}, fmt.Errorf("%w: %s requires token identity", ErrInvalidPredicate, predicate.Kind)
-			}
-		default:
-			return ReadFilter{}, fmt.Errorf("%w: %s", ErrUnknownPredicate, predicate.Kind)
+		normalized, err := normalizePredicate(predicate)
+		if err != nil {
+			return ReadFilter{}, err
 		}
-		key := string(predicate.Kind) + ":" + predicate.TokenID.String()
+		key := normalized.canonicalKey()
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		out.Predicates = append(out.Predicates, predicate)
+		out.Predicates = append(out.Predicates, normalized)
 	}
 	slices.SortFunc(out.Predicates, func(a, b Predicate) int {
-		if a.Kind < b.Kind {
-			return -1
-		}
-		if a.Kind > b.Kind {
-			return 1
-		}
-		return strings.Compare(a.TokenID.String(), b.TokenID.String())
+		return strings.Compare(a.canonicalKey(), b.canonicalKey())
 	})
 	return out, nil
 }
 
-func (f ReadFilter) queryKinds() []string {
-	if f.Projection == nil {
-		kinds := slices.Clone(IncludedKinds)
-		for _, predicate := range f.Predicates {
-			if predicate.Kind == PredicateAssignedOrAddressed {
-				// Assignment lifecycle remains audit-only/admin for the default
-				// feed and persisted projections. The actor-addressed runtime lane
-				// is the narrow exception that wakes an idle claimant on assign or
-				// release without reclassifying either event kind.
-				kinds = append(kinds, domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased)
-				break
-			}
+func normalizePredicate(p Predicate) (Predicate, error) {
+	switch p.Kind {
+	case PredicateAssignedOrAddressed, PredicateActor, PredicateExcludeActor:
+		if p.TokenID == uuid.Nil {
+			return Predicate{}, fmt.Errorf("%w: %s requires token identity", ErrInvalidPredicate, p.Kind)
 		}
-		return kinds
+		if p.WorkItemID != uuid.Nil || len(p.EventKinds) != 0 {
+			return Predicate{}, fmt.Errorf("%w: %s accepts only token identity", ErrInvalidPredicate, p.Kind)
+		}
+	case PredicateWorkItem, PredicateWorkItemTree:
+		if p.WorkItemID == uuid.Nil {
+			return Predicate{}, fmt.Errorf("%w: %s requires work item identity", ErrInvalidPredicate, p.Kind)
+		}
+		if p.TokenID != uuid.Nil || len(p.EventKinds) != 0 {
+			return Predicate{}, fmt.Errorf("%w: %s accepts only work item identity", ErrInvalidPredicate, p.Kind)
+		}
+	case PredicateKindInclude, PredicateKindExclude:
+		if p.TokenID != uuid.Nil || p.WorkItemID != uuid.Nil {
+			return Predicate{}, fmt.Errorf("%w: %s accepts only event kinds", ErrInvalidPredicate, p.Kind)
+		}
+		kinds := make([]string, 0, len(p.EventKinds))
+		for _, kind := range p.EventKinds {
+			kind = strings.TrimSpace(kind)
+			if kind == "" {
+				return Predicate{}, fmt.Errorf("%w: %s contains an empty event kind", ErrInvalidPredicate, p.Kind)
+			}
+			kinds = append(kinds, kind)
+		}
+		if len(kinds) == 0 {
+			return Predicate{}, fmt.Errorf("%w: %s requires event kinds", ErrInvalidPredicate, p.Kind)
+		}
+		slices.Sort(kinds)
+		p.EventKinds = slices.Compact(kinds)
+	default:
+		return Predicate{}, fmt.Errorf("%w: %s", ErrUnknownPredicate, p.Kind)
 	}
-	return f.Projection.QueryKinds()
+	return p, nil
+}
+
+// CanonicalPredicateKey is the deterministic encoding of the normalized
+// predicate set: identical logical filters yield identical keys regardless of
+// input order or duplication. Named Channels hashes this (with projection
+// name/version) into cursor identity, so the encoding is a compatibility
+// contract — existing predicate kinds must keep their encoding stable, and
+// the vocabulary grows append-only.
+func (f ReadFilter) CanonicalPredicateKey() string {
+	keys := make([]string, 0, len(f.Predicates))
+	for _, predicate := range f.Predicates {
+		keys = append(keys, predicate.canonicalKey())
+	}
+	return strings.Join(keys, ";")
+}
+
+func (f ReadFilter) queryKinds() []string {
+	assigned := false
+	for _, predicate := range f.Predicates {
+		if predicate.Kind == PredicateAssignedOrAddressed {
+			assigned = true
+			break
+		}
+	}
+	var kinds []string
+	if f.Projection == nil {
+		kinds = slices.Clone(IncludedKinds)
+	} else {
+		kinds = f.Projection.QueryKinds()
+	}
+	// Kind pushdown is an optimization, never the authority: matchingItems
+	// re-evaluates the same predicates per item. It may only narrow the base
+	// set, and when the assigned runtime lane is active it retains
+	// work_item.transitioned so terminal handbacks stay scannable for the
+	// addressed-protection pass.
+	for _, predicate := range f.Predicates {
+		switch predicate.Kind {
+		case PredicateKindInclude:
+			kinds = filterQueryKinds(kinds, assigned, func(kind string) bool {
+				return slices.Contains(predicate.EventKinds, kind)
+			})
+		case PredicateKindExclude:
+			kinds = filterQueryKinds(kinds, assigned, func(kind string) bool {
+				return !slices.Contains(predicate.EventKinds, kind)
+			})
+		}
+	}
+	if assigned && f.Projection == nil {
+		// Assignment lifecycle remains audit-only/admin for the default
+		// feed and persisted projections. The actor-addressed runtime lane
+		// is the narrow exception that wakes an idle claimant on assign or
+		// release without reclassifying either event kind.
+		kinds = append(kinds, domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased)
+	}
+	return kinds
+}
+
+func filterQueryKinds(kinds []string, assignedLane bool, keep func(string) bool) []string {
+	out := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		if (assignedLane && kind == domain.EventWorkItemTransitioned) || keep(kind) {
+			out = append(out, kind)
+		}
+	}
+	return out
 }
 
 func (f ReadFilter) matchesProjection(item Item) bool {
@@ -123,6 +233,12 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 	for i := range matches {
 		matches[i] = filter.matchesProjection(items[i])
 	}
+	// protected marks items the assigned lane matched as ADDRESSED (explicit
+	// addressee, assignment control, terminal handback). Kind predicates skip
+	// protected items so a kind-lensed listener keeps its wake signals; the
+	// canonical predicate order sorts assigned_or_addressed before kind_*, so
+	// protection is always computed before it is consulted.
+	protected := make([]bool, len(items))
 	for _, predicate := range filter.Predicates {
 		switch predicate.Kind {
 		case PredicateAssignedOrAddressed:
@@ -153,9 +269,11 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 					// reinterpret a stale A control event as activity for the item's
 					// later/current holder B.
 					matches[i] = addressed
+					protected[i] = addressed
 					continue
 				}
 				if addressed {
+					protected[i] = true
 					continue
 				}
 				matches[i] = false
@@ -191,6 +309,48 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 			}
 			for i, item := range items {
 				if authored[i] && !directed[i] && !handback[item.EventID] {
+					matches[i] = false
+				}
+			}
+		case PredicateActor:
+			for i, item := range items {
+				if matches[i] && (item.ActorTokenID == nil || *item.ActorTokenID != predicate.TokenID) {
+					matches[i] = false
+				}
+			}
+		case PredicateWorkItem:
+			for i, item := range items {
+				if matches[i] && !slices.Contains(WorkItemAnchors(item), predicate.WorkItemID) {
+					matches[i] = false
+				}
+			}
+		case PredicateWorkItemTree:
+			ids := candidateAnchorIDs(items, matches, nil)
+			inTree, err := s.anchorsInSubtree(ctx, predicate.WorkItemID, ids)
+			if err != nil {
+				return nil, err
+			}
+			for i, item := range items {
+				if !matches[i] {
+					continue
+				}
+				matches[i] = false
+				for _, id := range WorkItemAnchors(item) {
+					if inTree[id] {
+						matches[i] = true
+						break
+					}
+				}
+			}
+		case PredicateKindInclude:
+			for i, item := range items {
+				if matches[i] && !protected[i] && !slices.Contains(predicate.EventKinds, item.Kind) {
+					matches[i] = false
+				}
+			}
+		case PredicateKindExclude:
+			for i, item := range items {
+				if matches[i] && !protected[i] && slices.Contains(predicate.EventKinds, item.Kind) {
 					matches[i] = false
 				}
 			}
@@ -292,6 +452,41 @@ func (s *Service) terminalAddressedElsewhere(ctx context.Context, excluded uuid.
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("feed: resolve terminal handbacks under actor exclusion: %w", err)
+	}
+	return matched, nil
+}
+
+// anchorsInSubtree resolves which candidate work-item ids sit inside the
+// subtree rooted at root, in one recursive walk (the same shape the access
+// package uses for tree-scoped visibility).
+func (s *Service) anchorsInSubtree(ctx context.Context, root uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	matched := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return matched, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH RECURSIVE subtree(id) AS (
+			SELECT $1::uuid
+			UNION
+			SELECT wir.child_id
+			FROM work_item_relations wir
+			JOIN subtree s ON wir.parent_id = s.id
+		)
+		SELECT DISTINCT id FROM subtree WHERE id = ANY($2::uuid[])
+	`, root, ids)
+	if err != nil {
+		return nil, fmt.Errorf("feed: resolve work item subtree: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("feed: scan work item subtree: %w", err)
+		}
+		matched[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("feed: resolve work item subtree: %w", err)
 	}
 	return matched, nil
 }
