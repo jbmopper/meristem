@@ -23,12 +23,12 @@ const (
 	PredicateAssignedOrAddressed PredicateKind = "assigned_or_addressed"
 
 	// PredicateExcludeActor removes events authored by TokenID from the view.
-	// Directed signals outrank authorship quieting: an event the excluded
-	// actor explicitly addressed to a DIFFERENT token (assignment controls,
-	// structured addressee fields, terminal-handback bindings) survives, so
-	// excluding a chatty coordinator can never swallow the caller's own
-	// assignment or handback wake. Events the excluded actor addressed to
-	// itself are removed with the rest of its authorship.
+	// Directed signals to the READER outrank authorship quieting: an event the
+	// excluded actor authored survives only when the composed assigned lane
+	// proved it is addressed to that lane's reader and the reader is not the
+	// excluded token itself. Everything else the excluded actor authored is
+	// removed — including its outbound events addressed to third parties, so
+	// exclude_actor=self can never echo the caller's own directed writes.
 	PredicateExcludeActor PredicateKind = "exclude_actor"
 )
 
@@ -123,6 +123,11 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 	for i := range matches {
 		matches[i] = filter.matchesProjection(items[i])
 	}
+	// protectedBy records, per item, the reader token of an assigned lane that
+	// matched the item as ADDRESSED (explicit addressee, assignment control,
+	// terminal handback). Canonical ordering evaluates assigned_or_addressed
+	// before exclude_actor, so it is filled before it is consulted.
+	protectedBy := make([]uuid.UUID, len(items))
 	for _, predicate := range filter.Predicates {
 		switch predicate.Kind {
 		case PredicateAssignedOrAddressed:
@@ -153,9 +158,13 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 					// reinterpret a stale A control event as activity for the item's
 					// later/current holder B.
 					matches[i] = addressed
+					if addressed {
+						protectedBy[i] = predicate.TokenID
+					}
 					continue
 				}
 				if addressed {
+					protectedBy[i] = predicate.TokenID
 					continue
 				}
 				matches[i] = false
@@ -168,31 +177,18 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 			}
 		case PredicateExcludeActor:
 			// Only-removes: this case may clear matches, never set them. The
-			// carve-outs below keep directed signals (explicit addressee or
-			// terminal-handback binding to a token other than the excluded
-			// one); a malformed address never rescues an event from exclusion.
-			authored := make([]bool, len(items))
-			directed := make([]bool, len(items))
-			undirected := make([]uuid.UUID, 0, len(items))
+			// sole carve-out is lane-proven: the item survives only when an
+			// assigned lane marked it addressed to a reader other than the
+			// excluded token. Without a composed assigned lane there is no
+			// reader identity, so exclusion is literal.
 			for i, item := range items {
 				if !matches[i] || item.ActorTokenID == nil || *item.ActorTokenID != predicate.TokenID {
 					continue
 				}
-				authored[i] = true
-				address := parseExplicitAddressee(item)
-				directed[i] = !address.invalid && address.present && address.tokenID != predicate.TokenID
-				if !address.invalid && !address.present {
-					undirected = append(undirected, item.EventID)
+				if protectedBy[i] != uuid.Nil && protectedBy[i] != predicate.TokenID {
+					continue
 				}
-			}
-			handback, err := s.terminalAddressedElsewhere(ctx, predicate.TokenID, undirected)
-			if err != nil {
-				return nil, err
-			}
-			for i, item := range items {
-				if authored[i] && !directed[i] && !handback[item.EventID] {
-					matches[i] = false
-				}
+				matches[i] = false
 			}
 		default:
 			return nil, fmt.Errorf("%w: %s", ErrUnknownPredicate, predicate.Kind)
@@ -257,41 +253,6 @@ func (s *Service) terminalAddressedEvents(ctx context.Context, tokenID uuid.UUID
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("feed: resolve terminal addressed events: %w", err)
-	}
-	return matched, nil
-}
-
-// terminalAddressedElsewhere reports which of the given events are terminal
-// transitions the handback projection binds to a former holder OTHER than the
-// excluded token. Those events are directed wake signals for that holder, so
-// actor exclusion must not remove them; a binding to the excluded token itself
-// stays removable (self-quieting covers self-directed signals).
-func (s *Service) terminalAddressedElsewhere(ctx context.Context, excluded uuid.UUID, eventIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
-	matched := make(map[uuid.UUID]bool, len(eventIDs))
-	if len(eventIDs) == 0 {
-		return matched, nil
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT state_event_id
-		FROM work_item_assignment_state
-		WHERE terminal_addressee_token_id IS NOT NULL
-		  AND terminal_addressee_token_id <> $1
-		  AND terminal_state IS NOT NULL
-		  AND state_event_id = ANY($2::uuid[])
-	`, excluded, eventIDs)
-	if err != nil {
-		return nil, fmt.Errorf("feed: resolve terminal handbacks under actor exclusion: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var eventID uuid.UUID
-		if err := rows.Scan(&eventID); err != nil {
-			return nil, fmt.Errorf("feed: scan terminal handback under actor exclusion: %w", err)
-		}
-		matched[eventID] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("feed: resolve terminal handbacks under actor exclusion: %w", err)
 	}
 	return matched, nil
 }
