@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/safety"
@@ -80,6 +81,7 @@ func (assignedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Even
 		    expires_at = $6,
 		    last_release_reason = NULL,
 		    terminal_state = NULL,
+		    terminal_addressee_token_id = NULL,
 		    state_event_id = $4,
 		    state_event_seq = $7,
 		    updated_at = $5
@@ -144,6 +146,7 @@ func (assignmentReleasedProjector) Apply(ctx context.Context, tx pgx.Tx, event d
 		    expires_at = NULL,
 		    last_release_reason = $8,
 		    terminal_state = NULLIF($9, ''),
+		    terminal_addressee_token_id = NULL,
 		    state_event_id = $5,
 		    state_event_seq = $6,
 		    updated_at = $7
@@ -181,16 +184,31 @@ func (assignmentReleasedProjector) Apply(ctx context.Context, tx pgx.Tx, event d
 // single work_item.transitioned projector. It closes an active assignment on
 // any terminal outcome and advances even an unassigned row's terminal
 // sentinel, preventing a later assigned event from resurrecting the item.
-func applyTerminalAssignmentTransition(ctx context.Context, tx pgx.Tx, event domain.Event, to domain.WorkItemState) error {
+func applyTerminalAssignmentTransition(ctx context.Context, tx pgx.Tx, event domain.Event, from, to domain.WorkItemState) error {
 	if event.SubjectKind != domain.SubjectWorkItem {
 		return fmt.Errorf("work_item.transitioned assignment fold: expected subject_kind %q, got %q", domain.SubjectWorkItem, event.SubjectKind)
+	}
+	if from.Terminal() {
+		// Only an exact terminal same-state transition is a legal lifecycle
+		// no-op. Validate the already-folded sentinel before leaving its entering
+		// event identity untouched. The caller has already derived the prior state
+		// from the immutable lifecycle log, so neither request payload nor mutable
+		// projection state can authorize a terminal escape.
+		if to != from {
+			return fmt.Errorf("work_item.transitioned assignment fold: terminal state %s cannot transition to %s", from, to)
+		}
+		return validateTerminalAssignmentNoop(ctx, tx, event, to)
 	}
 	if !to.Terminal() {
 		return nil
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE work_item_assignment_state
-		SET holder_token_id = NULL,
+		SET terminal_addressee_token_id = CASE
+		        WHEN state_event_id = $2 THEN terminal_addressee_token_id
+		        ELSE holder_token_id
+		    END,
+		    holder_token_id = NULL,
 		    mode = NULL,
 		    assignment_event_id = NULL,
 		    claimed_at = NULL,
@@ -201,7 +219,10 @@ func applyTerminalAssignmentTransition(ctx context.Context, tx pgx.Tx, event dom
 		    state_event_seq = $3,
 		    updated_at = $6
 		WHERE work_item_id = $1
-		  AND (state_event_id = $2 OR state_event_seq < $3)
+		  AND (
+		      state_event_id = $2
+		      OR (state_event_seq < $3 AND terminal_state IS NULL)
+		  )
 	`, event.SubjectID, event.ID, event.Seq, domain.AssignmentReleaseDone, to, event.OccurredAt)
 	if err != nil {
 		return err
@@ -214,6 +235,36 @@ func applyTerminalAssignmentTransition(ctx context.Context, tx pgx.Tx, event dom
 		if !advanced {
 			return fmt.Errorf("work_item.transitioned assignment fold: event conflicts with assignment state for %s", event.SubjectID)
 		}
+	}
+	return nil
+}
+
+func validateTerminalAssignmentNoop(ctx context.Context, tx pgx.Tx, event domain.Event, to domain.WorkItemState) error {
+	var terminalState pgtype.Text
+	var hasActiveFields bool
+	if err := tx.QueryRow(ctx, `
+		SELECT terminal_state,
+		       holder_token_id IS NOT NULL
+		       OR mode IS NOT NULL
+		       OR assignment_event_id IS NOT NULL
+		       OR claimed_at IS NOT NULL
+		       OR expires_at IS NOT NULL
+		FROM work_item_assignment_state
+		WHERE work_item_id = $1
+		FOR UPDATE
+	`, event.SubjectID).Scan(&terminalState, &hasActiveFields); err != nil {
+		if err == pgx.ErrNoRows {
+			return fmt.Errorf("work_item.transitioned assignment fold: assignment placeholder missing for %s", event.SubjectID)
+		}
+		return fmt.Errorf("work_item.transitioned assignment fold: validate terminal no-op: %w", err)
+	}
+	if !terminalState.Valid || terminalState.String != string(to) || hasActiveFields {
+		return fmt.Errorf(
+			"work_item.transitioned assignment fold: terminal no-op conflicts with assignment state for %s: terminal_state=%q active=%t",
+			event.SubjectID,
+			terminalState.String,
+			hasActiveFields,
+		)
 	}
 	return nil
 }

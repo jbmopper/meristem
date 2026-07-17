@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,6 +108,128 @@ func TestRequestCreatesHumanVisibleEscalation(t *testing.T) {
 	assertRelation(t, ctx, pool, parent.ID, result.HumanWorkItemID)
 	assertEscalationEvent(t, ctx, pool, result.EscalationID, parent.ID, result.HumanWorkItemID)
 	assertSingleEscalationProjection(t, ctx, pool, result.EscalationID, result.HumanWorkItemID)
+}
+
+func TestConcurrentDistinctRequestsSerializeParentTransition(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := newIntegrationPool(t)
+	writer := app.NewEventWriter()
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "concurrent-escalation-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	agent, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "concurrent-escalation-agent", Source: domain.SourceAgent, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create agent token: %v", err)
+	}
+	parent, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "Concurrent escalation parent", State: domain.WorkItemRunning,
+		HumanReviewStatus: domain.HumanReviewWavedThrough, Actor: agent.Token,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Rollback(ctx) }()
+	var lockedID uuid.UUID
+	if err := blocker.QueryRow(ctx, `SELECT id FROM work_items WHERE id=$1 FOR UPDATE`, parent.ID).Scan(&lockedID); err != nil {
+		t.Fatalf("lock parent: %v", err)
+	}
+
+	type outcome struct {
+		result RequestResult
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan outcome, 2)
+	requestSvc := NewService(pool, writer)
+	for _, reason := range []string{"concurrent escalation alpha", "concurrent escalation beta"} {
+		go func(reason string) {
+			<-start
+			result, err := requestSvc.Request(ctx, RequestInput{
+				WorkItemID: parent.ID, Reason: reason, Summary: reason, Actor: agent.Token,
+			})
+			results <- outcome{result: result, err: err}
+		}(reason)
+	}
+	close(start)
+	waitForEscalationLockWaiters(t, ctx, pool, 2)
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatalf("release parent blocker: %v", err)
+	}
+
+	seenEscalations := make(map[uuid.UUID]bool, 2)
+	for range 2 {
+		got := <-results
+		if got.err != nil {
+			t.Fatalf("concurrent escalation failed: %v", got.err)
+		}
+		if got.result.EscalationID == uuid.Nil || seenEscalations[got.result.EscalationID] {
+			t.Fatalf("concurrent escalation result = %+v, seen=%v", got.result, seenEscalations)
+		}
+		seenEscalations[got.result.EscalationID] = true
+	}
+
+	var transitionCount int
+	var fromState string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), min(payload->>'from')
+		FROM events
+		WHERE subject_kind=$1 AND subject_id=$2 AND kind=$3
+		  AND payload->>'to'=$4
+	`, domain.SubjectWorkItem, parent.ID, domain.EventWorkItemTransitioned, domain.WorkItemBlocked).Scan(&transitionCount, &fromState); err != nil {
+		t.Fatalf("read parent transition history: %v", err)
+	}
+	if transitionCount != 1 || fromState != string(domain.WorkItemRunning) {
+		t.Fatalf("parent blocked transitions = %d from %q, want 1 from running", transitionCount, fromState)
+	}
+	var escalationCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM events
+		WHERE subject_kind=$1 AND kind=$2
+		  AND payload->>'work_item_id'=$3
+	`, domain.SubjectEscalation, domain.EventEscalationRequested, parent.ID.String()).Scan(&escalationCount); err != nil {
+		t.Fatalf("count escalation requests: %v", err)
+	}
+	if escalationCount != 2 {
+		t.Fatalf("escalation requests = %d, want 2", escalationCount)
+	}
+}
+
+func waitForEscalationLockWaiters(t *testing.T, ctx context.Context, pool *pgxpool.Pool, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var waiting int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND wait_event_type = 'Lock'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("observe escalation lock waiters: %v", err)
+		}
+		if waiting >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("observed %d escalation lock waiters, want %d", waiting, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func assertRelation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, parentID, childID uuid.UUID) {

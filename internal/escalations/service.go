@@ -202,6 +202,7 @@ func scanWorkItem(ctx context.Context, tx pgx.Tx, id uuid.UUID) (workItemRow, er
 		SELECT id, title, state, state_reason, suggested_convergence_checks, human_review_status
 		FROM work_items
 		WHERE id = $1
+		FOR UPDATE
 	`, id).Scan(&row.ID, &row.Title, &row.State, &row.StateReason, &checksJSON, &row.HumanReviewStatus)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

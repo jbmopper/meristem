@@ -119,6 +119,10 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 			for i, item := range items {
 				addresses[i] = parseExplicitAddressee(item)
 			}
+			terminalAddresses, err := s.terminalAddressedEvents(ctx, predicate.TokenID, items, matches, addresses)
+			if err != nil {
+				return nil, err
+			}
 			assigned, err := s.assignedWorkItems(ctx, predicate.TokenID, items, matches, addresses)
 			if err != nil {
 				return nil, err
@@ -132,7 +136,7 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 					continue
 				}
 				anchors := WorkItemAnchors(item)
-				addressed := addresses[i].present && addresses[i].tokenID == predicate.TokenID
+				addressed := (addresses[i].present && addresses[i].tokenID == predicate.TokenID) || terminalAddresses[item.EventID]
 				if assignmentControlKind(item.Kind) {
 					// Control events target their payload assignee exactly. Never
 					// reinterpret a stale A control event as activity for the item's
@@ -175,6 +179,47 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 		}
 	}
 	return matches, nil
+}
+
+// terminalAddressedEvents resolves the one terminal transition retained for a
+// former assignment holder. The projection binds the holder to its exact
+// state_event_id; matching event ids rather than work-item anchors prevents a
+// terminal handback from widening the item's entire history.
+func (s *Service) terminalAddressedEvents(ctx context.Context, tokenID uuid.UUID, items []Item, candidates []bool, addresses []explicitAddress) (map[uuid.UUID]bool, error) {
+	eventIDs := make([]uuid.UUID, 0, len(items))
+	for i, item := range items {
+		if !candidates[i] || addresses[i].invalid || assignmentControlKind(item.Kind) ||
+			(addresses[i].present && addresses[i].tokenID == tokenID) {
+			continue
+		}
+		eventIDs = append(eventIDs, item.EventID)
+	}
+	matched := make(map[uuid.UUID]bool, len(eventIDs))
+	if len(eventIDs) == 0 {
+		return matched, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT state_event_id
+		FROM work_item_assignment_state
+		WHERE terminal_addressee_token_id = $1
+		  AND terminal_state IS NOT NULL
+		  AND state_event_id = ANY($2::uuid[])
+	`, tokenID, eventIDs)
+	if err != nil {
+		return nil, fmt.Errorf("feed: resolve terminal addressed events: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var eventID uuid.UUID
+		if err := rows.Scan(&eventID); err != nil {
+			return nil, fmt.Errorf("feed: scan terminal addressed event: %w", err)
+		}
+		matched[eventID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("feed: resolve terminal addressed events: %w", err)
+	}
+	return matched, nil
 }
 
 func (s *Service) assignedWorkItems(ctx context.Context, tokenID uuid.UUID, items []Item, candidates []bool, addresses []explicitAddress) (map[uuid.UUID]bool, error) {
