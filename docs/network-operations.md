@@ -126,6 +126,38 @@ leave the last accepted local projection unchanged.
 
 ## Verify and operate
 
+The one-command diagnostic is `meristem node status`. It reads only
+projections (never mutates, never touches the network) and answers the four
+operator questions in one screen — current route plan per node, queue state
+per target, last failure, and next retry/expiry:
+
+```bash
+meristem node status              # human-readable
+meristem node status --json       # machine-readable, same facts
+meristem node status --target m4  # one node's routes and queue
+```
+
+Reading the output:
+
+- **routes** is the exact candidate walk the sender's selection rule emits
+  from the live registry snapshot: `direct <url>` first, then
+  `queue via <host> <url>` in relay order. `no plan:` names why a target is
+  unreachable (unknown, disabled, or no direct URL and no active queue host).
+  Sender route cooldowns are process-local hints inside a delivering process
+  and are deliberately not shown.
+- **queue** is this node's durable `command_queue` per target: `pending`
+  depth, `attempts=<used>/5`, the oldest queued command, the last local
+  execution attempt, and `expires_next` — the moment the earliest pending row
+  turns terminal if it has not drained. A pending command's next retry is the
+  target's next drain tick (the spoke's poll interval) or that expiry,
+  whichever comes first. `last_terminal` names the most recent terminal
+  command: its state, structural status code, reason, time, and path.
+- **outcome reconciliation** is the origin-side cursor per queue host plus the
+  last terminal fact observed from it — a stalled `cursor_seq` with a running
+  reconciler is the signal to check the queue host.
+- **spoke cursors** are the pull-only node's durable feed bookmarks; empty on
+  a hub.
+
 Before starting the poller, verify local readiness and hub reachability from the
 pull-only host:
 
@@ -134,15 +166,18 @@ curl --fail --silent --show-error http://127.0.0.1:8080/readyz
 curl --fail --silent --show-error https://hub.example.test/readyz
 ```
 
-After enqueueing a test command, confirm the hub row moves from `pending` to
-`done`, `refused`, `failed`, or `expired`. A command that remains `pending`
-after more than two poll intervals requires checking, in order:
+After enqueueing a test command, confirm `meristem node status` shows the
+target's row move from `pending` to a `last_terminal` of `done`, `refused`,
+`failed`, or `expired`. A command that remains `pending` after more than two
+poll intervals requires checking, in order:
 
 1. spoke process health and its `hub_reachable` tick field;
 2. outbound DNS, certificate validation, and connectivity to the hub;
 3. hub-token validity;
 4. local API readiness and local-token validity;
-5. acknowledgement errors after a successful local response.
+5. acknowledgement errors after a successful local response
+   (`node status` shows them as `last_terminal=failed` with the structural
+   status code).
 
 Do not manually mutate `command_queue`. Retry by restoring connectivity and
 letting the spoke reuse the queued command's original idempotency key. The

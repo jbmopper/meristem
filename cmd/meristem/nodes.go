@@ -14,6 +14,7 @@
 //	meristem node update-route --node-id m4 [--direct-url URL]
 //	                           [--relay-via ID ...] [--status active]
 //	meristem node list
+//	meristem node status [--target ID] [--json]
 //	meristem node sync-registry [--once] [--interval 30s]
 //	meristem node sync-outcomes [--once] [--interval 30s]
 //
@@ -96,6 +97,8 @@ func runNode(ctx context.Context, logger *slog.Logger, args []string, build buil
 		return updateNodeRoute(ctx, pool, writer, actor, args[1:])
 	case "list":
 		return listNodes(ctx, pool, os.Stdout, args[1:])
+	case "status":
+		return statusNodes(ctx, pool, os.Stdout, args[1:], time.Now())
 	case "sync-registry":
 		return syncRegistryNodeWithCheck(ctx, logger, pool, writer, auth.NewService(pool, writer), checkBuild, args[1:])
 	case "sync-outcomes":
@@ -620,6 +623,7 @@ func nodeUsage(w io.Writer) {
   MERISTEM_TOKEN=mrs_<system> meristem node register --node-id ID [--base-url URL] [--direct-url URL] [--relay-via ID ...] [--status active]
   MERISTEM_TOKEN=mrs_<system> meristem node update-route --node-id ID [--direct-url URL] [--relay-via ID ...] [--status active]
   meristem node list
+  meristem node status [--target ID] [--json]
   MERISTEM_REGISTRY_HOME_URL=https://registry.example \
     MERISTEM_REGISTRY_HOME_NODE_ID=registry \
     MERISTEM_REGISTRY_HOME_TOKEN=mrs_<home-read> \
