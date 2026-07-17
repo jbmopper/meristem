@@ -46,6 +46,11 @@ type assignmentState struct {
 	StateEventID  uuid.UUID
 	StateEventSeq int64
 	UpdatedAt     time.Time
+	// LastReleaseReason is non-nil when the most recent binding was released
+	// and nothing has been rebound since. Together with a nil Assignment it
+	// distinguishes an item that USES bindings (released, awaiting rebind —
+	// verdicts fail closed) from one that never had any (legacy latest-wins).
+	LastReleaseReason *string
 }
 
 // Claim atomically checks and appends a mode=claim assignment. The global
@@ -349,6 +354,14 @@ func boundedClaimLeaseSeconds(seconds int) time.Duration {
 }
 
 func (s *Service) appendClaimInTx(ctx context.Context, tx pgx.Tx, item domain.WorkItem, actor domain.Token, lease time.Duration, leaseSource string, claimedAt time.Time, predecessorEventID uuid.UUID) (domain.WorkItemAssignment, error, error) {
+	return s.appendAssignmentInTx(ctx, tx, item, actor, actor.ID, domain.WorkItemAssignmentClaim, lease, leaseSource, claimedAt, predecessorEventID)
+}
+
+// appendAssignmentInTx is the one write path for work_item.assigned. A claim
+// names the actor as its own assignee; a spawn assignment is appended by the
+// spawner for the assignee it just provisioned (ee916614). The projector
+// enforces actor==assignee for claim mode only.
+func (s *Service) appendAssignmentInTx(ctx context.Context, tx pgx.Tx, item domain.WorkItem, actor domain.Token, assigneeTokenID uuid.UUID, mode domain.WorkItemAssignmentMode, lease time.Duration, leaseSource string, claimedAt time.Time, predecessorEventID uuid.UUID) (domain.WorkItemAssignment, error, error) {
 	if lease <= 0 || lease > safety.MaxPatienceBudget || lease%time.Second != 0 {
 		return domain.WorkItemAssignment{}, nil, fmt.Errorf("%w: claim lease must be positive whole seconds and <= %s", ErrInvalidRequest, safety.MaxPatienceBudget)
 	}
@@ -368,8 +381,8 @@ func (s *Service) appendClaimInTx(ctx context.Context, tx pgx.Tx, item domain.Wo
 		Discriminator: discriminator,
 		Payload: assignedPayload{
 			PayloadVersion:  assignmentPayloadVersion,
-			AssigneeTokenID: actor.ID,
-			Mode:            domain.WorkItemAssignmentClaim,
+			AssigneeTokenID: assigneeTokenID,
+			Mode:            mode,
 			LeaseSeconds:    int64(lease / time.Second),
 			LeaseSource:     leaseSource,
 			ClaimedAt:       claimedAt,
@@ -431,7 +444,7 @@ func scanAssignmentStateForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) 
 func scanAssignmentState(ctx context.Context, q queryer, id uuid.UUID, forUpdate bool) (assignmentState, error) {
 	query := `
 		SELECT holder_token_id, mode, assignment_event_id, claimed_at, expires_at,
-		       state_event_id, state_event_seq, updated_at
+		       state_event_id, state_event_seq, updated_at, last_release_reason
 		FROM work_item_assignment_state
 		WHERE work_item_id = $1`
 	if forUpdate {
@@ -448,7 +461,7 @@ func scanAssignmentState(ctx context.Context, q queryer, id uuid.UUID, forUpdate
 	)
 	if err := q.QueryRow(ctx, query, id).Scan(
 		&holder, &mode, &assignmentEvent, &claimedAt, &expiresAt,
-		&stateEvent, &state.StateEventSeq, &state.UpdatedAt,
+		&stateEvent, &state.StateEventSeq, &state.UpdatedAt, &state.LastReleaseReason,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return assignmentState{}, ErrAssignmentStateMissing

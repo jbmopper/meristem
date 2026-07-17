@@ -231,12 +231,12 @@ func cultivarRoot(ref string) string {
 }
 
 func finishReviewDispatch(ctx context.Context, tx pgx.Tx, result ReviewDispatchResult, outcome ReviewDispatchOutcome, state string) (ReviewDispatchResult, error) {
-	// A dormant outcome returns the job to pending having done no review work:
-	// the claim's attempt is refunded so a gate that outlives many worker
-	// passes cannot inflate attempts without bound. Budget-dormant rows stay
-	// claimable (unlike human-blocked rows, which the claim predicate skips),
-	// so before this refund every pass consumed an attempt against a job that
-	// was never startable (55d7995 accepted-review nit; ee916614).
+	// A dormant outcome returns the job to pending having done no review work,
+	// so the claim's attempt is refunded: attempts count startable work, never
+	// gate collisions. The gates themselves park the row rather than let it
+	// spin — human/lifecycle blocks are skipped by the claim predicate, and a
+	// budget exhaustion escalates the child hand_to_human, which blocks it
+	// too (55d7995 accepted-review nit; ee916614 slice 1).
 	if _, err := tx.Exec(ctx, `
 		UPDATE job_queue
 		SET state = $2,

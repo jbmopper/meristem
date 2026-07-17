@@ -367,10 +367,13 @@ func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind strin
 	if innerKind == ReviewVerdictCheckKind {
 		return fmt.Errorf("%w: event kind %q is reserved; append %q and let the deterministic reducer derive the check", ErrInvalidRequest, innerKind, ReviewVerdictInnerKind)
 	}
+	var verdictDetail ReviewVerdictDetail
 	if innerKind == ReviewVerdictInnerKind {
-		if _, err := ParseReviewVerdict(payload); err != nil {
+		detail, err := ParseReviewVerdictDetail(payload)
+		if err != nil {
 			return err
 		}
+		verdictDetail = detail
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -380,6 +383,11 @@ func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind strin
 	current, err := scanWorkItemForUpdate(ctx, tx, id)
 	if err != nil {
 		return err
+	}
+	if innerKind == ReviewVerdictInnerKind {
+		if err := s.requireVerdictAuthority(ctx, tx, id, actor, verdictDetail.AssignmentEventID); err != nil {
+			return err
+		}
 	}
 	eventPayload := map[string]any{
 		"inner_kind": innerKind,
