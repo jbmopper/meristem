@@ -29,6 +29,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/spoke"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -38,7 +39,7 @@ import (
 // §5 budgets a pull-only command at <= the target poll interval (default 30s).
 const defaultSpokeInterval = 30 * time.Second
 
-func runSpoke(ctx context.Context, logger *slog.Logger, args []string) error {
+func runSpoke(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	fs := flag.NewFlagSet("spoke", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var intervalText string
@@ -81,7 +82,7 @@ func runSpoke(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	defer pool.Close()
 
-	writer := app.NewEventWriter()
+	writer := app.NewGuardedEventWriter(build)
 	localActor, err := auth.NewService(pool, writer).Authenticate(ctx, cfg.LocalToken)
 	if err != nil {
 		return fmt.Errorf("spoke: authenticate local token for event attribution: %w", err)
@@ -96,7 +97,8 @@ func runSpoke(ctx context.Context, logger *slog.Logger, args []string) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	poller := spoke.New(cfg, client, cursor, logger)
+	checkBuild := func() error { return buildguard.RequireNonBlocking(build) }
+	poller := spoke.NewWithCheck(cfg, client, cursor, logger, checkBuild)
 
 	logger.Info("spoke poller starting",
 		slog.String("node_id", cfg.NodeID),
@@ -104,7 +106,16 @@ func runSpoke(ctx context.Context, logger *slog.Logger, args []string) error {
 		slog.String("local_url", cfg.LocalURL),
 		slog.String("interval", interval.String()),
 	)
-	return spoke.RunLoop(ctx, poller, interval)
+	return runCheckedIntervalLoop(
+		ctx,
+		interval,
+		checkBuild,
+		func() error {
+			_, err := poller.TickChecked(ctx)
+			return err
+		},
+		nil,
+	)
 }
 
 func spokeUsage(w io.Writer) {

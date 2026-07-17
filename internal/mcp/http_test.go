@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/access"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 )
 
@@ -45,6 +46,56 @@ func TestHandleHTTPMessageInitializeReturnsJSONRPCResponse(t *testing.T) {
 	}
 	if strings.TrimSpace(result.Instructions) == "" {
 		t.Error("expected non-empty initialize instructions over HTTP")
+	}
+}
+
+func TestHandleHTTPMessageBuildGuardMatchesStdioBehavior(t *testing.T) {
+	const (
+		compiled = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		pinned   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	status := buildguard.Status{
+		State:            buildguard.StateCurrent,
+		CompiledCommit:   compiled,
+		ExpectedCommit:   compiled,
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "compiled commit matches the reviewed v1 pin",
+	}
+	s := New(Deps{}, ServerInfo{
+		Name:        "meristem-test",
+		Version:     "fallback",
+		BuildStatus: buildguard.ProviderFunc(func() buildguard.Status { return status }),
+	}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceAgent}
+
+	initialized := s.HandleHTTPMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`), actor)
+	if initialized.Status != http.StatusOK || !strings.Contains(string(initialized.Body), `"compiled_commit":"`+compiled+`"`) || !strings.Contains(string(initialized.Body), `"version":"`+compiled+`"`) {
+		t.Fatalf("current HTTP initialize did not expose fingerprint: status=%d body=%s", initialized.Status, initialized.Body)
+	}
+
+	status = buildguard.Status{
+		State:            buildguard.StateMismatch,
+		CompiledCommit:   compiled,
+		ExpectedCommit:   pinned,
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "compiled commit does not match the reviewed v1 pin",
+	}
+	blocked := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":"deliberately malformed"}`),
+		actor,
+		HTTPOptions{AllowedTools: map[string]bool{}},
+	)
+	if blocked.Status != http.StatusOK || !strings.Contains(string(blocked.Body), `"isError":true`) || !strings.Contains(string(blocked.Body), "build_pin") {
+		t.Fatalf("HTTP tool call was not build-blocked: status=%d body=%s", blocked.Status, blocked.Body)
+	}
+	reinitialized := s.HandleHTTPMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}`), actor)
+	if !strings.Contains(string(reinitialized.Body), `"state":"mismatch"`) || !strings.Contains(string(reinitialized.Body), "ALL MCP TOOL CALLS ARE DISABLED") {
+		t.Fatalf("HTTP initialize did not dynamically explain mismatch: %s", reinitialized.Body)
+	}
+	listed := s.HandleHTTPMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":4,"method":"tools/list"}`), actor)
+	if listed.Status != http.StatusOK || strings.Contains(string(listed.Body), `"error"`) {
+		t.Fatalf("HTTP tools/list must remain available: status=%d body=%s", listed.Status, listed.Body)
 	}
 }
 

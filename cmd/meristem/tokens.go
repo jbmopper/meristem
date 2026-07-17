@@ -15,11 +15,12 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/storage"
 )
 
-func runTokens(ctx context.Context, logger *slog.Logger, args []string) error {
+func runTokens(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	if len(args) == 0 {
 		tokensUsage(os.Stderr)
 		return fmt.Errorf("tokens: missing subcommand")
@@ -34,7 +35,7 @@ func runTokens(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	defer pool.Close()
 
-	writer := app.NewEventWriter()
+	writer := app.NewGuardedEventWriter(build)
 	service := auth.NewService(pool, writer)
 
 	switch args[0] {

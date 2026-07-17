@@ -229,6 +229,9 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 			writeAccessError(w, err, "token cannot read feed")
 			return
 		}
+		if !s.allowAuthoritativeReadResponse(w) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
@@ -276,7 +279,24 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		writeAccessError(w, err, "token cannot read feed")
 		return
 	}
+	if !s.allowAuthoritativeReadResponse(w) {
+		return
+	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+// allowAuthoritativeReadResponse closes the gap between the request-wide
+// build check and a read that may wait or perform several database/access
+// operations. The independently published v1 pin is dynamic, so a process can
+// become stale while a long-poll is in flight. Callers must invoke this only
+// before response headers are written.
+func (s *Server) allowAuthoritativeReadResponse(w http.ResponseWriter) bool {
+	if !s.buildStatus().Blocking() {
+		return true
+	}
+	writeAPIError(w, http.StatusServiceUnavailable, "build_pin",
+		"served build is not current; inspect /readyz for build status")
+	return false
 }
 
 func projectionNameForFeed(p *projectiondefs.Projection) string {

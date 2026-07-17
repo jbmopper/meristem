@@ -76,6 +76,9 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		}
 		projection, err := s.projections.Get(r.Context(), projectionName)
 		if err != nil {
+			if !s.allowAuthoritativeReadResponse(w) {
+				return
+			}
 			writeProjectionError(w, err)
 			return
 		}
@@ -86,6 +89,9 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 
 	fromSeq, err := s.feed.ResolveStreamStartForProjection(r.Context(), cursorStr, projectionNameForCursor, projectionVersion)
 	if err != nil {
+		if !s.allowAuthoritativeReadResponse(w) {
+			return
+		}
 		if errors.Is(err, feed.ErrInvalidCursor) {
 			writeAPIError(w, http.StatusBadRequest, "invalid_cursor", "cursor is malformed; reconnect without Last-Event-ID to start a fresh stream")
 			return
@@ -119,6 +125,13 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		// underlying conn so for active streams this is fine.
 		s.logger.Debug("sse: clear write deadline failed", "error", err.Error())
 	}
+	// Projection/cursor resolution can query Postgres after the request-entry
+	// check. Re-read the pin at the last preflight boundary, before committing
+	// the 200 response head; once SSE headers are flushed, a later mismatch can
+	// only terminate the stream without an explanatory API error.
+	if !s.allowAuthoritativeReadResponse(w) {
+		return
+	}
 
 	// SSE wire shape:
 	//   text/event-stream, chunked; one frame per event ending in \n\n.
@@ -145,6 +158,12 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
+		// The reviewed-v1 pin is reread for every tail. A stream can outlive a
+		// deployment, so the request-entry guard alone cannot keep an old
+		// process from continuing to query and emit authoritative data.
+		if s.buildStatus().Blocking() {
+			return
+		}
 		items, err := s.feed.TailFiltered(r.Context(), fromSeq, sseBatchSize, projectionFilter)
 		if err != nil {
 			// Don't write an error frame; the client can't do anything
@@ -166,6 +185,12 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 			for i := range items {
+				// Recheck after the tail and access filter, immediately before
+				// each frame. If the pin changes between frames, terminate the
+				// already-committed stream without emitting a stale error frame.
+				if s.buildStatus().Blocking() {
+					return
+				}
 				if !writeSSEFrame(w, &items[i], projectionNameForCursor, projectionVersion) {
 					return
 				}
@@ -184,6 +209,9 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		// No new events. Maybe send a heartbeat to keep middleboxes
 		// from killing the idle connection, then sleep briefly.
 		if time.Since(lastWriteAt) >= sseHeartbeatEvery {
+			if s.buildStatus().Blocking() {
+				return
+			}
 			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 				return

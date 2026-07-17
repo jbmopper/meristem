@@ -28,6 +28,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
@@ -35,16 +36,16 @@ import (
 	"github.com/jbmopper/meristem/internal/worker"
 )
 
-func runWorker(ctx context.Context, logger *slog.Logger, args []string) error {
+func runWorker(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "--once", "once":
-			return runWorkerOnce(ctx, logger, args[1:])
+			return runWorkerOnce(ctx, logger, args[1:], build)
 		case "daemon":
-			return runWorkerDaemon(ctx, logger, args[1:])
+			return runWorkerDaemon(ctx, logger, args[1:], build)
 		}
 	}
-	return runWorkerDaemon(ctx, logger, args)
+	return runWorkerDaemon(ctx, logger, args, build)
 }
 
 type workerRuntime struct {
@@ -53,15 +54,19 @@ type workerRuntime struct {
 	systemTok     domain.Token
 	uniformBudget time.Duration
 	activeProfile policyprofile.Active
+	build         buildguard.StatusProvider
 }
 
-func newWorkerRuntime(ctx context.Context, logger *slog.Logger, uniformBudget time.Duration) (*workerRuntime, error) {
+func newWorkerRuntime(ctx context.Context, logger *slog.Logger, uniformBudget time.Duration, build buildguard.StatusProvider) (*workerRuntime, error) {
+	if err := buildguard.RequireNonBlocking(build); err != nil {
+		return nil, fmt.Errorf("worker: %w", err)
+	}
 	pool, active, err := openProfileAwarePool(ctx, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	writer := app.NewEventWriter()
+	writer := app.NewGuardedEventWriter(build)
 	authService := auth.NewService(pool, writer)
 	systemTok, err := resolveWorkerSystemToken(ctx, authService)
 	if err != nil {
@@ -75,6 +80,7 @@ func newWorkerRuntime(ctx context.Context, logger *slog.Logger, uniformBudget ti
 		systemTok:     systemTok,
 		uniformBudget: uniformBudget,
 		activeProfile: active,
+		build:         build,
 	}, nil
 }
 
@@ -83,6 +89,9 @@ func (r *workerRuntime) Close() {
 }
 
 func (r *workerRuntime) ScanOnce(ctx context.Context) (worker.Result, error) {
+	if err := buildguard.RequireNonBlocking(r.build); err != nil {
+		return worker.Result{}, fmt.Errorf("worker: %w", err)
+	}
 	profileSvc := policyprofile.NewService(r.pool, r.writer)
 	active, err := profileSvc.Active(ctx)
 	if err != nil {
@@ -101,6 +110,9 @@ func (r *workerRuntime) ScanOnce(ctx context.Context) (worker.Result, error) {
 	if err != nil {
 		return worker.Result{}, err
 	}
+	if err := buildguard.RequireNonBlocking(r.build); err != nil {
+		return worker.Result{}, fmt.Errorf("worker: %w", err)
+	}
 	expired, err := crossnode.NewQueueService(r.pool, r.writer).ExpireDue(ctx, crossnode.ExpireDueInput{
 		Now:          time.Now().UTC(),
 		ActorTokenID: r.systemTok.ID,
@@ -114,7 +126,7 @@ func (r *workerRuntime) ScanOnce(ctx context.Context) (worker.Result, error) {
 	return result, nil
 }
 
-func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) error {
+func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	fs := flag.NewFlagSet("worker --once", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	// --budget=DURATION overrides the per-state budgets with a single
@@ -132,7 +144,7 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 		return fmt.Errorf("worker --once: unexpected argument %q", fs.Arg(0))
 	}
 
-	runtime, err := newWorkerRuntime(ctx, logger, *uniformBudget)
+	runtime, err := newWorkerRuntime(ctx, logger, *uniformBudget, build)
 	if err != nil {
 		return err
 	}
@@ -148,7 +160,7 @@ func runWorkerOnce(ctx context.Context, logger *slog.Logger, args []string) erro
 	return nil
 }
 
-func runWorkerDaemon(ctx context.Context, logger *slog.Logger, args []string) error {
+func runWorkerDaemon(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var intervalText string
@@ -162,7 +174,7 @@ func runWorkerDaemon(ctx context.Context, logger *slog.Logger, args []string) er
 		workerUsage(os.Stderr)
 		return fmt.Errorf("worker: unknown mode or argument %q", fs.Arg(0))
 	}
-	runtime, err := newWorkerRuntime(ctx, logger, *uniformBudget)
+	runtime, err := newWorkerRuntime(ctx, logger, *uniformBudget, build)
 	if err != nil {
 		return err
 	}
@@ -218,6 +230,12 @@ func runWorkerLoop(ctx context.Context, logger *slog.Logger, interval time.Durat
 		result, actor, err := scan(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			// A reviewed-pin failure is terminal for this process. Retrying keeps
+			// an obsolete daemon alive but inert, preventing launchd/systemd from
+			// replacing it with the newly published binary.
+			if errors.Is(err, buildguard.ErrBlocked) {
 				return err
 			}
 			logger.Error("worker tick failed",

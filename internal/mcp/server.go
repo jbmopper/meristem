@@ -16,6 +16,7 @@ import (
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
 	"github.com/jbmopper/meristem/internal/domain"
@@ -70,8 +71,9 @@ type Deps struct {
 // ServerInfo identifies this server to clients in the initialize
 // handshake. Version travels with the binary.
 type ServerInfo struct {
-	Name    string
-	Version string
+	Name        string
+	Version     string
+	BuildStatus buildguard.StatusProvider
 }
 
 // Server is the MCP server. Construct with New, resolve the actor with
@@ -80,6 +82,7 @@ type Server struct {
 	deps   Deps
 	logger *slog.Logger
 	info   ServerInfo
+	build  buildguard.StatusProvider
 
 	mu    sync.RWMutex
 	actor domain.Token
@@ -101,10 +104,14 @@ func New(deps Deps, info ServerInfo, logger *slog.Logger) *Server {
 	if info.Version == "" {
 		info.Version = "dev"
 	}
+	if info.BuildStatus == nil {
+		info.BuildStatus = buildguard.Disabled()
+	}
 	s := &Server{
 		deps:        deps,
 		logger:      logger,
 		info:        info,
+		build:       info.BuildStatus,
 		toolsByName: make(map[string]Tool),
 	}
 	s.tools = s.buildTools()
@@ -285,11 +292,33 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 	if version == "" {
 		version = protocolVersion
 	}
+	buildStatus := s.build.Status()
+	serverVersion := buildStatus.Version()
+	if serverVersion == "unknown" {
+		serverVersion = s.info.Version
+	}
+	instructions := serverInstructions
+	if !buildStatus.Current() {
+		callPolicy := "This is an unmanaged development build; tool calls remain available."
+		if buildStatus.Blocking() {
+			callPolicy = "ALL MCP TOOL CALLS ARE DISABLED until the served build matches the reviewed v1 pin."
+		}
+		instructions = fmt.Sprintf("WARNING: MERISTEM BUILD IS NOT CURRENT (%s): %s %s\n\n%s",
+			buildStatus.State, buildStatus.Warning(), callPolicy, serverInstructions)
+	}
 	return map[string]any{
 		"protocolVersion": version,
 		"serverInfo": map[string]any{
 			"name":    s.info.Name,
-			"version": s.info.Version,
+			"version": serverVersion,
+		},
+		"meristemBuild": map[string]any{
+			"state":             buildStatus.State,
+			"compiled_commit":   buildStatus.CompiledCommit,
+			"pinned_commit":     buildStatus.ExpectedCommit,
+			"compiled_metadata": buildStatus.CompiledMetadata,
+			"blocking":          buildStatus.Blocking(),
+			"reason":            buildStatus.Reason,
 		},
 		"capabilities": map[string]any{
 			"tools": map[string]any{
@@ -299,7 +328,7 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 		// Onboarding text injected into the connecting agent's system prompt by
 		// compliant clients. Shared by stdio and the HTTP /mcp gateway; see
 		// instructions.go for why the same text is safe across profiles.
-		"instructions": serverInstructions,
+		"instructions": instructions,
 	}, nil
 }
 
@@ -335,6 +364,13 @@ type callToolParams struct {
 }
 
 func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, *rpcError) {
+	// Re-read the independently published v1 pin before every call. This check
+	// deliberately runs before argument parsing, handler lookup, access policy,
+	// and idempotency lookup/replay so a process that becomes stale while alive
+	// cannot serve either authoritative reads or writes from an old binary.
+	if result, blocked := s.buildToolCallRefusal(); blocked {
+		return result, nil
+	}
 	var params callToolParams
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &params); err != nil {
@@ -353,6 +389,12 @@ func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw jso
 	}
 	if !tool.Mutates {
 		result, err := tool.Handler(ctx, actor, params.Arguments)
+		// The pin can change while a long-running read handler is blocked on
+		// Postgres. Suppress both successful payloads and handler errors from a
+		// process that became stale after the request-entry check.
+		if refusal, blocked := s.buildToolCallRefusal(); blocked {
+			return refusal, nil
+		}
 		if err != nil {
 			// Tool-level errors travel inside a successful response with
 			// isError=true (per MCP spec), not as JSON-RPC errors. The
@@ -369,13 +411,40 @@ func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw jso
 			}
 			result = rendered
 		}
+		// Provider-safe rendering is deliberately inside the same dynamic
+		// boundary. Recheck once more immediately before constructing the MCP
+		// success envelope so no rendered stale result escapes either.
+		if refusal, blocked := s.buildToolCallRefusal(); blocked {
+			return refusal, nil
+		}
 		return toolSuccessResult(result), nil
 	}
 	result, err := s.handleIdempotentMutationTool(ctx, actor, tool, params.Arguments)
 	if err != nil {
+		// Replays and advisory-lock waits are guarded inside idempotency. Convert
+		// a dynamic refusal to the stable MCP build_pin shape. A fresh handler
+		// admitted while current is allowed to finish under the documented
+		// boundary-safe cutover contract.
+		if refusal, blocked := s.buildToolCallRefusal(); blocked {
+			return refusal, nil
+		}
 		return toolErrorResult(err.Error()), nil
 	}
 	return result, nil
+}
+
+// buildToolCallRefusal is shared by stdio dispatch and the HTTP profile
+// boundary. HTTP must call it before profile/argument validation so every
+// tools/call observes the same dynamic fail-closed state.
+func (s *Server) buildToolCallRefusal() (map[string]any, bool) {
+	status := s.build.Status()
+	if !status.Blocking() {
+		return nil, false
+	}
+	return toolErrorResult(fmt.Sprintf(
+		"build_pin: MCP tool call refused because the served build is not current (%s): %s",
+		status.State, status.Reason,
+	)), true
 }
 
 func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.Token, tool Tool, raw json.RawMessage) (map[string]any, error) {
@@ -550,8 +619,16 @@ func replayableToolErr(err error) error {
 }
 
 func mutationToolErrorStatus(err error) int {
-	if err == nil || isReplayableToolError(err) || looksSemanticToolError(err) {
+	if err == nil {
 		return http.StatusOK
+	}
+	if isReplayableToolError(err) || looksSemanticToolError(err) {
+		// This status is internal to the idempotency record; MCP still carries
+		// the tool result in a successful JSON-RPC envelope. Keeping semantic
+		// refusals distinct from committed success lets the dynamic build guard
+		// replace one if the reviewed pin advances during the handler, while
+		// statuses below 500 remain replayable under the same idempotency key.
+		return http.StatusUnprocessableEntity
 	}
 	return http.StatusInternalServerError
 }

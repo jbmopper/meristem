@@ -70,6 +70,11 @@ const (
 
 	// MaxPoolMaxConns is the hard ceiling on profile-declared pool sizes.
 	MaxPoolMaxConns = 64
+
+	// MaxBufferedAuthoritativeResponseBytes bounds the API's ordinary response
+	// buffer used for the post-handler reviewed-build check. Large artifacts
+	// belong behind object storage; SSE is checked per frame instead.
+	MaxBufferedAuthoritativeResponseBytes = 8 << 20 // 8 MiB
 )
 
 // Profile names. The profile set is code-owned like the policy itself:

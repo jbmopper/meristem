@@ -198,14 +198,18 @@ workspace_root="$claude_code_workspace"
 # shared database (work item a9374bdd). Rebuild it from a clean v1 checkout with
 # \$primary_repo/scripts/rebuild-meristem-bin.sh.
 meristem_bin="\$primary_repo/.meristem/generated/meristem-bin"
+export MERISTEM_V1_PIN_FILE="\${MERISTEM_V1_PIN_FILE:-\$meristem_bin.v1-pin}"
+[[ "\$MERISTEM_V1_PIN_FILE" == /* ]] || {
+  echo "reviewed-v1 pin path must be absolute" >&2
+  exit 64
+}
+if ! "\$primary_repo/scripts/check-meristem-build-pin.sh" "\$meristem_bin" "\$MERISTEM_V1_PIN_FILE"; then
+  echo "shared meristem build does not match the reviewed-v1 pin; refusing to read credentials" >&2
+  exit 64
+fi
 if [[ ! -e "\$workspace_root/.git" ]]; then
   echo "missing Claude Code meristem worktree: \$workspace_root" >&2
   echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target claude-code-gui" >&2
-  exit 64
-fi
-if [[ ! -x "\$meristem_bin" ]]; then
-  echo "missing shared meristem build artifact: \$meristem_bin" >&2
-  echo "build it from a clean v1 checkout: \$primary_repo/scripts/rebuild-meristem-bin.sh" >&2
   exit 64
 fi
 cd "\$workspace_root"
@@ -229,14 +233,18 @@ workspace_root="$codex_workspace"
 # shared database (work item a9374bdd). Rebuild it from a clean v1 checkout with
 # \$primary_repo/scripts/rebuild-meristem-bin.sh.
 meristem_bin="\$primary_repo/.meristem/generated/meristem-bin"
+export MERISTEM_V1_PIN_FILE="\${MERISTEM_V1_PIN_FILE:-\$meristem_bin.v1-pin}"
+[[ "\$MERISTEM_V1_PIN_FILE" == /* ]] || {
+  echo "reviewed-v1 pin path must be absolute" >&2
+  exit 64
+}
+if ! "\$primary_repo/scripts/check-meristem-build-pin.sh" "\$meristem_bin" "\$MERISTEM_V1_PIN_FILE"; then
+  echo "shared meristem build does not match the reviewed-v1 pin; refusing to read credentials" >&2
+  exit 64
+fi
 if [[ ! -e "\$workspace_root/.git" ]]; then
   echo "missing Codex meristem worktree: \$workspace_root" >&2
   echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target codex" >&2
-  exit 64
-fi
-if [[ ! -x "\$meristem_bin" ]]; then
-  echo "missing shared meristem build artifact: \$meristem_bin" >&2
-  echo "build it from a clean v1 checkout: \$primary_repo/scripts/rebuild-meristem-bin.sh" >&2
   exit 64
 fi
 cd "\$workspace_root"

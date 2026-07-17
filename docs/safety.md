@@ -9,6 +9,7 @@ This slice is **not** operator-tunable via environment variables. Policy lives i
 | Control | Role |
 |--------|------|
 | `MaxRequestBodyBytes` | Upper bound on JSON request bodies for handlers that use the shared JSON decoder (e.g. inbox, signals, work-item commands). Requests over the limit receive **413** with `request_too_large`. |
+| Build-guard response buffer | Ordinary authoritative REST responses are buffered for a dynamic reviewed-build recheck and capped at **8 MiB** per response. Oversized responses are discarded and receive **500** `response_too_large`; SSE uses per-frame checks instead of buffering. |
 | `MaxFeedWait` | Maximum `wait` query duration on **`GET /v1/feed`** watcher mode. Larger values receive **400** with `wait_too_large`. |
 | `PoolMaxConns` / `PoolMinConns` | Profile-governed pgx pool bounds for long-lived processes. Startup resolves the active profile first, then re-opens the real pool with these bounds. Validation rejects non-positive values, `min > max`, and any `max` above the code-owned ceiling. |
 | `WorkerTickInterval` | Default cadence for `meristem worker` daemon mode. Operators may still pass `--interval` explicitly for incident tuning, but the active profile owns the unattended default. |

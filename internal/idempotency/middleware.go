@@ -51,10 +51,19 @@ const (
 type Middleware struct {
 	pool   *pgxpool.Pool
 	writer *events.Writer
+	guard  func() error
 }
 
 func NewMiddleware(pool *pgxpool.Pool, writer *events.Writer) *Middleware {
 	return &Middleware{pool: pool, writer: writer}
+}
+
+// NewMiddlewareWithGuard installs a dynamic runtime guard around every
+// handler, cache-replay, and response boundary. The check is deliberately
+// re-run after advisory-lock waits and immediately before a response so a
+// process that becomes ineligible while a request is in flight fails closed.
+func NewMiddlewareWithGuard(pool *pgxpool.Pool, writer *events.Writer, guard func() error) *Middleware {
+	return &Middleware{pool: pool, writer: writer, guard: guard}
 }
 
 // ExecuteInput describes one non-HTTP mutation guarded by the same durable
@@ -99,12 +108,18 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	if in.Run == nil {
 		return ExecuteResult{}, fmt.Errorf("idempotency run function is required")
 	}
+	if err := m.requireGuard(); err != nil {
+		return ExecuteResult{}, err
+	}
 
 	cached, err := m.lookup(ctx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
 	if err != nil {
 		return ExecuteResult{}, idempotencyLookupError(err)
 	}
 	if cached.found {
+		if err := m.requireGuard(); err != nil {
+			return ExecuteResult{}, err
+		}
 		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: true}, nil
 	}
 
@@ -113,13 +128,22 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 		return ExecuteResult{}, fmt.Errorf("idempotency lock failed: %w", err)
 	}
 	defer release()
+	if err := m.requireGuard(); err != nil {
+		return ExecuteResult{}, err
+	}
 
 	cached, err = m.lookup(ctx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
 	if err != nil {
 		return ExecuteResult{}, idempotencyLookupError(err)
 	}
 	if cached.found {
+		if err := m.requireGuard(); err != nil {
+			return ExecuteResult{}, err
+		}
 		return ExecuteResult{Status: cached.status, Body: cached.body, Replayed: true}, nil
+	}
+	if err := m.requireGuard(); err != nil {
+		return ExecuteResult{}, err
 	}
 
 	override := &recordedResponseOverride{}
@@ -137,18 +161,36 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	if status == 0 {
 		status = http.StatusOK
 	}
+	if status >= http.StatusBadRequest && m.guardBlocked() {
+		return ExecuteResult{}, m.requireGuard()
+	}
 	// Mirror Wrap: a 5xx is an incomplete attempt, not a conclusion, and
 	// must not be pinned under the key for the cache TTL.
 	if status >= http.StatusInternalServerError {
 		return ExecuteResult{Status: status, Body: body}, nil
 	}
 	recordBody := body
-	if overridden, ok := recordedResponse(callCtx); ok {
-		recordBody = overridden
+	hasOverride := false
+	if overrideBody, ok := recordedResponse(callCtx); ok {
+		recordBody = overrideBody
+		hasOverride = true
 	}
 	fresh, err := m.record(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, recordBody)
 	if err != nil {
+		// The handler was admitted only after a current-build check. If the pin
+		// advances after its domain transaction commits, do not strand the
+		// admitted response merely because the follow-on cache event is now
+		// blocked. The retry remains safe under the domain idempotency identity.
+		if status < http.StatusBadRequest && m.guardBlocked() {
+			return ExecuteResult{Status: status, Body: body}, nil
+		}
+		if m.guardBlocked() {
+			return ExecuteResult{}, m.requireGuard()
+		}
 		return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
+	}
+	if hasOverride && fresh {
+		return ExecuteResult{Status: status, Body: body}, nil
 	}
 
 	cached, err = m.lookup(callCtx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
@@ -162,6 +204,9 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if m.writeGuardError(w) {
 			return
 		}
 		tok, ok := auth.TokenFromContext(r.Context())
@@ -205,6 +250,9 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		if cached.found {
+			if m.writeGuardError(w) {
+				return
+			}
 			writeCachedResponse(w, cached, "true")
 			return
 		}
@@ -222,6 +270,9 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		defer release()
+		if m.writeGuardError(w) {
+			return
+		}
 
 		// Re-check under the lock: a winner may have committed during
 		// our acquisition wait. This is also where same-key /
@@ -232,7 +283,13 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		if cached.found {
+			if m.writeGuardError(w) {
+				return
+			}
 			writeCachedResponse(w, cached, "true")
+			return
+		}
+		if m.writeGuardError(w) {
 			return
 		}
 
@@ -248,6 +305,17 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		ctx = withRecordedResponseOverride(ctx, override)
 		r = r.WithContext(ctx)
 		next.ServeHTTP(rec, r)
+		if rec.overflow {
+			if m.writeGuardError(w) {
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "response_too_large",
+				"response exceeds the deterministic API buffering limit")
+			return
+		}
+		if rec.status >= http.StatusBadRequest && m.writeGuardError(w) {
+			return
+		}
 
 		// 5xx responses are never recorded: they mean "the attempt did
 		// not complete", and pinning one under the key would make every
@@ -268,6 +336,16 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 		fresh, err := m.record(r.Context(), tok, scope, key, reqHash, rec.status, recordBody)
 		if err != nil {
+			// Once the guarded pre-handler boundary admits a mutation, preserve
+			// its first response if the pin advances after the domain commit. This
+			// is load-bearing for one-time credentials such as subactor token
+			// secrets: discarding the response would leave an active unusable token.
+			if rec.status < http.StatusBadRequest && m.guardBlocked() {
+				copyHeader(w.Header(), rec.header)
+				w.WriteHeader(rec.status)
+				_, _ = w.Write(rec.body.Bytes())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "idempotency_record_failed", "could not record idempotency key")
 			return
 		}
@@ -316,6 +394,29 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		w.WriteHeader(rec.status)
 		_, _ = w.Write(rec.body.Bytes())
 	})
+}
+
+func (m *Middleware) requireGuard() error {
+	if m == nil || m.guard == nil {
+		return nil
+	}
+	if err := m.guard(); err != nil {
+		return fmt.Errorf("runtime guard blocked idempotent operation: %w", err)
+	}
+	return nil
+}
+
+func (m *Middleware) writeGuardError(w http.ResponseWriter) bool {
+	if err := m.requireGuard(); err == nil {
+		return false
+	}
+	writeError(w, http.StatusServiceUnavailable, "build_pin",
+		"served build is not current; inspect /readyz for build status")
+	return true
+}
+
+func (m *Middleware) guardBlocked() bool {
+	return m != nil && m.guard != nil && m.guard() != nil
 }
 
 func idempotencyLookupError(err error) error {
@@ -524,18 +625,29 @@ func requestHash(body []byte) ([]byte, error) {
 }
 
 type recorder struct {
-	header http.Header
-	body   bytes.Buffer
-	status int
+	header   http.Header
+	body     bytes.Buffer
+	status   int
+	overflow bool
 }
 
 func newRecorder() *recorder {
 	return &recorder{header: make(http.Header), status: http.StatusOK}
 }
 
-func (r *recorder) Header() http.Header         { return r.header }
-func (r *recorder) WriteHeader(status int)      { r.status = status }
-func (r *recorder) Write(b []byte) (int, error) { return r.body.Write(b) }
+func (r *recorder) Header() http.Header    { return r.header }
+func (r *recorder) WriteHeader(status int) { r.status = status }
+func (r *recorder) Write(b []byte) (int, error) {
+	if r.overflow {
+		return len(b), nil
+	}
+	if len(b) > safety.MaxBufferedAuthoritativeResponseBytes-r.body.Len() {
+		r.overflow = true
+		r.body.Reset()
+		return len(b), nil
+	}
+	return r.body.Write(b)
+}
 
 func copyHeader(dst, src http.Header) {
 	for k, values := range src {

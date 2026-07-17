@@ -6,6 +6,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
@@ -110,19 +112,30 @@ type Server struct {
 	oauthRuntime          oauthRuntimeConfig
 	oauthActorLookup      oauthActorLookup
 	policy                safety.Policy
+	build                 buildguard.StatusProvider
 }
 
 // New constructs a Server. The pool must already be open; the API does not
 // own its lifecycle.
 func New(pool *pgxpool.Pool, logger *slog.Logger) *Server {
-	return NewWithPolicy(pool, logger, safety.DefaultPolicy())
+	return NewWithPolicyAndBuildGuard(pool, logger, safety.DefaultPolicy(), buildguard.Disabled())
 }
 
 // NewWithPolicy constructs a Server with the already-resolved startup safety
 // policy so readiness/logging reflect the active profile in force.
 func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy) *Server {
+	return NewWithPolicyAndBuildGuard(pool, logger, policy, buildguard.Disabled())
+}
+
+// NewWithPolicyAndBuildGuard constructs the runtime API with a dynamically
+// checked build-consistency provider. Existing embedding/test constructors are
+// explicitly unmanaged; the meristem runtime supplies its process guard here.
+func NewWithPolicyAndBuildGuard(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy, build buildguard.StatusProvider) *Server {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if build == nil {
+		build = buildguard.Disabled()
 	}
 	addr := os.Getenv(EnvHTTPAddr)
 	if addr == "" {
@@ -144,13 +157,16 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		mux:                http.NewServeMux(),
 		oauthRuntime:       oauthRuntime,
 		policy:             policy,
+		build:              build,
 	}
 	if pool != nil {
-		s.writer = app.NewEventWriter()
+		s.writer = app.NewGuardedEventWriter(build)
 		s.authService = auth.NewService(pool, s.writer)
 		s.authenticator = s.authService
 		s.authMiddleware = auth.NewMiddleware(s.authService)
-		s.idempotencyMiddleware = idempotency.NewMiddleware(pool, s.writer)
+		s.idempotencyMiddleware = idempotency.NewMiddlewareWithGuard(pool, s.writer, func() error {
+			return buildguard.RequireNonBlocking(build)
+		})
 		s.inbox = inbox.NewService(pool, s.writer)
 		s.signals = signals.NewService(pool, s.writer)
 		s.workItems = workitems.NewService(pool, s.writer)
@@ -176,6 +192,10 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 		}
 		s.oauthClientAdmin = oauth.NewClientAdminService(pool, s.writer)
 		s.oauthActorLookup = s.authService.Get
+		mcpVersion := build.Status().Version()
+		if mcpVersion == "unknown" {
+			mcpVersion = "dev"
+		}
 		s.mcpServer = mcp.New(mcp.Deps{
 			Auth:                s.authService,
 			Access:              s.access,
@@ -193,7 +213,7 @@ func NewWithPolicy(pool *pgxpool.Pool, logger *slog.Logger, policy safety.Policy
 			Projections:         s.projections,
 			Registry:            s.registry,
 			MaxFeedWait:         s.policy.MaxFeedWait,
-		}, mcp.ServerInfo{Name: "meristem", Version: "dev"}, logger)
+		}, mcp.ServerInfo{Name: "meristem", Version: mcpVersion, BuildStatus: build}, logger)
 	}
 	s.routes()
 	return s
@@ -204,7 +224,257 @@ func (s *Server) Addr() string { return s.addr }
 
 // Handler exposes the target-bound mux so tests and the network server enforce
 // identical cross-node metadata checks.
-func (s *Server) Handler() http.Handler { return s.targetBound(s.mux) }
+func (s *Server) Handler() http.Handler { return s.buildGuarded(s.targetBound(s.mux)) }
+
+// buildGuarded refuses every authoritative REST/OAuth surface before auth,
+// idempotency, or domain handlers when the running process no longer matches
+// its reviewed-v1 pin. Liveness, readiness, discovery metadata, and the MCP
+// envelope remain reachable so callers can diagnose the failure; tools/call
+// performs its own dynamic guard before any tool handler or replay lookup.
+func (s *Server) buildGuarded(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if buildGuardExemptPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		status := s.buildStatus()
+		if status.Blocking() {
+			writeAPIError(w, http.StatusServiceUnavailable, "build_pin",
+				"served build is not current; inspect /readyz for build status")
+			return
+		}
+		// SSE performs a finer-grained dynamic check before every tail/frame and
+		// must retain streaming interfaces. Buffer auth/preflight responses until
+		// the first Flush so a pin change during authentication cannot leak a stale
+		// 401 before the stream handler reaches its own dynamic checks.
+		if r.URL.Path == "/v1/feed/stream" {
+			if _, ok := w.(http.Flusher); ok {
+				stream := newBuildGuardStreamResponse(w, s)
+				next.ServeHTTP(stream, r)
+				stream.finish()
+				return
+			}
+			// Preserve the historical stream_unsupported response for synthetic
+			// writers without Flusher while still applying the ordinary postcheck.
+			buffered := newBuildGuardResponse()
+			next.ServeHTTP(buffered, r)
+			if s.buildStatus().Blocking() {
+				writeAPIError(w, http.StatusServiceUnavailable, "build_pin",
+					"served build is not current; inspect /readyz for build status")
+				return
+			}
+			buffered.flushTo(w)
+			return
+		}
+
+		// Delay ordinary authoritative response headers until the handler has
+		// completed and the dynamic pin has been checked again. This covers all
+		// REST reads—not only known long polls—and also suppresses a mutation
+		// response if an advisory-lock wait or handler outlives the reviewed pin.
+		buffered := newBuildGuardResponse()
+		next.ServeHTTP(buffered, r)
+		if buffered.overflow {
+			writeAPIError(w, http.StatusInternalServerError, "response_too_large",
+				"response exceeds the deterministic API buffering limit")
+			return
+		}
+		// A mutation admitted while the pin was current must be allowed to
+		// return its committed result. Suppressing it can strand one-time
+		// credentials (OAuth token rotation and subactor token issuance). Reads
+		// remain post-handler guarded because they have no such commit boundary.
+		if completesAdmittedMutation(r, buffered) {
+			buffered.flushTo(w)
+			return
+		}
+		if s.buildStatus().Blocking() {
+			writeAPIError(w, http.StatusServiceUnavailable, "build_pin",
+				"served build is not current; inspect /readyz for build status")
+			return
+		}
+		buffered.flushTo(w)
+	})
+}
+
+func completesAdmittedMutation(r *http.Request, response *buildGuardResponse) bool {
+	if response == nil || response.status < http.StatusOK || response.status >= http.StatusBadRequest {
+		return false
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		// OAuth authorization is a stateful GET, but a pending continuation is
+		// read-only. Its handler marks only responses whose service call actually
+		// committed an authorization request/outcome (including a one-time code).
+		return r.Method == http.MethodGet && r.URL.Path == "/oauth/authorize" && response.admittedMutation
+	default:
+		return true
+	}
+}
+
+type buildGuardResponse struct {
+	header           http.Header
+	body             bytes.Buffer
+	status           int
+	wroteHeader      bool
+	overflow         bool
+	admittedMutation bool
+}
+
+func newBuildGuardResponse() *buildGuardResponse {
+	return &buildGuardResponse{header: make(http.Header), status: http.StatusOK}
+}
+
+func (r *buildGuardResponse) Header() http.Header { return r.header }
+
+func (r *buildGuardResponse) markAdmittedMutation() { r.admittedMutation = true }
+
+type admittedMutationMarker interface {
+	markAdmittedMutation()
+}
+
+func markAdmittedMutationResponse(w http.ResponseWriter) {
+	if marker, ok := w.(admittedMutationMarker); ok {
+		marker.markAdmittedMutation()
+	}
+}
+
+func (r *buildGuardResponse) WriteHeader(status int) {
+	if r.wroteHeader {
+		return
+	}
+	r.status = status
+	r.wroteHeader = true
+}
+
+func (r *buildGuardResponse) Write(body []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	if r.overflow {
+		return len(body), nil
+	}
+	if len(body) > safety.MaxBufferedAuthoritativeResponseBytes-r.body.Len() {
+		// Retain no partial authoritative response once the deterministic cap is
+		// crossed. Report the write as consumed so a handler cannot replace the
+		// fail-closed outer response with a transport-specific encoding error.
+		r.overflow = true
+		r.body.Reset()
+		return len(body), nil
+	}
+	return r.body.Write(body)
+}
+
+func (r *buildGuardResponse) flushTo(w http.ResponseWriter) {
+	for key, values := range r.header {
+		w.Header()[key] = append([]string(nil), values...)
+	}
+	w.WriteHeader(r.status)
+	_, _ = w.Write(r.body.Bytes())
+}
+
+// buildGuardStreamResponse delays the SSE response head until authentication
+// and cursor/projection preflight finish. On the first Flush it rechecks the
+// reviewed pin, commits the buffered head, and then becomes a passthrough for
+// the long-lived stream. Later query/frame checks live in handleFeedStream.
+type buildGuardStreamResponse struct {
+	target      http.ResponseWriter
+	server      *Server
+	buffer      *buildGuardResponse
+	passthrough bool
+	finished    bool
+}
+
+func newBuildGuardStreamResponse(target http.ResponseWriter, server *Server) *buildGuardStreamResponse {
+	return &buildGuardStreamResponse{target: target, server: server, buffer: newBuildGuardResponse()}
+}
+
+func (r *buildGuardStreamResponse) Header() http.Header {
+	if r.passthrough {
+		return r.target.Header()
+	}
+	return r.buffer.Header()
+}
+
+func (r *buildGuardStreamResponse) WriteHeader(status int) {
+	if r.finished {
+		return
+	}
+	if r.passthrough {
+		r.target.WriteHeader(status)
+		return
+	}
+	r.buffer.WriteHeader(status)
+}
+
+func (r *buildGuardStreamResponse) Write(body []byte) (int, error) {
+	if r.finished {
+		return len(body), nil
+	}
+	if r.passthrough {
+		return r.target.Write(body)
+	}
+	return r.buffer.Write(body)
+}
+
+func (r *buildGuardStreamResponse) Flush() {
+	if r.finished {
+		return
+	}
+	if !r.passthrough {
+		if !r.commitPreflight() {
+			return
+		}
+	}
+	if flusher, ok := r.target.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the real connection for the SSE
+// write-deadline calls without exposing its response headers before Flush.
+func (r *buildGuardStreamResponse) Unwrap() http.ResponseWriter { return r.target }
+
+func (r *buildGuardStreamResponse) finish() {
+	if r.finished || r.passthrough {
+		return
+	}
+	_ = r.commitPreflight()
+}
+
+func (r *buildGuardStreamResponse) commitPreflight() bool {
+	if r.buffer.overflow {
+		writeAPIError(r.target, http.StatusInternalServerError, "response_too_large",
+			"response exceeds the deterministic API buffering limit")
+		r.finished = true
+		return false
+	}
+	if r.server.buildStatus().Blocking() {
+		writeAPIError(r.target, http.StatusServiceUnavailable, "build_pin",
+			"served build is not current; inspect /readyz for build status")
+		r.finished = true
+		return false
+	}
+	r.buffer.flushTo(r.target)
+	r.passthrough = true
+	return true
+}
+
+func buildGuardExemptPath(path string) bool {
+	switch path {
+	case "/healthz", "/readyz", "/mcp",
+		"/.well-known/oauth-protected-resource/mcp",
+		"/.well-known/oauth-authorization-server":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) buildStatus() buildguard.Status {
+	if s.build == nil {
+		return buildguard.Disabled().Status()
+	}
+	return s.build.Status()
+}
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleLiveness)
@@ -334,9 +604,13 @@ func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		policyID, _ := s.policy.Fingerprint()
+		buildStatus := s.buildStatus()
 		s.logger.Info("api listening",
 			slog.String("addr", s.addr),
 			slog.String("safety_policy", policyID),
+			slog.String("build_state", string(buildStatus.State)),
+			slog.String("compiled_commit", buildStatus.CompiledCommit),
+			slog.String("compiled_metadata", string(buildStatus.CompiledMetadata)),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -373,8 +647,16 @@ func (s *Server) handleLiveness(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), readinessPingTimeout)
 	defer cancel()
+	buildStatus := s.buildStatus()
+	if buildStatus.Blocking() {
+		s.writeReadiness(w, http.StatusServiceUnavailable, buildStatus, map[string]string{
+			"status": "unavailable",
+			"reason": "build_pin",
+		})
+		return
+	}
 	if s.oauthRuntime.mode == oauthRuntimeInvalid {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+		s.writeReadiness(w, http.StatusServiceUnavailable, buildStatus, map[string]string{
 			"status": "unavailable",
 			"reason": "oauth_configuration",
 		})
@@ -382,7 +664,7 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.pool == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+		s.writeReadiness(w, http.StatusServiceUnavailable, buildStatus, map[string]string{
 			"status": "unavailable",
 			"reason": "database",
 		})
@@ -390,7 +672,7 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.pool.Ping(ctx); err != nil {
 		s.logger.Warn("readiness check failed", slog.String("error", err.Error()))
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+		s.writeReadiness(w, http.StatusServiceUnavailable, buildStatus, map[string]string{
 			"status": "unavailable",
 			"reason": "database",
 		})
@@ -399,7 +681,7 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	if s.oauthRuntime.mode == oauthRuntimeEnabled {
 		if err := s.checkOAuthRuntime(ctx); err != nil {
 			s.logger.Warn("oauth readiness check failed", slog.String("error", err.Error()))
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			s.writeReadiness(w, http.StatusServiceUnavailable, buildStatus, map[string]string{
 				"status": "unavailable",
 				"reason": "oauth_system_actor",
 			})
@@ -420,7 +702,7 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	if s.oauthRuntime.mode == oauthRuntimeEnabled {
 		oauthStatus = "ok"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	s.writeReadiness(w, http.StatusOK, buildStatus, map[string]string{
 		"status":         "ok",
 		"database":       "ok",
 		"oauth":          oauthStatus,
@@ -428,6 +710,30 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		"safety_policy":  policyID,
 		"policy_profile": profileName,
 	})
+}
+
+func (s *Server) writeReadiness(w http.ResponseWriter, statusCode int, buildStatus buildguard.Status, body map[string]string) {
+	// Readiness probes can spend most of their lifetime waiting on Postgres and
+	// OAuth/profile lookups. Re-read the independently published pin at the
+	// response boundary so an old process cannot return a stale 200 after the
+	// reviewed tip advances during those probes.
+	latest := s.buildStatus()
+	if latest.Blocking() {
+		statusCode = http.StatusServiceUnavailable
+		body = map[string]string{
+			"status": "unavailable",
+			"reason": "build_pin",
+		}
+		buildStatus = latest
+	} else if !buildStatus.Blocking() {
+		buildStatus = latest
+	}
+	body["build_state"] = string(buildStatus.State)
+	body["build_compiled_commit"] = buildStatus.CompiledCommit
+	body["build_pinned_commit"] = buildStatus.ExpectedCommit
+	body["build_compiled_metadata"] = string(buildStatus.CompiledMetadata)
+	body["build_reason"] = buildStatus.Reason
+	writeJSON(w, statusCode, body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

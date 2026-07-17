@@ -17,6 +17,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
@@ -129,14 +130,14 @@ var v1SubstrateItems = []v1SubstrateItem{
 // runSeed dispatches to the per-target seeders. v0 ships exactly one
 // target (`v1`); the dispatcher is wired this way so future targets land
 // next to it without reshaping main.
-func runSeed(ctx context.Context, logger *slog.Logger, args []string) error {
+func runSeed(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	if len(args) == 0 {
 		seedUsage(os.Stderr)
 		return fmt.Errorf("seed: missing target")
 	}
 	switch args[0] {
 	case "v1":
-		return runSeedV1(ctx, logger, args[1:])
+		return runSeedV1(ctx, logger, args[1:], build)
 	default:
 		seedUsage(os.Stderr)
 		return fmt.Errorf("seed: unknown target %q", args[0])
@@ -154,7 +155,7 @@ func runSeed(ctx context.Context, logger *slog.Logger, args []string) error {
 // Editing a body without editing the title creates a new event row (the
 // payload changed), which would un-collapse the seed. The test in
 // seed_test.go pins this; treat the body strings as load-bearing.
-func runSeedV1(ctx context.Context, logger *slog.Logger, args []string) error {
+func runSeedV1(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	fs := flag.NewFlagSet("seed v1", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dryRun := fs.Bool("dry-run", false, "print the work items that would be seeded without writing")
@@ -193,7 +194,7 @@ func runSeedV1(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	defer pool.Close()
 
-	writer := app.NewEventWriter()
+	writer := app.NewGuardedEventWriter(build)
 	authService := auth.NewService(pool, writer)
 
 	systemTok, err := resolveSystemToken(ctx, authService)

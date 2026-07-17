@@ -51,6 +51,7 @@ type AuthorizationRequest struct {
 	ID, WorkItemID, ApprovalID                    uuid.UUID
 	ClientID, RedirectURI, State, Scope, Resource string
 	ExpiresAt                                     time.Time
+	Committed                                     bool
 }
 
 func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput) (AuthorizationRequest, error) {
@@ -140,7 +141,7 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	if err := tx.Commit(ctx); err != nil {
 		return AuthorizationRequest{}, err
 	}
-	return AuthorizationRequest{ID: reqID, WorkItemID: item.ID, ApprovalID: approvalID, ClientID: client.ClientID, RedirectURI: in.RedirectURI, State: in.State, Scope: scope, Resource: in.Resource, ExpiresAt: expires}, nil
+	return AuthorizationRequest{ID: reqID, WorkItemID: item.ID, ApprovalID: approvalID, ClientID: client.ClientID, RedirectURI: in.RedirectURI, State: in.State, Scope: scope, Resource: in.Resource, ExpiresAt: expires, Committed: true}, nil
 }
 
 func (s *AuthorizationService) getExistingRequest(ctx context.Context, id uuid.UUID) (AuthorizationRequest, bool, error) {
@@ -183,6 +184,7 @@ func (s *AuthorizationService) ensureBindingWorkItem(ctx context.Context, client
 
 type ContinuationResult struct {
 	Pending     bool
+	Committed   bool
 	RedirectURI string
 	State       string
 	Code        string
@@ -265,7 +267,7 @@ func (s *AuthorizationService) Continue(ctx context.Context, id uuid.UUID) (Cont
 	if err := tx.Commit(ctx); err != nil {
 		return ContinuationResult{}, err
 	}
-	return ContinuationResult{RedirectURI: req.redirectURI, State: req.state, Code: code, OAuthError: oauthErr, WorkItemID: req.workItemID}, nil
+	return ContinuationResult{Committed: true, RedirectURI: req.redirectURI, State: req.state, Code: code, OAuthError: oauthErr, WorkItemID: req.workItemID}, nil
 }
 
 func (s *AuthorizationService) appendWorkItemTransitionInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, to domain.WorkItemState, reason string, actor domain.Token, discriminator string) error {

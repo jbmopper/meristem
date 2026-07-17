@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/access"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/idempotency"
 )
@@ -73,6 +74,174 @@ func TestServer_Initialize_EchoesProtocolVersion(t *testing.T) {
 	// inject into the connecting agent's system prompt.
 	if strings.TrimSpace(result.Instructions) == "" {
 		t.Error("expected non-empty initialize instructions")
+	}
+}
+
+func TestServer_InitializeSurfacesCurrentBuildFingerprint(t *testing.T) {
+	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	s := New(Deps{}, ServerInfo{
+		Name:    "meristem-test",
+		Version: "fallback",
+		BuildStatus: buildguard.ProviderFunc(func() buildguard.Status {
+			return buildguard.Status{
+				State:            buildguard.StateCurrent,
+				CompiledCommit:   commit,
+				ExpectedCommit:   commit,
+				CompiledMetadata: buildguard.CompiledValid,
+				Reason:           "compiled commit matches the reviewed v1 pin",
+			}
+		}),
+	}, nil)
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	if resp.Error != nil {
+		t.Fatalf("initialize returned error: %+v", resp.Error)
+	}
+	var result struct {
+		ServerInfo struct {
+			Version string `json:"version"`
+		} `json:"serverInfo"`
+		Build struct {
+			State          string `json:"state"`
+			CompiledCommit string `json:"compiled_commit"`
+			PinnedCommit   string `json:"pinned_commit"`
+			Blocking       bool   `json:"blocking"`
+		} `json:"meristemBuild"`
+		Instructions string `json:"instructions"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode initialize: %v", err)
+	}
+	if result.ServerInfo.Version != commit {
+		t.Fatalf("server version = %q, want compiled commit", result.ServerInfo.Version)
+	}
+	if result.Build.State != string(buildguard.StateCurrent) || result.Build.CompiledCommit != commit || result.Build.PinnedCommit != commit || result.Build.Blocking {
+		t.Fatalf("build status = %+v", result.Build)
+	}
+	if strings.HasPrefix(result.Instructions, "WARNING:") {
+		t.Fatalf("current build unexpectedly warned: %s", result.Instructions)
+	}
+}
+
+func TestServer_BuildStatusIsDynamicAndBlocksCallsBeforeDispatch(t *testing.T) {
+	const (
+		compiled = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		pinned   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	status := buildguard.Status{
+		State:            buildguard.StateUnmanaged,
+		CompiledCommit:   compiled,
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "build consistency guard is disabled",
+	}
+	s := New(Deps{}, ServerInfo{
+		Name:        "meristem-test",
+		Version:     "fallback",
+		BuildStatus: buildguard.ProviderFunc(func() buildguard.Status { return status }),
+	}, nil)
+	s.actor = domain.Token{ID: uuid.New(), Source: domain.SourceHuman, Name: "test"}
+
+	init := roundtrip(t, s, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	var initResult struct {
+		Instructions string `json:"instructions"`
+	}
+	if err := json.Unmarshal(init.Result, &initResult); err != nil {
+		t.Fatalf("decode unmanaged initialize: %v", err)
+	}
+	if !strings.HasPrefix(initResult.Instructions, "WARNING: MERISTEM BUILD IS NOT CURRENT") || !strings.Contains(initResult.Instructions, "tool calls remain available") {
+		t.Fatalf("unmanaged warning missing or unclear: %s", initResult.Instructions)
+	}
+
+	call := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"feed.read","arguments":{}}}`)
+	if call.Error != nil || strings.Contains(string(call.Result), "build_pin") {
+		t.Fatalf("unmanaged build should reach normal tool dispatch: error=%+v result=%s", call.Error, call.Result)
+	}
+
+	status = buildguard.Status{
+		State:            buildguard.StateMismatch,
+		CompiledCommit:   compiled,
+		ExpectedCommit:   pinned,
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "compiled commit does not match the reviewed v1 pin",
+	}
+	blocked := roundtrip(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":"deliberately malformed"}`)
+	if blocked.Error != nil {
+		t.Fatalf("build refusal should be an MCP tool error, got transport error %+v", blocked.Error)
+	}
+	var blockedResult struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(blocked.Result, &blockedResult); err != nil {
+		t.Fatalf("decode build refusal: %v", err)
+	}
+	if !blockedResult.IsError || len(blockedResult.Content) == 0 || !strings.Contains(blockedResult.Content[0].Text, "build_pin") {
+		t.Fatalf("unexpected build refusal: %+v", blockedResult)
+	}
+
+	reinit := roundtrip(t, s, `{"jsonrpc":"2.0","id":4,"method":"initialize","params":{}}`)
+	if !strings.Contains(string(reinit.Result), `"state":"mismatch"`) || !strings.Contains(string(reinit.Result), "ALL MCP TOOL CALLS ARE DISABLED") {
+		t.Fatalf("initialize did not dynamically surface mismatch: %s", reinit.Result)
+	}
+	listed := roundtrip(t, s, `{"jsonrpc":"2.0","id":5,"method":"tools/list"}`)
+	if listed.Error != nil {
+		t.Fatalf("tools/list must remain available for protocol inspection: %+v", listed.Error)
+	}
+}
+
+func TestServer_BuildPinChangeDuringReadSuppressesToolResult(t *testing.T) {
+	const (
+		compiled   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		pinned     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		staleValue = "must-not-escape"
+	)
+	status := buildguard.Status{
+		State:            buildguard.StateCurrent,
+		CompiledCommit:   compiled,
+		ExpectedCommit:   compiled,
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "compiled commit matches the reviewed v1 pin",
+	}
+	s := New(Deps{}, ServerInfo{
+		Name:        "meristem-test",
+		Version:     "fallback",
+		BuildStatus: buildguard.ProviderFunc(func() buildguard.Status { return status }),
+	}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Name: "test"}
+
+	tool := s.toolsByName["feed.read"]
+	tool.Handler = func(context.Context, domain.Token, json.RawMessage) (any, error) {
+		status = buildguard.Status{
+			State:            buildguard.StateMismatch,
+			CompiledCommit:   compiled,
+			ExpectedCommit:   pinned,
+			CompiledMetadata: buildguard.CompiledValid,
+			Reason:           "compiled commit does not match the reviewed v1 pin",
+		}
+		// This deliberately is not a provider-safe carrier. The post-handler
+		// build check must run before rendering and suppress it either way.
+		return map[string]any{"value": staleValue}, nil
+	}
+	s.toolsByName["feed.read"] = tool
+
+	result, rpcErr := s.handleCallTool(
+		withProviderSafeContext(context.Background()),
+		actor,
+		json.RawMessage(`{"name":"feed.read","arguments":{}}`),
+	)
+	if rpcErr != nil {
+		t.Fatalf("post-read build refusal became JSON-RPC error: %+v", rpcErr)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	if !strings.Contains(string(encoded), "build_pin") || !strings.Contains(string(encoded), `"isError":true`) {
+		t.Fatalf("post-read result was not build-blocked: %s", encoded)
+	}
+	if strings.Contains(string(encoded), staleValue) {
+		t.Fatalf("stale tool payload escaped after pin change: %s", encoded)
 	}
 }
 
@@ -639,8 +808,8 @@ func TestMutationToolErrorStatus_DoesNotTreatBareNotFoundAsSemantic(t *testing.T
 	if got := mutationToolErrorStatus(errors.New("pgx: prepared statement not found")); got != http.StatusInternalServerError {
 		t.Fatalf("bare not found infrastructure error status = %d, want %d", got, http.StatusInternalServerError)
 	}
-	if got := mutationToolErrorStatus(replayableToolErr(errors.New("work item 00000000-0000-0000-0000-000000000000 not found"))); got != http.StatusOK {
-		t.Fatalf("wrapped replayable not-found status = %d, want %d", got, http.StatusOK)
+	if got := mutationToolErrorStatus(replayableToolErr(errors.New("work item 00000000-0000-0000-0000-000000000000 not found"))); got != http.StatusUnprocessableEntity {
+		t.Fatalf("wrapped replayable not-found status = %d, want %d", got, http.StatusUnprocessableEntity)
 	}
 }
 

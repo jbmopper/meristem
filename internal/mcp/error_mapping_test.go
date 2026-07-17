@@ -34,8 +34,8 @@ func TestMCPToolErrorMappersUseTypedDomainErrors(t *testing.T) {
 			if !isReplayableToolError(tt.err) {
 				t.Fatalf("mapped error is not replayable: %T %v", tt.err, tt.err)
 			}
-			if got := mutationToolErrorStatus(tt.err); got != http.StatusOK {
-				t.Fatalf("mutation status = %d, want 200", got)
+			if got := mutationToolErrorStatus(tt.err); got != http.StatusUnprocessableEntity {
+				t.Fatalf("mutation status = %d, want 422", got)
 			}
 		})
 	}

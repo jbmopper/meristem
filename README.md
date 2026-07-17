@@ -273,6 +273,7 @@ Use `MERISTEM_TEST_DATABASE_URL` instead of `MERISTEM_DATABASE_URL` if you want 
 | `MERISTEM_TOKEN`             | varies   | —       | Bearer token used by `meristem tokens` (non-root ops) and `meristem mcp`. |
 | `MERISTEM_HOSTNAME`          | no       | —       | Hostname Caddy issues a Let's Encrypt cert for (production profile only). |
 | `MERISTEM_VERSION`           | no       | `dev`   | Version string baked into the docker image and `meristem version`.  |
+| `MERISTEM_V1_PIN_FILE`       | no       | `<running-binary>.v1-pin` | Explicit reviewed-v1 pin path for the dynamic build-consistency guard. Generated agent wrappers set this automatically. |
 | `MERISTEM_BIN`               | no       | `go run ./cmd/meristem` | Override the binary used by `scripts/bootstrap.sh`. |
 | `MERISTEM_INTEGRATION`       | no       | —       | Set to `1` to run opt-in integration tests.                        |
 | `MERISTEM_TEST_DATABASE_URL` | no       | —       | Optional Postgres DSN just for integration tests.                  |

@@ -95,17 +95,71 @@ Rebuild only from a clean checkout at the `v1` tip:
 scripts/rebuild-meristem-bin.sh
 ```
 
-The script refuses to build from a dirty tree or a HEAD that is not the freshly
-fetched `origin/v1` (pass `--force` to override). On macOS it then ad-hoc
-code-signs the artifact (`codesign -s - --force`); a signing failure is loud but
-not fatal.
+The script refuses to publish the shared artifact from a dirty tree or a HEAD
+that is not the freshly fetched `origin/v1`. It embeds that exact full commit in
+the binary and writes the separately read
+`.meristem/generated/meristem-bin.v1-pin` file with the reviewed `v1` commit.
+The two values have separate jobs: the embedded value says *what code this
+process is running*; the pin says *what code the owner-approved shared runtime
+should be running*. Exact equality is the whole gate.
+
+The pin is reread at API response, MCP tool-call, worker-tick, migration, and
+event-append boundaries. When the pin advances, an old process reports itself
+as stale at its next boundary and refuses subsequent authoritative work even
+though the OS process still exists. Ordinary REST responses are held until a
+post-handler check; SSE streams recheck before every query and frame. A mutation
+admitted while current is allowed to return its committed response, so OAuth
+rotation and delegated-token issuance cannot strand one-time credentials. MCP
+`initialize` and `/readyz` remain available to explain the failure.
+An ordinary unpinned `go run` development process remains usable, but reports
+`unmanaged` rather than pretending to be the reviewed shared runtime.
+
+### First activation is a coordinated restart gate
+
+The dynamic behavior begins only after every writer is running a binary that
+contains this guard. A pre-guard API, worker, or MCP process cannot read the new
+pin and will keep its old mapped code authoritative even after the on-disk
+binary is replaced. Therefore the first activation must remain gated by work
+item `835e0dbf`: drain and stop the API and worker, close every write-capable MCP
+session, publish the guarded binary and pin, then restart/relaunch all of them.
+Before resuming work, verify that `/readyz` reports `build_state=current`, that
+`meristem build-guard-status` returns the versioned capability with the pinned
+commit, and that each MCP `initialize` reports the same current build. Pin-first
+publication is not a substitute for this one-time coordinated cutover.
+
+`--force` cannot replace the default shared artifact with dirty or off-`v1`
+code. It is only accepted with an explicit alternate `MERISTEM_BIN_OUT`, and
+that artifact stays pinned to reviewed `v1`, so the runtime guard refuses it.
+`--no-fetch` is likewise unsafe-only: it requires `--force`, writes only an
+explicit alternate artifact, and deliberately stamps that artifact as
+non-authoritative. Reviewed builds disable ambient Go workspaces, persisted
+Go configuration, and `GOFLAGS`, then compile an immutable `git archive` of the
+fetched commit so a transient live-worktree edit cannot enter the artifact.
+On macOS the script ad-hoc code-signs the temporary artifact before publishing
+it (`codesign -s - --force`); a signing failure is loud but not fatal.
 
 Caveats:
 
-- **Running sessions are not hot-swapped.** A live API server or an MCP client
-  session keeps its current process — and therefore its old binary — until that
-  process is restarted or the MCP client session is relaunched. Rebuilding only
-  changes what the *next* launch execs; it does not disturb in-flight work.
+- **Running sessions are not hot-swapped.** A guarded API server or MCP client
+  keeps its current in-memory code until restart. The new pin makes that
+  already-guarded process fail closed; restarting is still required to serve
+  work from the new binary. Pre-guard processes require the first-activation
+  drain/restart above.
+- **Cutover is boundary-safe, not a distributed transaction.** An operation
+  admitted while the old pin was current can finish if the pin changes after
+  its final check while a database transaction is already committing. The pin
+  prevents new or subsequently checked work; it does not quiesce Postgres or
+  revoke an in-flight commit. Use an explicit drain/restart step when a release
+  requires a fully quiescent cutover.
+- **The pin is a drift detector, not a signature.** Its purpose is to prevent
+  two Meristem code revisions from presenting the same shared database as
+  authoritative. Repository review, host access, and artifact signing remain
+  separate trust controls.
+- **The current Docker development image is unmanaged.** It does not mint its
+  own sibling pin: per-image pins would let two image revisions both call
+  themselves current. A future managed container release must verify its source
+  fingerprint and read one deployment-owned reviewed pin that old containers
+  can observe changing.
 - **macOS firewall / code signing.** The macOS Application Firewall tracks
   inbound-connection approvals per executable identity. Any rebuild changes an
   unsigned or ad-hoc-signed binary's identity (ad-hoc signatures are hash-based),

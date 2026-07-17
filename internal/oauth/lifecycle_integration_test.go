@@ -118,6 +118,9 @@ func TestProviderOAuthLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !req1.Committed {
+		t.Fatal("fresh authorization request did not report its commit boundary")
+	}
 	var createdBefore int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind IN ($1,$2,$3)`, domain.EventWorkItemCreated, domain.EventApprovalCreated, domain.EventOAuthAuthorizationRequestCreated).Scan(&createdBefore); err != nil {
 		t.Fatal(err)
@@ -129,9 +132,19 @@ func TestProviderOAuthLifecycle(t *testing.T) {
 	if req1.ID != req2.ID || req1.WorkItemID != req2.WorkItemID || req1.ApprovalID != req2.ApprovalID {
 		t.Fatalf("authorize retry diverged: %#v %#v", req1, req2)
 	}
+	if req2.Committed {
+		t.Fatal("idempotent authorization retry incorrectly reported a fresh commit")
+	}
 	var createdAfter int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind IN ($1,$2,$3)`, domain.EventWorkItemCreated, domain.EventApprovalCreated, domain.EventOAuthAuthorizationRequestCreated).Scan(&createdAfter); err != nil || createdAfter != createdBefore {
 		t.Fatalf("retry appended events: before=%d after=%d err=%v", createdBefore, createdAfter, err)
+	}
+	pending, err := authorize.Continue(ctx, req1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending.Pending || pending.Committed {
+		t.Fatalf("undecided continuation commit boundary = %+v", pending)
 	}
 	if _, err := ap.Decide(ctx, approvals.DecisionInput{ApprovalID: req1.ApprovalID, Decision: approvals.DecisionApproved, Reason: "owner approved", Actor: decider.Token}); err != nil {
 		t.Fatal(err)
@@ -140,7 +153,7 @@ func TestProviderOAuthLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if continued.Code == "" || continued.Pending {
+	if continued.Code == "" || continued.Pending || !continued.Committed {
 		t.Fatalf("continue=%+v", continued)
 	}
 	tokens := oauth.NewTokenService(pool, writer, system.Token.ID)

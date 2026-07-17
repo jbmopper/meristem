@@ -30,6 +30,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -44,6 +45,7 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
@@ -63,7 +65,7 @@ const (
 	defaultRegistryRequestTimeout = 5 * time.Second
 )
 
-func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
+func runNode(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	if len(args) == 0 {
 		nodeUsage(os.Stderr)
 		return fmt.Errorf("node: missing subcommand")
@@ -79,7 +81,8 @@ func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	defer pool.Close()
 
-	writer := app.NewEventWriter()
+	writer := app.NewGuardedEventWriter(build)
+	checkBuild := func() error { return buildguard.RequireNonBlocking(build) }
 
 	switch args[0] {
 	case "register", "update-route":
@@ -94,9 +97,9 @@ func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
 	case "list":
 		return listNodes(ctx, pool, os.Stdout, args[1:])
 	case "sync-registry":
-		return syncRegistryNode(ctx, logger, pool, writer, auth.NewService(pool, writer), args[1:])
+		return syncRegistryNodeWithCheck(ctx, logger, pool, writer, auth.NewService(pool, writer), checkBuild, args[1:])
 	case "sync-outcomes":
-		return syncOutcomeNode(ctx, logger, pool, writer, auth.NewService(pool, writer), args[1:])
+		return syncOutcomeNodeWithCheck(ctx, logger, pool, writer, auth.NewService(pool, writer), checkBuild, args[1:])
 	default:
 		logger.Error("unknown node subcommand", slog.String("subcommand", args[0]))
 		nodeUsage(os.Stderr)
@@ -105,6 +108,10 @@ func runNode(ctx context.Context, logger *slog.Logger, args []string) error {
 }
 
 func syncOutcomeNode(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, writer *events.Writer, authenticator tokenAuthenticator, args []string) error {
+	return syncOutcomeNodeWithCheck(ctx, logger, pool, writer, authenticator, nil, args)
+}
+
+func syncOutcomeNodeWithCheck(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, writer *events.Writer, authenticator tokenAuthenticator, checkBuild func() error, args []string) error {
 	fs := flag.NewFlagSet("node sync-outcomes", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	once := fs.Bool("once", false, "perform one queue-outcome reconciliation tick and exit")
@@ -153,34 +160,24 @@ func syncOutcomeNode(ctx context.Context, logger *slog.Logger, pool *pgxpool.Poo
 		return nil
 	}
 	if *once {
-		return tick()
+		return runCheckedTick(checkBuild, tick)
 	}
-	for {
-		if err := tick(); err != nil {
-			logger.Warn("queue outcome reconciliation failed; retaining cursor",
-				slog.String("queue_host_node_id", queueHostNodeID),
-				slog.String("retry_in", interval.String()),
-				slog.String("error", err.Error()))
-		}
-		timer := time.NewTimer(*interval)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return runCheckedIntervalLoop(ctx, *interval, checkBuild, tick, func(err error) {
+		logger.Warn("queue outcome reconciliation failed; retaining cursor",
+			slog.String("queue_host_node_id", queueHostNodeID),
+			slog.String("retry_in", interval.String()),
+			slog.String("error", err.Error()))
+	})
 }
 
 // syncRegistryNode reconciles the registry home into this node's own event log
 // using outbound-only authenticated REST. A failed tick leaves the most recent
 // observed snapshot untouched and the daemon retries after a finite interval.
 func syncRegistryNode(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, writer *events.Writer, authenticator tokenAuthenticator, args []string) error {
+	return syncRegistryNodeWithCheck(ctx, logger, pool, writer, authenticator, nil, args)
+}
+
+func syncRegistryNodeWithCheck(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, writer *events.Writer, authenticator tokenAuthenticator, checkBuild func() error, args []string) error {
 	fs := flag.NewFlagSet("node sync-registry", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	once := fs.Bool("once", false, "perform one registry reconciliation tick and exit")
@@ -234,17 +231,58 @@ func syncRegistryNode(ctx context.Context, logger *slog.Logger, pool *pgxpool.Po
 		return nil
 	}
 	if *once {
-		return tick()
+		return runCheckedTick(checkBuild, tick)
+	}
+	return runCheckedIntervalLoop(ctx, *interval, checkBuild, tick, func(err error) {
+		logger.Warn("registry snapshot reconciliation failed; retaining last accepted snapshot",
+			slog.String("registry_home_node_id", expectedSource),
+			slog.String("retry_in", interval.String()),
+			slog.String("error", err.Error()),
+		)
+	})
+}
+
+// runCheckedTick performs the dynamic build check immediately before a tick.
+// Runtime callers pass a reviewed-v1 guard; direct integration helpers may
+// omit it so their existing signatures remain stable.
+func runCheckedTick(checkBuild func() error, tick func() error) error {
+	if checkBuild != nil {
+		if err := checkBuild(); err != nil {
+			return err
+		}
+	}
+	return tick()
+}
+
+// runCheckedIntervalLoop preserves the node/spoke immediate-first-tick
+// cadence while making a build-pin change terminal for this process. Ordinary
+// transport failures still follow the caller's bounded retry policy.
+func runCheckedIntervalLoop(ctx context.Context, interval time.Duration, checkBuild func() error, tick func() error, onTickError func(error)) error {
+	if interval <= 0 {
+		return fmt.Errorf("tick interval must be positive, got %s", interval)
 	}
 	for {
-		if err := tick(); err != nil {
-			logger.Warn("registry snapshot reconciliation failed; retaining last accepted snapshot",
-				slog.String("registry_home_node_id", expectedSource),
-				slog.String("retry_in", interval.String()),
-				slog.String("error", err.Error()),
-			)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
-		timer := time.NewTimer(*interval)
+
+		if checkBuild != nil {
+			if err := checkBuild(); err != nil {
+				return err
+			}
+		}
+		if err := tick(); err != nil {
+			if errors.Is(err, buildguard.ErrBlocked) {
+				return err
+			}
+			if onTickError != nil {
+				onTickError(err)
+			}
+		}
+
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {

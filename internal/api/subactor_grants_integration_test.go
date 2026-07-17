@@ -13,14 +13,81 @@ import (
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/grants"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/registry"
+	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
+
+func TestSubactorGrantAdmittedSecretResponseSurvivesPinAdvanceAfterCommit(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "subactor-cutover-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	item, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "grant cutover target", Actor: rootResult.Token,
+	})
+	if err != nil {
+		t.Fatalf("create work item: %v", err)
+	}
+	parentResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "subactor-cutover-parent",
+		Source: domain.SourceAgent,
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeFeedReadAssigned,
+			"work_items.tree:" + item.ID.String(),
+		},
+		Actor: &rootResult.Token,
+	})
+	if err != nil {
+		t.Fatalf("create parent token: %v", err)
+	}
+
+	provider := buildguard.ProviderFunc(func() buildguard.Status {
+		var committed bool
+		err := pool.QueryRow(context.Background(), `
+			SELECT EXISTS(SELECT 1 FROM events WHERE kind = $1)
+		`, domain.EventSubactorGrantGranted).Scan(&committed)
+		if err == nil && committed {
+			return mismatchedBuildStatus()
+		}
+		return currentBuildStatus()
+	})
+	server := NewWithPolicyAndBuildGuard(pool, discardLogger(), safety.DefaultPolicy(), provider)
+	body := []byte(`{"template":"same_tree_read_progress","work_item_id":"` + item.ID.String() + `"}`)
+	rec := doREST(t, server.Handler(), http.MethodPost, "/v1/subactor-grants", parentResult.Secret, "grant-cutover", body)
+
+	assertRESTStatus(t, rec, http.StatusCreated)
+	var response subactorGrantResponse
+	decodeResponse(t, rec, &response)
+	if response.Token == nil || response.TokenSecret == "" {
+		t.Fatalf("admitted grant lost its one-time token response: %+v", response)
+	}
+	if !provider.Status().Blocking() {
+		t.Fatal("test did not advance the build pin after the grant committed")
+	}
+	if _, err := authSvc.Authenticate(ctx, response.TokenSecret); err != nil {
+		t.Fatalf("returned one-time token is not active: %v", err)
+	}
+	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 0)
+	assertNoEventSecret(t, pool, response.TokenSecret)
+}
 
 func TestSubactorGrantEndpointGrantsReadOnlyAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()

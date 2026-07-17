@@ -3,13 +3,16 @@ package spoke
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/crossnode"
 )
 
@@ -69,6 +72,7 @@ type fakeFleet struct {
 	feedCursor  string
 	feedItems   int
 	localStatus int // status the local api returns (default 200)
+	afterAck    func()
 }
 
 func newFakeFleet(t *testing.T) *fakeFleet {
@@ -109,7 +113,11 @@ func newFakeFleet(t *testing.T) *fakeFleet {
 		_ = json.NewDecoder(r.Body).Decode(&p)
 		f.mu.Lock()
 		f.acks = append(f.acks, ackCall{EventID: r.PathValue("event_id"), Payload: p})
+		afterAck := f.afterAck
 		f.mu.Unlock()
+		if afterAck != nil {
+			afterAck()
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"acked":true}`))
 	})
@@ -226,6 +234,43 @@ func TestTickDrainExecuteAck(t *testing.T) {
 	}
 	if f.acks[0].EventID != id1 || f.acks[0].Payload.StatusCode != 200 || !f.acks[0].Payload.OK || f.acks[0].Payload.Outcome != crossnode.CommandDone {
 		t.Fatalf("ack[0] = %+v, want id1 status 200 ok true", f.acks[0])
+	}
+}
+
+func TestTickCheckedStopsMidBatchBeforeSecondCommandSideEffects(t *testing.T) {
+	f := newFakeFleet(t)
+	id1 := "11111111-1111-4111-8111-111111111111"
+	id2 := "22222222-2222-4222-8222-222222222222"
+	f.setPending(
+		cmd(id1, "/v1/work-items/aaaa1111-1111-4111-8111-111111111111/transition", "orig-key-1", map[string]any{"to": "running"}),
+		cmd(id2, "/v1/work-items/bbbb2222-2222-4222-8222-222222222222/transition", "orig-key-2", map[string]any{"to": "blocked"}),
+	)
+
+	var blocked atomic.Bool
+	f.afterAck = func() { blocked.Store(true) }
+	check := func() error {
+		if blocked.Load() {
+			return buildguard.ErrBlocked
+		}
+		return nil
+	}
+	p := NewWithCheck(f.config(), f.hub.Client(), &memCursor{}, nil, check)
+	res, err := p.TickChecked(context.Background())
+
+	if !errors.Is(err, buildguard.ErrBlocked) {
+		t.Fatalf("TickChecked error = %v, want buildguard.ErrBlocked", err)
+	}
+	if res.Drained != 2 || res.AttemptsRecorded != 1 || res.Executed != 1 || res.Acked != 1 {
+		t.Fatalf("result = %+v, want only the first command attempted/executed/acked", res)
+	}
+	if len(f.attempts) != 1 || f.attempts[0].EventID != id1 {
+		t.Fatalf("attempt calls = %+v, want only first command", f.attempts)
+	}
+	if len(f.localCalls) != 1 || f.localCalls[0].QueueCommand != id1 {
+		t.Fatalf("local calls = %+v, want only first command", f.localCalls)
+	}
+	if len(f.acks) != 1 || f.acks[0].EventID != id1 {
+		t.Fatalf("ack calls = %+v, want only first command", f.acks)
 	}
 }
 

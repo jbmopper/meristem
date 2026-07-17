@@ -22,28 +22,37 @@ TOKEN_FILE="${MERISTEM_TOKEN_FILE:-$PRIMARY_REPO/.meristem/cursor-mcp.token}"
 # database (work item a9374bdd). Rebuild it from a clean v1 checkout with
 # scripts/rebuild-meristem-bin.sh.
 MERISTEM_BIN="${MERISTEM_BIN:-$PRIMARY_REPO/.meristem/generated/meristem-bin}"
+export MERISTEM_V1_PIN_FILE="${MERISTEM_V1_PIN_FILE:-$MERISTEM_BIN.v1-pin}"
+
+[[ "$MERISTEM_BIN" == /* && "$MERISTEM_V1_PIN_FILE" == /* ]] || {
+  echo "cursor-mcp-command: shared binary and reviewed pin paths must be absolute" >&2
+  exit 64
+}
 
 export MERISTEM_DATABASE_URL="${MERISTEM_DATABASE_URL:-postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable}"
 export MERISTEM_MCP_TOOL_NAMES="${MERISTEM_MCP_TOOL_NAMES:-cursor}"
 
-[[ -s "$TOKEN_FILE" ]] || {
-  echo "cursor-mcp-command: missing token file $TOKEN_FILE" >&2
-  echo "Mint one with: MERISTEM_TOKEN=\$(cat .meristem/root.token) go run ./cmd/meristem tokens create --name cursor-mcp --source agent" >&2
-  exit 1
-}
+# Validate the public build metadata before reading the bearer-token file. The
+# running binary repeats this check dynamically, but this preflight prevents a
+# known-stale wrapper from touching secret material at all.
+if ! "$PRIMARY_REPO/scripts/check-meristem-build-pin.sh" "$MERISTEM_BIN" "$MERISTEM_V1_PIN_FILE"; then
+  echo "cursor-mcp-command: shared meristem build does not match the reviewed-v1 pin; refusing to read credentials" >&2
+  exit 64
+fi
+
 [[ -e "$WORKSPACE_ROOT/.git" ]] || {
   echo "cursor-mcp-command: missing meristem worktree $WORKSPACE_ROOT" >&2
   echo "Create it with: $PRIMARY_REPO/scripts/prepare-agent-worktree.sh --target cursor-mcp" >&2
   exit 64
+}
+[[ -s "$TOKEN_FILE" ]] || {
+  echo "cursor-mcp-command: missing token file $TOKEN_FILE" >&2
+  echo "Mint one with the root-token provisioning flow." >&2
+  exit 1
 }
 
 export MERISTEM_TOKEN
 MERISTEM_TOKEN="$(cat "$TOKEN_FILE")"
 
 cd "$WORKSPACE_ROOT"
-[[ -x "$MERISTEM_BIN" ]] || {
-  echo "cursor-mcp-command: missing shared meristem build artifact $MERISTEM_BIN" >&2
-  echo "Build it from a clean v1 checkout: $PRIMARY_REPO/scripts/rebuild-meristem-bin.sh" >&2
-  exit 64
-}
 exec "$MERISTEM_BIN" mcp

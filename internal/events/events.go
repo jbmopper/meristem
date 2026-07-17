@@ -123,17 +123,31 @@ func DeterministicID(s Spec) (uuid.UUID, error) {
 // the only place projection writers fire, which is what keeps the
 // "non-`events` row implies an event that caused it" invariant true.
 type Writer struct {
-	registry *projections.Registry
+	registry  *projections.Registry
+	preAppend func() error
 }
 
 // NewWriter constructs a Writer backed by registry. A nil registry is
 // treated as empty, useful in early bootstrap and in tests that exercise
 // the writer in isolation.
 func NewWriter(registry *projections.Registry) *Writer {
+	return NewWriterWithPreAppend(registry, nil)
+}
+
+// NewWriterWithPreAppend constructs a Writer that checks preAppend immediately
+// before every event append. Runtime composition uses this small hook for
+// fail-closed process invariants that can change while a process is alive
+// (notably the reviewed-build pin). Keeping the hook generic avoids coupling
+// the event-log package to any one runtime policy.
+//
+// The hook must be deterministic with respect to the current runtime state,
+// fast, and free of database side effects. A non-nil error prevents both the
+// event insert and every derived projection write.
+func NewWriterWithPreAppend(registry *projections.Registry, preAppend func() error) *Writer {
 	if registry == nil {
 		registry = projections.NewRegistry()
 	}
-	return &Writer{registry: registry}
+	return &Writer{registry: registry, preAppend: preAppend}
 }
 
 // Append inserts the event derived from spec into `events`, then — on a
@@ -150,6 +164,11 @@ func NewWriter(registry *projections.Registry) *Writer {
 // be the unit of failure: this function never commits or rolls back; the
 // caller decides.
 func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID, fresh bool, err error) {
+	if w.preAppend != nil {
+		if err := w.preAppend(); err != nil {
+			return uuid.Nil, false, fmt.Errorf("events: pre-append check: %w", err)
+		}
+	}
 	spec, err = enrichSpecWithRemoteProvenance(ctx, spec)
 	if err != nil {
 		return uuid.Nil, false, err
@@ -168,6 +187,14 @@ func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID
 	// where they expect an object.
 	if len(payload) == 0 || string(payload) == "null" {
 		payload = []byte(`{}`)
+	}
+	// Recheck at the transaction seam. Canonicalization and marshaling above
+	// can be non-trivial for a large payload; a runtime invariant may change
+	// after the cheap early check but before the authoritative insert.
+	if w.preAppend != nil {
+		if err := w.preAppend(); err != nil {
+			return uuid.Nil, false, fmt.Errorf("events: pre-append check: %w", err)
+		}
 	}
 
 	var occurredAt time.Time

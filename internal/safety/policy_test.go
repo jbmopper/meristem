@@ -16,6 +16,9 @@ func TestDefaultPolicyValidates(t *testing.T) {
 	if p.MaxRequestBodyBytes <= 0 {
 		t.Fatal("default policy must bound request bodies")
 	}
+	if MaxBufferedAuthoritativeResponseBytes <= 0 {
+		t.Fatal("runtime safety must bound buffered authoritative responses")
+	}
 	if p.MaxFeedWait <= 0 {
 		t.Fatal("default policy must bound feed waits")
 	}

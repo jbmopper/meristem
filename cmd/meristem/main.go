@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/api"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/storage"
 )
@@ -51,25 +52,32 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	processBuild := buildguard.New()
+	if err := checkCommandBuild(cmd, processBuild, logger); err != nil {
+		logger.Error("command refused by build consistency guard",
+			slog.String("command", cmd),
+			slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
 	var err error
 	switch cmd {
 	case "api":
-		err = runAPI(ctx, logger, args)
+		err = runAPI(ctx, logger, args, processBuild)
 	case "migrate":
-		err = runMigrate(ctx, logger, args)
+		err = runMigrate(ctx, logger, args, processBuild)
 	case "tokens":
-		err = runTokens(ctx, logger, args)
+		err = runTokens(ctx, logger, args, processBuild)
 	case "mcp":
-		err = runMCP(ctx, logger, args)
+		err = runMCP(ctx, logger, args, processBuild)
 	case "provider":
 		err = runProvider(ctx, logger, args)
 	case "healthcheck":
 		err = runHealthcheck(ctx, logger, args)
 	case "seed":
-		err = runSeed(ctx, logger, args)
+		err = runSeed(ctx, logger, args, processBuild)
 	case "node":
-		err = runNode(ctx, logger, args)
+		err = runNode(ctx, logger, args, processBuild)
 	case "rebuild":
 		err = runRebuild(ctx, logger, args)
 	case "export":
@@ -77,9 +85,9 @@ func main() {
 	case "export-context":
 		err = runExportContext(ctx, logger, args)
 	case "worker":
-		err = runWorker(ctx, logger, args)
+		err = runWorker(ctx, logger, args, processBuild)
 	case "spoke":
-		err = runSpoke(ctx, logger, args)
+		err = runSpoke(ctx, logger, args, processBuild)
 	case "feed":
 		err = runFeed(ctx, logger, args)
 	case "safety":
@@ -87,7 +95,9 @@ func main() {
 	case "git":
 		err = runGit(ctx, logger, args)
 	case "version", "--version", "-v":
-		fmt.Println(version)
+		err = runVersion(os.Stdout, args, processBuild)
+	case "build-guard-status":
+		err = runBuildGuardStatus(os.Stdout, args, processBuild)
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 	default:
@@ -106,18 +116,18 @@ func main() {
 	}
 }
 
-func runAPI(ctx context.Context, logger *slog.Logger, _ []string) error {
+func runAPI(ctx context.Context, logger *slog.Logger, _ []string, build buildguard.StatusProvider) error {
 	pool, active, err := openProfileAwarePool(ctx, logger)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	srv := api.NewWithPolicy(pool, logger, active.Policy)
+	srv := api.NewWithPolicyAndBuildGuard(pool, logger, active.Policy, build)
 	return srv.Run(ctx)
 }
 
-func runMigrate(ctx context.Context, logger *slog.Logger, args []string) error {
+func runMigrate(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	direction := "up"
 	if len(args) > 0 {
 		direction = args[0]
@@ -135,9 +145,13 @@ func runMigrate(ctx context.Context, logger *slog.Logger, args []string) error {
 
 	switch direction {
 	case "up":
-		return storage.Migrate(ctx, pool, logger)
+		return storage.MigrateWithCheck(ctx, pool, logger, func() error {
+			return buildguard.RequireNonBlocking(build)
+		})
 	case "down":
-		return storage.MigrateDown(ctx, pool, logger)
+		return storage.MigrateDownWithCheck(ctx, pool, logger, func() error {
+			return buildguard.RequireNonBlocking(build)
+		})
 	default:
 		return fmt.Errorf("migrate: unknown direction %q (want \"up\" or \"down\")", direction)
 	}
@@ -161,7 +175,8 @@ usage:
   meristem export-context    deterministically materialize an allow/deny repo slice (operator-side; no API calls)
   meristem safety check      validate deterministic resource-safety controls
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
-  meristem version           print version
+  meristem version [--commit] print release label or exact compiled guard commit
+  meristem build-guard-status print the machine-readable launcher guard protocol
   meristem help              show this message
 
 environment:

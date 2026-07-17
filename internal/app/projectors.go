@@ -4,6 +4,7 @@ package app
 import (
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/crossnode"
 	"github.com/jbmopper/meristem/internal/errorreporting"
@@ -52,4 +53,16 @@ func NewProjectionRegistry() *projections.Registry {
 // projector registry.
 func NewEventWriter() *events.Writer {
 	return events.NewWriter(NewProjectionRegistry())
+}
+
+// NewGuardedEventWriter returns the application writer with a dynamic
+// reviewed-build check immediately before every append. Boundary checks make
+// failures legible to API/MCP clients; this hook narrows the interval between a
+// transport check and the authoritative event insert if the shared v1 pin
+// moves while a request is in flight. It does not revoke a transaction that is
+// already committing; deployment quiescence is a separate operator concern.
+func NewGuardedEventWriter(guard buildguard.StatusProvider) *events.Writer {
+	return events.NewWriterWithPreAppend(NewProjectionRegistry(), func() error {
+		return buildguard.RequireNonBlocking(guard)
+	})
 }

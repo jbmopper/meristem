@@ -38,6 +38,9 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 			s.writeOAuthPending(w, r, id, result.WorkItemID)
 			return
 		}
+		if result.Committed {
+			markAdmittedMutationResponse(w)
+		}
 		u, err := url.Parse(result.RedirectURI)
 		if err != nil {
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", "stored redirect is invalid")
@@ -64,6 +67,9 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeOAuthAuthorizationError(w, err)
 		return
+	}
+	if result.Committed {
+		markAdmittedMutationResponse(w)
 	}
 	s.writeOAuthPending(w, r, result.ID, result.WorkItemID)
 }

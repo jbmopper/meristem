@@ -19,6 +19,10 @@ AGENT_WORKTREE_BASE="${MERISTEM_AGENT_WORKTREE_BASE:-$DEFAULT_WORKTREE_BASE}"
 # `go run`. Rebuild it from a clean v1 checkout with
 # scripts/rebuild-meristem-bin.sh.
 MERISTEM_BIN="${MERISTEM_BIN:-$REPO_ROOT/.meristem/generated/meristem-bin}"
+[[ "$MERISTEM_BIN" == /* ]] || {
+  echo "generate-cerberus-launchers: MERISTEM_BIN must be an absolute path" >&2
+  exit 64
+}
 
 ROOT_ID="${CERBERUS_ROOT_ID:-98853a93-2de4-42fb-9438-a1a54caf9589}"
 ROOT_SHORT="${CERBERUS_ROOT_SHORT:-98853a93}"
@@ -46,6 +50,15 @@ token_file="\$primary_repo/$token_file"
 # wrapper stays on one code version (work item a9374bdd). Rebuild it from a clean
 # v1 checkout with \$primary_repo/scripts/rebuild-meristem-bin.sh.
 meristem_bin="$MERISTEM_BIN"
+export MERISTEM_V1_PIN_FILE="\${MERISTEM_V1_PIN_FILE:-\$meristem_bin.v1-pin}"
+[[ "\$MERISTEM_V1_PIN_FILE" == /* ]] || {
+  echo "reviewed-v1 pin path must be absolute" >&2
+  exit 64
+}
+if ! "\$primary_repo/scripts/check-meristem-build-pin.sh" "\$meristem_bin" "\$MERISTEM_V1_PIN_FILE"; then
+  echo "shared meristem build does not match the reviewed-v1 pin; refusing to read credentials" >&2
+  exit 64
+fi
 if [[ ! -e "\$workspace_root/.git" ]]; then
   echo "missing Cerberus $head worktree: \$workspace_root" >&2
   echo "create it with: \$primary_repo/scripts/prepare-agent-worktree.sh --target cerberus-$head-$ROOT_SHORT" >&2
@@ -53,11 +66,6 @@ if [[ ! -e "\$workspace_root/.git" ]]; then
 fi
 if [[ ! -s "\$token_file" ]]; then
   echo "missing or empty Cerberus token file for $head: \$token_file" >&2
-  exit 64
-fi
-if [[ ! -x "\$meristem_bin" ]]; then
-  echo "missing shared meristem build artifact: \$meristem_bin" >&2
-  echo "build it from a clean v1 checkout: \$primary_repo/scripts/rebuild-meristem-bin.sh" >&2
   exit 64
 fi
 cd "\$workspace_root"

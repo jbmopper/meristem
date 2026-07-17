@@ -36,9 +36,14 @@ scripts/provision-assistant-access.sh --targets codex,claude-code-gui --print-re
 Then relaunch each agent so it picks up its wrapper. Every wrapper and the API
 server exec one shared artifact (`$BIN`); rebuild it only from a clean `v1`
 checkout with `scripts/rebuild-meristem-bin.sh` (it refuses a dirty tree or a
-non-`v1` HEAD; `--force` overrides). One rebuild covers the API server and all
-wrappers, but running MCP client sessions keep their old process until the
-client session restarts, and a rebuild re-triggers the macOS firewall approval
+non-`v1` HEAD; `--force` is limited to an explicit alternate output that cannot
+present itself as current). One rebuild covers the API server and all wrappers.
+For the first guarded rollout, drain/stop the API and worker and close all
+write-capable MCP sessions before publishing, then restart everything and
+verify `/readyz` plus MCP `initialize` report the current build (work item
+`835e0dbf`). After that bootstrap, guarded MCP sessions keep their old process
+until restart but refuse authoritative work at their next pin boundary.
+A rebuild re-triggers the macOS firewall approval
 for the API listener (the script ad-hoc code-signs, which is hash-based and may
 not prevent the re-prompt; failure is loud but non-fatal). Background in
 `agent-worktrees.md`. This rebuild

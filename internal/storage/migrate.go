@@ -44,18 +44,41 @@ type migrationFile struct {
 // is a no-op (idempotent — the substrate property the rest of the system
 // relies on).
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
-	return migrate(ctx, pool, logger, migrations.FS, DirectionUp)
+	return MigrateWithCheck(ctx, pool, logger, nil)
+}
+
+// MigrateWithCheck applies all pending Up migrations while re-running check
+// at every durable mutation boundary. A failed check prevents a new migration
+// transaction from starting or rolls back the transaction before commit.
+func MigrateWithCheck(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, check func() error) error {
+	return migrate(ctx, pool, logger, migrations.FS, DirectionUp, check)
 }
 
 // MigrateDown rolls back the most recently applied migration. Intended for
 // tests and operator recovery, not for the normal startup path.
 func MigrateDown(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
-	return migrate(ctx, pool, logger, migrations.FS, DirectionDown)
+	return MigrateDownWithCheck(ctx, pool, logger, nil)
 }
 
-func migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, source fs.FS, dir MigrationDirection) error {
+// MigrateDownWithCheck rolls back the most recently applied migration while
+// enforcing check at the same durable mutation boundaries as MigrateWithCheck.
+func MigrateDownWithCheck(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, check func() error) error {
+	return migrate(ctx, pool, logger, migrations.FS, DirectionDown, check)
+}
+
+func migrate(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	logger *slog.Logger,
+	source fs.FS,
+	dir MigrationDirection,
+	check func() error,
+) error {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if err := runMigrationCheck(check); err != nil {
+		return err
 	}
 	if err := ensureSchemaMigrationsTable(ctx, pool); err != nil {
 		return err
@@ -72,9 +95,9 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, sourc
 
 	switch dir {
 	case DirectionUp:
-		return runUp(ctx, pool, logger, source, files, applied)
+		return runUp(ctx, pool, logger, source, files, applied, check)
 	case DirectionDown:
-		return runDown(ctx, pool, logger, source, files, applied)
+		return runDown(ctx, pool, logger, source, files, applied, check)
 	default:
 		return fmt.Errorf("storage: unknown migration direction %d", dir)
 	}
@@ -87,6 +110,7 @@ func runUp(
 	source fs.FS,
 	files []migrationFile,
 	applied map[int64]bool,
+	check func() error,
 ) error {
 	pending := []migrationFile{}
 	for _, f := range files {
@@ -100,7 +124,7 @@ func runUp(
 		return nil
 	}
 	for _, f := range pending {
-		if err := applyMigration(ctx, pool, logger, source, f, true); err != nil {
+		if err := applyMigration(ctx, pool, logger, source, f, true, check); err != nil {
 			return err
 		}
 	}
@@ -114,6 +138,7 @@ func runDown(
 	source fs.FS,
 	files []migrationFile,
 	applied map[int64]bool,
+	check func() error,
 ) error {
 	// Find the highest applied version that has a matching down file, then
 	// roll exactly that one back. Rolling back the whole world from a single
@@ -132,7 +157,7 @@ func runDown(
 		logger.Info("nothing to roll back")
 		return nil
 	}
-	return applyMigration(ctx, pool, logger, source, *latest, false)
+	return applyMigration(ctx, pool, logger, source, *latest, false, check)
 }
 
 func applyMigration(
@@ -142,6 +167,7 @@ func applyMigration(
 	source fs.FS,
 	f migrationFile,
 	up bool,
+	check func() error,
 ) error {
 	body, err := fs.ReadFile(source, f.Filename)
 	if err != nil {
@@ -151,6 +177,9 @@ func applyMigration(
 	// Each migration is its own transaction. If a future migration needs
 	// CREATE INDEX CONCURRENTLY (which cannot run inside a tx) we'll add an
 	// opt-out marker; v0 has no such case.
+	if err := runMigrationCheck(check); err != nil {
+		return err
+	}
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("storage: begin tx for %s: %w", f.Filename, err)
@@ -174,6 +203,9 @@ func applyMigration(
 		return fmt.Errorf("storage: record %s: %w", f.Filename, err)
 	}
 
+	if err := runMigrationCheck(check); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("storage: commit %s: %w", f.Filename, err)
 	}
@@ -187,6 +219,16 @@ func applyMigration(
 		slog.String("name", f.Name),
 		slog.String("direction", direction),
 	)
+	return nil
+}
+
+func runMigrationCheck(check func() error) error {
+	if check == nil {
+		return nil
+	}
+	if err := check(); err != nil {
+		return fmt.Errorf("storage: migration guard: %w", err)
+	}
 	return nil
 }
 

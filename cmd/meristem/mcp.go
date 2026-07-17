@@ -10,6 +10,7 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/cultivaractivation"
 	"github.com/jbmopper/meristem/internal/errorreporting"
@@ -32,7 +33,7 @@ import (
 //
 // Stdout is reserved for JSON-RPC traffic; structured logs go to stderr
 // so launching clients can pipe stdio cleanly.
-func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
+func runMCP(ctx context.Context, logger *slog.Logger, _ []string, build buildguard.StatusProvider) error {
 	secret := os.Getenv("MERISTEM_TOKEN")
 	if secret == "" {
 		return fmt.Errorf("mcp: MERISTEM_TOKEN is required (mint one with `meristem tokens create --source agent`)")
@@ -44,7 +45,7 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 	}
 	defer pool.Close()
 
-	writer := app.NewEventWriter()
+	writer := app.NewGuardedEventWriter(build)
 	approvalSvc := approvals.NewService(pool, writer)
 	// Wire every service the shared mcp.Deps advertises tools for, matching
 	// internal/api/server.go. Historically this stdio launcher drifted behind
@@ -52,9 +53,11 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 	// proposal/connector/projection tools were advertised but answered
 	// "…not configured" over stdio.
 	deps := mcp.Deps{
-		Auth:                auth.NewService(pool, writer),
-		Access:              access.NewService(pool),
-		Idempotency:         idempotency.NewMiddleware(pool, writer),
+		Auth:   auth.NewService(pool, writer),
+		Access: access.NewService(pool),
+		Idempotency: idempotency.NewMiddlewareWithGuard(pool, writer, func() error {
+			return buildguard.RequireNonBlocking(build)
+		}),
 		Inbox:               inbox.NewService(pool, writer),
 		OAuthClientAdmin:    oauth.NewClientAdminService(pool, writer),
 		WorkItems:           workitems.NewService(pool, writer),
@@ -70,7 +73,7 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 		MaxFeedWait:         active.Policy.MaxFeedWait,
 	}
 
-	server := mcp.New(deps, mcp.ServerInfo{Name: "meristem", Version: version}, logger)
+	server := mcp.New(deps, mcp.ServerInfo{Name: "meristem", Version: version, BuildStatus: build}, logger)
 	if os.Getenv("MERISTEM_MCP_TOOL_NAMES") == string(mcp.ToolNameModeCursor) {
 		server.SetToolNameMode(mcp.ToolNameModeCursor)
 	}
@@ -78,9 +81,11 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string) error {
 		return fmt.Errorf("mcp: authenticate MERISTEM_TOKEN: %w", err)
 	}
 
+	buildStatus := build.Status()
 	logger.Info("mcp server ready",
 		slog.String("transport", "stdio"),
-		slog.String("version", version),
+		slog.String("version", buildStatus.Version()),
+		slog.String("build_state", string(buildStatus.State)),
 	)
 
 	return server.Run(ctx, os.Stdin, os.Stdout)

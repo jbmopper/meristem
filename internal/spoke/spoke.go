@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,22 +27,51 @@ const maxResponseBody = 1 << 20
 // Poller runs the spoke's outbound loop: drain the command queue, then advance
 // the hub-feed cursor. Construct it with New and drive one iteration with Tick.
 type Poller struct {
-	cfg    Config
-	client *http.Client
-	cursor CursorStore
-	logger *slog.Logger
+	cfg          Config
+	client       *http.Client
+	cursor       CursorStore
+	logger       *slog.Logger
+	checkRequest func() error
 }
 
 // New constructs a Poller. A nil client uses http.DefaultClient; a nil logger
 // uses slog.Default.
 func New(cfg Config, client *http.Client, cursor CursorStore, logger *slog.Logger) *Poller {
+	return NewWithCheck(cfg, client, cursor, logger, nil)
+}
+
+// NewWithCheck constructs a Poller that dynamically checks whether outbound
+// and local side effects are still allowed immediately before every request.
+// The injected check is intentionally transport-agnostic; command runtimes use
+// it for the reviewed-build guard while tests can model a mid-batch change.
+func NewWithCheck(cfg Config, client *http.Client, cursor CursorStore, logger *slog.Logger, checkRequest func() error) *Poller {
 	if client == nil {
 		client = http.DefaultClient
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Poller{cfg: cfg, client: client, cursor: cursor, logger: logger}
+	return &Poller{cfg: cfg, client: client, cursor: cursor, logger: logger, checkRequest: checkRequest}
+}
+
+type requestCheckError struct{ err error }
+
+func (e *requestCheckError) Error() string { return e.err.Error() }
+func (e *requestCheckError) Unwrap() error { return e.err }
+
+func (p *Poller) requireRequest() error {
+	if p.checkRequest == nil {
+		return nil
+	}
+	if err := p.checkRequest(); err != nil {
+		return &requestCheckError{err: err}
+	}
+	return nil
+}
+
+func isRequestCheckError(err error) bool {
+	var target *requestCheckError
+	return errors.As(err, &target)
 }
 
 // TickResult reports what one Tick did, for logging and tests.
@@ -75,9 +105,20 @@ type TickResult struct {
 // (local execution transport errors, cursor persistence) are logged and the
 // tick continues; the affected command simply stays pending.
 func (p *Poller) Tick(ctx context.Context) TickResult {
+	res, _ := p.TickChecked(ctx)
+	return res
+}
+
+// TickChecked runs one iteration and returns an injected request-check failure
+// without treating it as an ordinary partition. Network and peer failures keep
+// the historical Tick behavior: they are logged and the tick remains a no-op.
+func (p *Poller) TickChecked(ctx context.Context) (TickResult, error) {
 	res := TickResult{HubReachable: true}
 
 	if err := p.drain(ctx, &res); err != nil {
+		if isRequestCheckError(err) {
+			return res, err
+		}
 		res.HubReachable = false
 		p.logger.Warn("spoke drain skipped: hub unreachable, will retry next tick",
 			slog.String("node_id", p.cfg.NodeID),
@@ -86,6 +127,9 @@ func (p *Poller) Tick(ctx context.Context) TickResult {
 	}
 
 	if err := p.pollFeed(ctx, &res); err != nil {
+		if isRequestCheckError(err) {
+			return res, err
+		}
 		res.HubReachable = false
 		p.logger.Warn("spoke feed poll skipped: hub unreachable, will retry next tick",
 			slog.String("node_id", p.cfg.NodeID),
@@ -104,7 +148,7 @@ func (p *Poller) Tick(ctx context.Context) TickResult {
 		slog.Int("new_feed_events", res.NewFeedEvents),
 		slog.Bool("hub_reachable", res.HubReachable),
 	)
-	return res
+	return res, nil
 }
 
 // drain fetches this node's pending commands from the hub, executes each against
@@ -140,6 +184,9 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 			// fails we simply leave it pending; the 24h/5-attempt patience
 			// reconciler is the backstop.
 			if err := p.ackHub(ctx, cmd.EventID, http.StatusBadRequest, crossnode.CommandRefused); err != nil {
+				if isRequestCheckError(err) {
+					return err
+				}
 				p.logger.Warn("spoke refusal ack failed, will re-ack next tick",
 					slog.String("node_id", p.cfg.NodeID),
 					slog.String("event_id", cmd.EventID.String()),
@@ -152,6 +199,9 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 			continue
 		}
 		if err := p.recordAttempt(ctx, cmd); err != nil {
+			if isRequestCheckError(err) {
+				return err
+			}
 			p.logger.Warn("spoke attempt refused, skipping local execution",
 				slog.String("node_id", p.cfg.NodeID),
 				slog.String("event_id", cmd.EventID.String()),
@@ -162,6 +212,9 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 		res.AttemptsRecorded++
 		status, err := p.executeLocal(ctx, cmd)
 		if err != nil {
+			if isRequestCheckError(err) {
+				return err
+			}
 			// A local transport failure is not a structural outcome: we cannot
 			// say the command ran, so we do not ack. The row stays pending and
 			// the next tick retries under the same original idempotency key.
@@ -188,6 +241,9 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 			outcome = crossnode.CommandDone
 		}
 		if err := p.ackHub(ctx, cmd.EventID, status, outcome); err != nil {
+			if isRequestCheckError(err) {
+				return err
+			}
 			p.logger.Warn("spoke ack failed, will re-ack next tick",
 				slog.String("node_id", p.cfg.NodeID),
 				slog.String("event_id", cmd.EventID.String()),
@@ -218,6 +274,9 @@ func (p *Poller) recordAttempt(ctx context.Context, cmd crossnode.QueuedCommand)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
 	req.Header.Set("Idempotency-Key", "attempt:"+attemptKey)
+	if err := p.requireRequest(); err != nil {
+		return err
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return err
@@ -244,6 +303,9 @@ func (p *Poller) fetchPending(ctx context.Context) ([]crossnode.QueuedCommand, e
 	}
 	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
 
+	if err := p.requireRequest(); err != nil {
+		return nil, err
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -293,6 +355,9 @@ func (p *Poller) executeLocal(ctx context.Context, cmd crossnode.QueuedCommand) 
 		req.Header.Set(crossnode.HeaderCausingWorkItem, cmd.CausingWorkItemID.String())
 	}
 
+	if err := p.requireRequest(); err != nil {
+		return 0, err
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return 0, err
@@ -327,6 +392,9 @@ func (p *Poller) ackHub(ctx context.Context, eventID uuid.UUID, status int, outc
 	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
 	req.Header.Set("Idempotency-Key", "ack:"+eventID.String())
 
+	if err := p.requireRequest(); err != nil {
+		return err
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return err
@@ -345,6 +413,9 @@ func (p *Poller) ackHub(ctx context.Context, eventID uuid.UUID, status int, outc
 func (p *Poller) pollFeed(ctx context.Context, res *TickResult) error {
 	cursor := ""
 	if p.cursor != nil {
+		if err := p.requireRequest(); err != nil {
+			return err
+		}
 		loaded, err := p.cursor.Load(ctx)
 		if err != nil {
 			// A cursor load fault is local, not a partition. Log and fall back
@@ -373,6 +444,9 @@ func (p *Poller) pollFeed(ctx context.Context, res *TickResult) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
 
+	if err := p.requireRequest(); err != nil {
+		return err
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return err
@@ -392,7 +466,16 @@ func (p *Poller) pollFeed(ctx context.Context, res *TickResult) error {
 	res.NewFeedEvents = len(page.Items)
 
 	if page.NextCursor != "" && p.cursor != nil {
+		if err := p.requireRequest(); err != nil {
+			return err
+		}
 		if err := p.cursor.Save(ctx, page.NextCursor); err != nil {
+			// A guarded cursor writer can observe the pin changing in the
+			// narrow interval after requireRequest. Recheck so that failure is
+			// returned to the runtime instead of downgraded to a retry warning.
+			if checkErr := p.requireRequest(); checkErr != nil {
+				return checkErr
+			}
 			p.logger.Warn("spoke cursor save failed, next tick may re-observe events",
 				slog.String("node_id", p.cfg.NodeID),
 				slog.String("error", err.Error()),
@@ -413,8 +496,8 @@ func (p *Poller) hubURL(path string) string {
 }
 
 // RunLoop drives Tick every interval until ctx is cancelled, running one tick
-// immediately. It returns ctx.Err() on cancellation; individual ticks never
-// abort the loop (partition tolerance).
+// immediately. It returns ctx.Err() on cancellation. Ordinary tick failures
+// remain partition-tolerant; an injected request-check failure stops the loop.
 func RunLoop(ctx context.Context, p *Poller, interval time.Duration) error {
 	if interval <= 0 {
 		return fmt.Errorf("spoke: interval must be positive, got %s", interval)
@@ -426,7 +509,9 @@ func RunLoop(ctx context.Context, p *Poller, interval time.Duration) error {
 		default:
 		}
 
-		p.Tick(ctx)
+		if _, err := p.TickChecked(ctx); err != nil {
+			return err
+		}
 
 		timer := time.NewTimer(interval)
 		select {

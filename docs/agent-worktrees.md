@@ -65,31 +65,34 @@ scripts/prepare-agent-worktree.sh --target cerberus-healer-98853a93
 server and every generated agent MCP wrapper (Claude, Codex, Cursor, Cerberus);
 one rebuild covers all of them (work item a9374bdd). The one-command path is
 `scripts/rebuild-meristem-bin.sh`: it fetches `origin/v1`, refuses a dirty tree
-or a HEAD that is not the fetched `v1` tip (`--force` overrides), builds the
-artifact, and on macOS ad-hoc code-signs it (`codesign -s - --force`). Note an
+or a HEAD that is not the fetched `v1` tip, embeds the exact commit, publishes
+the reviewed-v1 sibling pin, and on macOS ad-hoc code-signs the artifact
+(`codesign -s - --force`). `--force` can only write an explicit alternate
+artifact whose pin keeps it non-authoritative. Note an
 ad-hoc identity is hash-based and changes per rebuild, so expect the Application
 Firewall to still re-prompt for the API listener after a rebuild; a stable real
 signing identity is the durable fix. Running sessions keep their old process
-until restarted.
+until restarted. After the one-time guarded-runtime activation, they refuse
+authoritative work after observing the new pin; pre-guard sessions cannot do so
+and must be drained/stopped before the first guarded publish under work item
+`835e0dbf`.
 
-Use the manual throwaway-worktree procedure below when you need to build from a
-ref other than the current checkout's HEAD. Only rebuild
-`.meristem/generated/meristem-bin` from a clean worktree at the intended ref.
+Use the throwaway-worktree procedure below when the primary checkout is busy.
+The shared artifact still comes only from the fetched `v1` tip; arbitrary refs
+must use `--force` with a separate output and intentionally fail the runtime
+guard.
 
 ```bash
 build_tree=/tmp/meristem-bin-build
-git worktree add --detach "$build_tree" v1
+git worktree add --detach "$build_tree" origin/v1
 git -C "$build_tree" status --short
-git -C "$build_tree" diff --quiet
-git -C "$build_tree" diff --cached --quiet
-GOCACHE=/tmp/meristem-go-cache go build \
-  -C "$build_tree" \
-  -o /Users/juliusmopper/Dev/meristem/.meristem/generated/meristem-bin \
-  ./cmd/meristem
+MERISTEM_BIN_OUT=/Users/juliusmopper/Dev/meristem/.meristem/generated/meristem-bin \
+  "$build_tree/scripts/rebuild-meristem-bin.sh"
 git worktree remove "$build_tree"
 ```
 
-If you need a branch or exact commit, replace `v1` with that ref and verify
-`git -C "$build_tree" rev-parse --short HEAD` before building. Do not rebuild
-the shared binary from a dirty agent worktree or from whichever branch happens
-to be checked out in the primary checkout.
+If you need a branch or exact commit for local testing, use `--force` with an
+explicit alternate `MERISTEM_BIN_OUT`; it intentionally fails the reviewed-pin
+guard and cannot replace the shared binary. Do not rebuild the shared binary
+from a dirty agent worktree or from whichever branch happens to be checked out
+in the primary checkout.

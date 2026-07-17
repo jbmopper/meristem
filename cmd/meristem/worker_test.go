@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/worker"
 )
@@ -118,6 +120,20 @@ func TestRunWorkerLoopContinuesAfterScanError(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("scan calls = %d, want 2", got)
+	}
+}
+
+func TestRunWorkerLoopExitsOnBuildGuardBlock(t *testing.T) {
+	var calls atomic.Int32
+	err := runWorkerLoop(context.Background(), discardLogger(), time.Hour, func(context.Context) (worker.Result, domain.Token, error) {
+		calls.Add(1)
+		return worker.Result{}, systemTestToken(), fmt.Errorf("worker scan: %w", buildguard.ErrBlocked)
+	})
+	if !errors.Is(err, buildguard.ErrBlocked) {
+		t.Fatalf("runWorkerLoop error = %v, want buildguard.ErrBlocked", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("scan calls = %d, want 1", got)
 	}
 }
 

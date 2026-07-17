@@ -3,12 +3,47 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
 )
+
+func TestWriterPreAppendFailureStopsBeforeDatabaseAccess(t *testing.T) {
+	want := errors.New("reviewed build pin diverged")
+	w := NewWriterWithPreAppend(nil, func() error { return want })
+
+	id, fresh, err := w.Append(context.Background(), nil, mkSpec(map[string]any{"title": "blocked"}))
+	if err == nil || !strings.Contains(err.Error(), want.Error()) {
+		t.Fatalf("Append error = %v, want wrapped %q", err, want)
+	}
+	if id != uuid.Nil || fresh {
+		t.Fatalf("Append result = (%s, %t), want zero/false", id, fresh)
+	}
+}
+
+func TestWriterPreAppendRechecksAtInsertSeam(t *testing.T) {
+	want := errors.New("reviewed build pin advanced during payload preparation")
+	calls := 0
+	w := NewWriterWithPreAppend(nil, func() error {
+		calls++
+		if calls == 2 {
+			return want
+		}
+		return nil
+	})
+
+	id, fresh, err := w.Append(context.Background(), nil, mkSpec(map[string]any{"title": "blocked at insert"}))
+	if err == nil || !strings.Contains(err.Error(), want.Error()) {
+		t.Fatalf("Append error = %v, want second pre-append refusal", err)
+	}
+	if calls != 2 || id != uuid.Nil || fresh {
+		t.Fatalf("Append result = calls:%d id:%s fresh:%t, want 2/zero/false", calls, id, fresh)
+	}
+}
 
 var fixedSubject = uuid.MustParse("11111111-1111-1111-1111-111111111111")
 

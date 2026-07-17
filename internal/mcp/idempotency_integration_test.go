@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -11,12 +12,131 @@ import (
 
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
+
+func currentMCPBuildStatus() buildguard.Status {
+	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	return buildguard.Status{
+		State:            buildguard.StateCurrent,
+		CompiledCommit:   commit,
+		ExpectedCommit:   commit,
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "compiled commit matches the reviewed v1 pin",
+	}
+}
+
+func mismatchedMCPBuildStatus() buildguard.Status {
+	return buildguard.Status{
+		State:            buildguard.StateMismatch,
+		CompiledCommit:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ExpectedCommit:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "compiled commit does not match the reviewed v1 pin",
+	}
+}
+
+func TestMCPAdmittedMutationResponseSurvivesPinAdvance(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	const (
+		compiled = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		advanced = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	status := buildguard.Status{
+		State:            buildguard.StateCurrent,
+		CompiledCommit:   compiled,
+		ExpectedCommit:   compiled,
+		CompiledMetadata: buildguard.CompiledValid,
+		Reason:           "compiled commit matches the reviewed v1 pin",
+	}
+	provider := buildguard.ProviderFunc(func() buildguard.Status { return status })
+	writer := app.NewGuardedEventWriter(provider)
+	actor := createMCPTestActor(t, ctx, pool, writer, "mcp-build-post-dispatch")
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddlewareWithGuard(pool, writer, func() error {
+			return buildguard.RequireNonBlocking(provider)
+		}),
+	}, ServerInfo{Name: "meristem-test", Version: "test", BuildStatus: provider}, nil)
+	s.actor = actor
+	addTestMutationTool(s, Tool{
+		Name:    "test.build_flip",
+		Mutates: true,
+		Handler: func(context.Context, domain.Token, json.RawMessage) (any, error) {
+			status = buildguard.Status{
+				State:            buildguard.StateMismatch,
+				CompiledCommit:   compiled,
+				ExpectedCommit:   advanced,
+				CompiledMetadata: buildguard.CompiledValid,
+				Reason:           "compiled commit does not match the reviewed v1 pin",
+			}
+			return map[string]any{"admitted_payload": true}, nil
+		},
+	})
+
+	isError, text := callToolForTest(t, s, "test.build_flip", map[string]any{"idempotency_key": "flip-in-flight"})
+	if isError || text != `{"admitted_payload":true}` {
+		t.Fatalf("admitted mutation response was stranded: isError=%t text=%q", isError, text)
+	}
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:test.build_flip", "flip-in-flight"); got != 0 {
+		t.Fatalf("advanced pin allowed an idempotency record: got %d rows", got)
+	}
+}
+
+func TestMCPSemanticMutationErrorBecomesBuildPinDuringIdempotencyRecord(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	statusCalls := 0
+	provider := buildguard.ProviderFunc(func() buildguard.Status {
+		statusCalls++
+		// Entry, idempotency boundaries, and the post-handler semantic-error
+		// check are current. The guarded idempotency event append observes the
+		// newly advanced pin.
+		if statusCalls <= 5 {
+			return currentMCPBuildStatus()
+		}
+		return mismatchedMCPBuildStatus()
+	})
+	writer := app.NewGuardedEventWriter(provider)
+	actor := createMCPTestActor(t, ctx, pool, writer, "mcp-build-error")
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddlewareWithGuard(pool, writer, func() error {
+			return buildguard.RequireNonBlocking(provider)
+		}),
+	}, ServerInfo{Name: "meristem-test", Version: "test", BuildStatus: provider}, nil)
+	s.actor = actor
+	addTestMutationTool(s, Tool{
+		Name:    "test.build_error",
+		Mutates: true,
+		Handler: func(context.Context, domain.Token, json.RawMessage) (any, error) {
+			return nil, replayableToolErr(errors.New("must-not-escape"))
+		},
+	})
+
+	isError, text := callToolForTest(t, s, "test.build_error", map[string]any{"idempotency_key": "error-in-flight"})
+	if !isError || !strings.Contains(text, "build_pin") {
+		t.Fatalf("pin change did not replace mutation error: isError=%t text=%q", isError, text)
+	}
+	if strings.Contains(text, "must-not-escape") {
+		t.Fatalf("stale mutation error escaped after pin change: %q", text)
+	}
+	if statusCalls < 6 {
+		t.Fatalf("test did not advance the pin at the idempotency-record boundary: calls=%d", statusCalls)
+	}
+}
 
 func TestMCPMutationInfrastructureErrorIsNotCached(t *testing.T) {
 	ctx := context.Background()

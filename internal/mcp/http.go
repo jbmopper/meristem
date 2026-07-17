@@ -102,6 +102,18 @@ func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, a
 			Error:   rpcErrorf(errCodeInvalidRequest, "method is required"),
 		})
 	}
+	// Build consistency precedes HTTP profile and argument validation. A stale
+	// shared process must report the same fail-closed tools/call result over
+	// HTTP and stdio, including for malformed or profile-disallowed calls, and
+	// it must do so before any handler or idempotency/cache path can run.
+	if msg.Method == "tools/call" {
+		if result, blocked := s.buildToolCallRefusal(); blocked {
+			if msg.isNotification() {
+				return HTTPResponse{Status: http.StatusAccepted}
+			}
+			return s.httpRPCResult(msg, result, nil)
+		}
+	}
 
 	if msg.isNotification() {
 		if msg.Method == "tools/call" {

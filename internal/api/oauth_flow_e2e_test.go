@@ -17,6 +17,7 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/safety"
@@ -65,7 +66,22 @@ func TestOAuthAuthorizeTokenEndToEnd(t *testing.T) {
 	const baseURL = "https://mcp.example.test"
 	t.Setenv(EnvPublicBaseURL, baseURL)
 	t.Setenv(EnvOAuthSystemActorID, system.Token.ID.String())
-	s := NewWithPolicy(pool, discardLogger(), safety.DefaultPolicy())
+	provider := buildguard.ProviderFunc(func() buildguard.Status {
+		var committed bool
+		if err := pool.QueryRow(context.Background(), `
+			SELECT EXISTS(SELECT 1 FROM oauth_access_tokens)
+		`).Scan(&committed); err != nil {
+			// A failed proof of the commit boundary must fail closed. The request
+			// assertions below then surface the unexpected 503 without exposing
+			// any token material.
+			return mismatchedBuildStatus()
+		}
+		if committed {
+			return mismatchedBuildStatus()
+		}
+		return currentBuildStatus()
+	})
+	s := NewWithPolicyAndBuildGuard(pool, discardLogger(), safety.DefaultPolicy(), provider)
 	if s.oauthAuthorization == nil || s.oauthTokens == nil || s.oauthClients == nil {
 		t.Fatal("oauth runtime did not enable with a pinned public base URL and system actor")
 	}
@@ -187,5 +203,8 @@ func TestOAuthAuthorizeTokenEndToEnd(t *testing.T) {
 	}
 	if body.TokenType != "Bearer" || body.Scope != oauth.ScopeMCPRead || body.ExpiresIn <= 0 {
 		t.Fatalf("token metadata: type=%q scope=%q expires_in=%d", body.TokenType, body.Scope, body.ExpiresIn)
+	}
+	if !provider.Status().Blocking() {
+		t.Fatal("test did not advance the build pin after OAuth tokens committed")
 	}
 }
