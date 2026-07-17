@@ -101,7 +101,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromSeq, err := s.feed.ResolveStreamStartForProjection(r.Context(), cursorStr, projectionNameForCursor, projectionVersion)
+	fromSeq, err := s.feed.ResolveStreamStartForIdentity(r.Context(), cursorStr, projectionNameForCursor, projectionVersion, readFilter.FingerprintHash())
 	if err != nil {
 		if !s.allowAuthoritativeReadResponse(w) {
 			return
@@ -112,6 +112,10 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, feed.ErrCursorProjectionMismatch) {
 			writeAPIError(w, http.StatusBadRequest, "cursor_projection_mismatch", "cursor was issued for a different feed projection")
+			return
+		}
+		if errors.Is(err, feed.ErrCursorFilterMismatch) {
+			writeAPIError(w, http.StatusBadRequest, "cursor_filter_mismatch", "cursor was issued under a different filter identity; reconnect without Last-Event-ID")
 			return
 		}
 		writeAPIError(w, http.StatusInternalServerError, "stream_start_failed", "could not resolve stream start position")
@@ -201,7 +205,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 				if s.buildStatus().Blocking() {
 					return
 				}
-				if !writeSSEFrame(w, &items[i], projectionNameForCursor, projectionVersion) {
+				if !writeSSEFrame(w, &items[i], projectionNameForCursor, projectionVersion, readFilter.FingerprintHash()) {
 					return
 				}
 			}
@@ -251,7 +255,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 // already true; the assertion is documentary.
 //
 // Returns false if the write failed (caller should give up the loop).
-func writeSSEFrame(w http.ResponseWriter, item *feed.Item, projectionName string, projectionVersion int) bool {
+func writeSSEFrame(w http.ResponseWriter, item *feed.Item, projectionName string, projectionVersion int, fingerprint string) bool {
 	payload, err := json.Marshal(item)
 	if err != nil {
 		// Marshalling can only realistically fail on a payload with an
@@ -261,8 +265,8 @@ func writeSSEFrame(w http.ResponseWriter, item *feed.Item, projectionName string
 		return true
 	}
 	cursor := feed.EncodeCursor(item.Seq)
-	if projectionName != "" {
-		cursor = feed.EncodeCursorForProjection(item.Seq, projectionName, projectionVersion)
+	if fingerprint != "" || projectionName != "" {
+		cursor = feed.EncodeCursorForIdentity(item.Seq, projectionName, projectionVersion, fingerprint)
 	}
 	if _, err := fmt.Fprintf(w, "id: %s\nevent: feed\ndata: %s\n\n", cursor, payload); err != nil {
 		return false

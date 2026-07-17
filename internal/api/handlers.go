@@ -283,6 +283,10 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "cursor_projection_mismatch", "cursor was issued for a different feed projection")
 			return
 		}
+		if errors.Is(err, feed.ErrCursorFilterMismatch) {
+			writeAPIError(w, http.StatusBadRequest, "cursor_filter_mismatch", "cursor was issued under a different filter identity; obtain a fresh one from a filtered feed response")
+			return
+		}
 		if errors.Is(err, access.ErrDenied) {
 			writeAccessError(w, err, "token cannot read feed")
 			return

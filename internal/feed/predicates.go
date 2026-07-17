@@ -2,6 +2,8 @@ package feed
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -186,6 +188,18 @@ func knownEventKind(kind string) bool {
 	return slices.Contains(IncludedKinds, kind) ||
 		kind == domain.EventWorkItemAssigned ||
 		kind == domain.EventWorkItemAssignmentReleased
+}
+
+// FingerprintHash is the compact channel-identity form of the canonical
+// predicate key: empty when no predicates apply (plain feed), else a
+// truncated SHA-256 of CanonicalPredicateKey. Cursor identity binds it so a
+// resume cannot silently change filters. Same stability contract as the key.
+func (f ReadFilter) FingerprintHash() string {
+	if len(f.Predicates) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(f.CanonicalPredicateKey()))
+	return hex.EncodeToString(sum[:8])
 }
 
 // CanonicalPredicateKey is the deterministic encoding of the normalized

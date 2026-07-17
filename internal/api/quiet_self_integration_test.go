@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -226,7 +227,18 @@ func TestQuietSelfDirectedSignalsSurviveExclusionIntegration(t *testing.T) {
 func TestQuietSelfLongPollAndSSEIgnoreExcludedTrafficIntegration(t *testing.T) {
 	fixture := newAssignedFeedFixture(t)
 	broad := newQuietSelfBroadReader(t, fixture, "quiet-self-stream-broad")
-	cursor := fetchHeadCursor(t, fixture.server.Handler(), broad.Secret)
+	// Bootstrap under the same filter identity the watcher will use: cursor
+	// identity now binds the canonical predicate fingerprint fail-closed.
+	boot := doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?wait=0s&exclude_actor="+fixture.actorB.Token.ID.String(), broad.Secret, "", nil)
+	assertRESTStatus(t, boot, http.StatusOK)
+	var bootPage struct {
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(boot.Body.Bytes(), &bootPage); err != nil || bootPage.NextCursor == "" {
+		t.Fatalf("bootstrap filtered cursor: err=%v body=%s", err, boot.Body.String())
+	}
+	cursor := bootPage.NextCursor
 
 	type result struct {
 		code int

@@ -332,9 +332,10 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 		return Page{}, err
 	}
 
+	filterFingerprint := readFilter.FingerprintHash()
 	var cur cursor
 	if opts.Cursor != "" {
-		decoded, err := decodeCursorForProjection(opts.Cursor, projectionName, projectionVersion)
+		decoded, err := decodeCursorForIdentity(opts.Cursor, projectionName, projectionVersion, filterFingerprint)
 		if err != nil {
 			return Page{}, err
 		}
@@ -358,7 +359,7 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 		if err != nil {
 			return Page{}, err
 		}
-		cur = cursor{seq: head.seq, projection: projectionName, version: projectionVersion}
+		cur = cursor{seq: head.seq, projection: projectionName, version: projectionVersion, filter: filterFingerprint}
 	}
 
 	deadline := time.Now().Add(wait)
@@ -376,7 +377,7 @@ func (s *Service) Page(ctx context.Context, opts ListOptions) (Page, error) {
 		if wait == 0 || !time.Now().Before(deadline) {
 			return Page{
 				Items:      []Item{},
-				NextCursor: encodeCursorFor(cur.seq, projectionName, projectionVersion),
+				NextCursor: encodeCursorFor(cur.seq, projectionName, projectionVersion, filterFingerprint),
 				HasMore:    false,
 				nextSeq:    cur.seq,
 			}, nil
@@ -441,7 +442,15 @@ func EncodeCursor(seq int64) string {
 // projection. It is public for the SSE handler, which stamps event ids outside
 // the feed package.
 func EncodeCursorForProjection(seq int64, projection string, version int) string {
-	return encodeCursorFor(seq, projection, version)
+	return encodeCursorFor(seq, projection, version, "")
+}
+
+// EncodeCursorForIdentity stamps the full channel identity — projection plus
+// canonical predicate fingerprint — into the cursor. The SSE handler uses it
+// for `id:` frames on filtered streams so Last-Event-ID resumes carry the
+// identity they were issued under.
+func EncodeCursorForIdentity(seq int64, projection string, version int, filter string) string {
+	return encodeCursorFor(seq, projection, version, filter)
 }
 
 // ResolveStreamStart decodes cursorStr into the seq the SSE handler will
@@ -459,6 +468,12 @@ func (s *Service) ResolveStreamStart(ctx context.Context, cursorStr string) (int
 }
 
 func (s *Service) ResolveStreamStartForProjection(ctx context.Context, cursorStr string, projectionName string, projectionVersion int) (int64, error) {
+	return s.ResolveStreamStartForIdentity(ctx, cursorStr, projectionName, projectionVersion, "")
+}
+
+// ResolveStreamStartForIdentity is ResolveStreamStartForProjection with the
+// canonical predicate fingerprint included in the identity check.
+func (s *Service) ResolveStreamStartForIdentity(ctx context.Context, cursorStr string, projectionName string, projectionVersion int, filterFingerprint string) (int64, error) {
 	if cursorStr == "" {
 		head, err := s.head(ctx)
 		if err != nil {
@@ -466,7 +481,7 @@ func (s *Service) ResolveStreamStartForProjection(ctx context.Context, cursorStr
 		}
 		return head.seq, nil
 	}
-	decoded, err := decodeCursorForProjection(cursorStr, projectionName, projectionVersion)
+	decoded, err := decodeCursorForIdentity(cursorStr, projectionName, projectionVersion, filterFingerprint)
 	if err != nil {
 		return 0, err
 	}
@@ -592,7 +607,7 @@ func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int, filter 
 	if len(items) == 0 {
 		return Page{
 			Items:      []Item{},
-			NextCursor: encodeCursorFor(nextSeq, cur.projection, cur.version),
+			NextCursor: encodeCursorFor(nextSeq, cur.projection, cur.version, cur.filter),
 			HasMore:    false,
 			nextSeq:    nextSeq,
 		}, nil
@@ -603,7 +618,7 @@ func (s *Service) queryAfter(ctx context.Context, cur cursor, limit int, filter 
 	}
 	return Page{
 		Items:      items,
-		NextCursor: encodeCursorFor(nextSeq, cur.projection, cur.version),
+		NextCursor: encodeCursorFor(nextSeq, cur.projection, cur.version, cur.filter),
 		HasMore:    hasMore,
 		nextSeq:    nextSeq,
 	}, nil
@@ -627,9 +642,9 @@ func scanItem(row itemScanner, includeSeq bool) (Item, error) {
 	return item, nil
 }
 
-func encodeCursorFor(seq int64, projection string, version int) string {
-	if projection == "" {
+func encodeCursorFor(seq int64, projection string, version int, filter string) string {
+	if projection == "" && filter == "" {
 		return encodeCursor(seq)
 	}
-	return encodeProjectionCursor(seq, projection, version)
+	return encodeIdentityCursor(seq, projection, version, filter)
 }

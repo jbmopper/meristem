@@ -25,6 +25,13 @@ var ErrInvalidCursor = errors.New("invalid cursor")
 // cannot silently skip or replay history by mixing feeds.
 var ErrCursorProjectionMismatch = errors.New("cursor projection mismatch")
 
+// ErrCursorFilterMismatch is returned when a cursor issued under one filter
+// identity (the canonical predicate fingerprint) is replayed under another —
+// including a plain cursor replayed against a filtered read or vice versa.
+// Failing closed keeps a resumed stream from silently widening or narrowing;
+// the consumer re-bootstraps under the identity it actually holds.
+var ErrCursorFilterMismatch = errors.New("cursor filter mismatch")
+
 // cursor is the SERVER-SIDE shape of an opaque resume token. Consumers
 // MUST treat the encoded form as a verbatim blob; the encoding is an
 // implementation detail and we reserve the right to change it.
@@ -45,6 +52,7 @@ type cursor struct {
 	seq        int64
 	projection string
 	version    int
+	filter     string
 }
 
 const cursorRawSize = 8
@@ -81,42 +89,58 @@ func decodeCursor(s string) (cursor, error) {
 type projectionCursorEnvelope struct {
 	Version    int    `json:"v"`
 	Seq        int64  `json:"seq"`
-	Projection string `json:"projection"`
-	Definition int    `json:"definition"`
+	Projection string `json:"projection,omitempty"`
+	Definition int    `json:"definition,omitempty"`
+	Filter     string `json:"filter,omitempty"`
 }
 
-func encodeProjectionCursor(seq int64, projection string, version int) string {
+func encodeIdentityCursor(seq int64, projection string, version int, filter string) string {
 	raw, _ := json.Marshal(projectionCursorEnvelope{
 		Version:    1,
 		Seq:        seq,
 		Projection: projection,
 		Definition: version,
+		Filter:     filter,
 	})
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-func decodeCursorForProjection(s string, projection string, version int) (cursor, error) {
-	if projection == "" {
+// decodeCursorForIdentity enforces the full channel identity: (projection
+// name, projection version, canonical predicate fingerprint). Every mismatch
+// direction fails closed, including plain-vs-filtered in both orders.
+func decodeCursorForIdentity(s string, projection string, version int, filter string) (cursor, error) {
+	if projection == "" && filter == "" {
 		decoded, err := decodeCursor(s)
 		if err == nil {
 			return decoded, nil
 		}
 		scoped, scopedErr := decodeProjectionCursor(s)
-		if scopedErr == nil && scoped.projection != "" {
-			return cursor{}, fmt.Errorf("%w: cursor belongs to projection %q", ErrCursorProjectionMismatch, scoped.projection)
+		if scopedErr == nil {
+			if scoped.projection != "" {
+				return cursor{}, fmt.Errorf("%w: cursor belongs to projection %q", ErrCursorProjectionMismatch, scoped.projection)
+			}
+			if scoped.filter != "" {
+				return cursor{}, fmt.Errorf("%w: cursor was issued under a filter identity", ErrCursorFilterMismatch)
+			}
 		}
 		return cursor{}, err
 	}
 	scoped, err := decodeProjectionCursor(s)
 	if err != nil {
 		if _, legacyErr := decodeCursor(s); legacyErr == nil {
-			return cursor{}, fmt.Errorf("%w: unprojected cursor cannot be used with projection %q", ErrCursorProjectionMismatch, projection)
+			if projection != "" {
+				return cursor{}, fmt.Errorf("%w: unprojected cursor cannot be used with projection %q", ErrCursorProjectionMismatch, projection)
+			}
+			return cursor{}, fmt.Errorf("%w: unfiltered cursor cannot resume a filtered read", ErrCursorFilterMismatch)
 		}
 		return cursor{}, err
 	}
 	if scoped.projection != projection || scoped.version != version {
 		return cursor{}, fmt.Errorf("%w: cursor belongs to %s@%d, requested %s@%d",
 			ErrCursorProjectionMismatch, scoped.projection, scoped.version, projection, version)
+	}
+	if scoped.filter != filter {
+		return cursor{}, fmt.Errorf("%w: cursor was issued under a different filter identity", ErrCursorFilterMismatch)
 	}
 	return scoped, nil
 }
@@ -139,8 +163,11 @@ func decodeProjectionCursor(s string) (cursor, error) {
 	if env.Seq < 0 {
 		return cursor{}, fmt.Errorf("%w: negative seq", ErrInvalidCursor)
 	}
-	if env.Projection == "" || env.Definition < 1 {
+	if env.Projection == "" && env.Filter == "" {
+		return cursor{}, fmt.Errorf("%w: missing channel identity", ErrInvalidCursor)
+	}
+	if env.Projection != "" && env.Definition < 1 {
 		return cursor{}, fmt.Errorf("%w: missing projection identity", ErrInvalidCursor)
 	}
-	return cursor{seq: env.Seq, projection: env.Projection, version: env.Definition}, nil
+	return cursor{seq: env.Seq, projection: env.Projection, version: env.Definition, filter: env.Filter}, nil
 }
