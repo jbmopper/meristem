@@ -41,15 +41,20 @@ type QueueTargetStatus struct {
 	//     the deadline; the queue-host attempt gate refuses further
 	//     execution and the row waits for the expiry worker.
 	//   due — the 24h deadline has passed; the row is eligible for the
-	//     expiry worker's next pass. Expiry is an eligibility deadline, not
-	//     a transition timestamp: the terminal expired fact lands when the
-	//     worker processes the row.
-	Pending          int        `json:"pending"`
-	PendingRetryable int        `json:"pending_retryable"`
-	PendingExhausted int        `json:"pending_exhausted"`
-	PendingDue       int        `json:"pending_due"`
-	OldestQueuedAt   *time.Time `json:"oldest_queued_at,omitempty"`
-	NextExpiresAt    *time.Time `json:"next_expires_at,omitempty"`
+	//     expiry worker's next pass.
+	//
+	// Expiry ELIGIBILITY is exhausted OR due (ExpireDue selects
+	// attempt_count >= MaxCommandAttempts OR expires_at <= now): an
+	// exhausted row is eligible immediately, before its deadline.
+	// EarliestDeadlineAt is therefore only the earliest pending 24h
+	// deadline — a fact about patience, never an eligibility or transition
+	// timestamp.
+	Pending            int        `json:"pending"`
+	PendingRetryable   int        `json:"pending_retryable"`
+	PendingExhausted   int        `json:"pending_exhausted"`
+	PendingDue         int        `json:"pending_due"`
+	OldestQueuedAt     *time.Time `json:"oldest_queued_at,omitempty"`
+	EarliestDeadlineAt *time.Time `json:"earliest_deadline_at,omitempty"`
 	// MaxAttempts is the highest attempt_count over pending rows, out of
 	// MaxCommandAttempts; LastAttemptAt is the most recent local execution
 	// attempt over pending rows.
@@ -71,16 +76,19 @@ type QueueTargetStatus struct {
 }
 
 // TerminalOutcome names one terminal fact for a target: which command, how it
-// ended, and when. At is the terminal event's occurred_at as folded into
-// acked_at (both the ack and expiry projectors stamp it); ordering between
-// outcomes uses the terminal event's seq, never wall-clock ties.
+// ended, when, and when it was last locally attempted. At is the terminal
+// event's occurred_at as folded into acked_at (both the ack and expiry
+// projectors stamp it); ordering between outcomes uses the terminal event's
+// seq, never wall-clock ties. LastAttemptAt is the row's final recorded local
+// execution attempt, nil when the command terminated without one.
 type TerminalOutcome struct {
-	CommandQueueID uuid.UUID `json:"command_queue_id"`
-	CommandPath    string    `json:"command_path"`
-	State          string    `json:"state"`
-	Reason         string    `json:"reason,omitempty"`
-	StatusCode     *int      `json:"status_code,omitempty"`
-	At             time.Time `json:"at"`
+	CommandQueueID uuid.UUID  `json:"command_queue_id"`
+	CommandPath    string     `json:"command_path"`
+	State          string     `json:"state"`
+	Reason         string     `json:"reason,omitempty"`
+	StatusCode     *int       `json:"status_code,omitempty"`
+	At             time.Time  `json:"at"`
+	LastAttemptAt  *time.Time `json:"last_attempt_at,omitempty"`
 }
 
 // OutcomeHostStatus is the origin-side view of one queue host: how far the
@@ -141,7 +149,7 @@ func QueueStatus(ctx context.Context, q Querier, now time.Time) ([]QueueTargetSt
 		if err := rows.Scan(
 			&s.TargetNodeID,
 			&s.Pending, &s.PendingRetryable, &s.PendingExhausted, &s.PendingDue,
-			&s.OldestQueuedAt, &s.NextExpiresAt,
+			&s.OldestQueuedAt, &s.EarliestDeadlineAt,
 			&s.MaxAttempts, &s.LastAttemptAt,
 			&s.Done, &s.Refused, &s.Failed, &s.Expired,
 		); err != nil {
@@ -167,7 +175,7 @@ func QueueStatus(ctx context.Context, q Querier, now time.Time) ([]QueueTargetSt
 		for terminal.Next() {
 			var target string
 			var t TerminalOutcome
-			if err := terminal.Scan(&target, &t.CommandQueueID, &t.CommandPath, &t.State, &t.Reason, &t.StatusCode, &t.At); err != nil {
+			if err := terminal.Scan(&target, &t.CommandQueueID, &t.CommandPath, &t.State, &t.Reason, &t.StatusCode, &t.At, &t.LastAttemptAt); err != nil {
 				return err
 			}
 			if i, ok := byTarget[target]; ok {
@@ -179,7 +187,7 @@ func QueueStatus(ctx context.Context, q Querier, now time.Time) ([]QueueTargetSt
 	if err := assign(`
 		SELECT DISTINCT ON (cq.target_node_id)
 		       cq.target_node_id, cq.id, cq.command_path, cq.state,
-		       COALESCE(cq.terminal_reason, ''), cq.outcome_status_code, cq.acked_at
+		       COALESCE(cq.terminal_reason, ''), cq.outcome_status_code, cq.acked_at, cq.last_attempt_at
 		FROM command_queue cq
 		JOIN events e ON e.id = cq.terminal_event_id
 		WHERE cq.state <> 'pending' AND cq.acked_at IS NOT NULL
@@ -190,7 +198,7 @@ func QueueStatus(ctx context.Context, q Querier, now time.Time) ([]QueueTargetSt
 	if err := assign(`
 		SELECT DISTINCT ON (cq.target_node_id)
 		       cq.target_node_id, cq.id, cq.command_path, cq.state,
-		       COALESCE(cq.terminal_reason, ''), cq.outcome_status_code, cq.acked_at
+		       COALESCE(cq.terminal_reason, ''), cq.outcome_status_code, cq.acked_at, cq.last_attempt_at
 		FROM command_queue cq
 		JOIN events e ON e.id = cq.terminal_event_id
 		WHERE cq.state IN ('refused', 'failed', 'expired') AND cq.acked_at IS NOT NULL

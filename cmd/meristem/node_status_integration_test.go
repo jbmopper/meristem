@@ -72,11 +72,31 @@ func TestNodeStatusIntegration(t *testing.T) {
 		return res
 	}
 	failedCmd := enqueue("status-a-failed", "/v1/work-items/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/transition")
+	var failedQueuedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT queued_at FROM command_queue WHERE id = $1`, failedCmd.EventID).Scan(&failedQueuedAt); err != nil {
+		t.Fatalf("read failed queued_at: %v", err)
+	}
+	if _, err := svc.RecordAttempt(ctx, crossnode.RecordAttemptInput{
+		CommandQueueID: failedCmd.EventID,
+		AttemptKey:     "failed-attempt-1",
+		Now:            failedQueuedAt.Add(time.Minute),
+		ActorTokenID:   actor.ID,
+		Source:         actor.Source,
+	}); err != nil {
+		t.Fatalf("attempt on failed-case: %v", err)
+	}
 	if _, err := svc.Ack(ctx, crossnode.AckInput{
 		CommandQueueID: failedCmd.EventID, StatusCode: 502, OK: false,
 		ActorTokenID: &actor.ID, Source: actor.Source,
 	}); err != nil {
 		t.Fatalf("ack failed-case: %v", err)
+	}
+	// The projection stamps last_attempt_at from the attempt event's clock
+	// (never the caller's Now), so the truth to assert the report against is
+	// the folded row itself.
+	var failedAttemptAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT last_attempt_at FROM command_queue WHERE id = $1`, failedCmd.EventID).Scan(&failedAttemptAt); err != nil {
+		t.Fatalf("read failed last_attempt_at: %v", err)
 	}
 	doneCmd := enqueue("status-b-done", "/v1/work-items/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/transition")
 	if _, err := svc.Ack(ctx, crossnode.AckInput{
@@ -144,15 +164,16 @@ func TestNodeStatusIntegration(t *testing.T) {
 	if q.MaxAttempts != 2 || q.Done != 1 || q.Failed != 1 {
 		t.Fatalf("queue tallies = %+v, want attempts=2 done=1 failed=1", q)
 	}
-	if q.OldestQueuedAt == nil || q.LastAttemptAt == nil || q.NextExpiresAt == nil {
+	if q.OldestQueuedAt == nil || q.LastAttemptAt == nil || q.EarliestDeadlineAt == nil {
 		t.Fatalf("queue status missing pending timestamps: %+v", q)
 	}
-	if want := queuedAt.Add(crossnode.CommandQueuePatience); !q.NextExpiresAt.Equal(want) {
-		t.Fatalf("next_expires_at = %s, want queued_at + patience = %s", q.NextExpiresAt, want)
+	if want := queuedAt.Add(crossnode.CommandQueuePatience); !q.EarliestDeadlineAt.Equal(want) {
+		t.Fatalf("earliest_deadline_at = %s, want queued_at + patience = %s", q.EarliestDeadlineAt, want)
 	}
 
 	// The regression codex demanded: B (done) is the last terminal, but A
-	// (failed 502) must remain the last failure.
+	// (failed 502) must remain the last failure — carrying its final
+	// recorded local attempt time.
 	if q.LastTerminal == nil || q.LastTerminal.State != "done" || q.LastTerminal.CommandQueueID != doneCmd.EventID {
 		t.Fatalf("last terminal = %+v, want the later done command", q.LastTerminal)
 	}
@@ -161,13 +182,21 @@ func TestNodeStatusIntegration(t *testing.T) {
 		q.LastFailure.CommandQueueID != failedCmd.EventID {
 		t.Fatalf("last failure = %+v, want the earlier 502-failed command retained past the later done", q.LastFailure)
 	}
+	if q.LastFailure.LastAttemptAt == nil || !q.LastFailure.LastAttemptAt.Equal(failedAttemptAt) {
+		t.Fatalf("last failure attempt time = %v, want the recorded attempt at %s", q.LastFailure.LastAttemptAt, failedAttemptAt)
+	}
 
-	// Attempt exhaustion: at 5/5 the row stops being retryable and waits for
-	// the expiry worker — the report must say so.
+	// Attempt exhaustion: at 5/5 the row stops being retryable and is
+	// expiry-eligible IMMEDIATELY — the report must say exhausted, and the
+	// rendered deadline must stay what it is (the future 24h deadline), never
+	// dressed up as an eligibility instant.
 	recordAttempts(3, 5)
 	q = readReport(nil, now).Queue[0]
 	if q.Pending != 1 || q.PendingRetryable != 0 || q.PendingExhausted != 1 || q.PendingDue != 0 {
 		t.Fatalf("post-exhaustion split = %+v, want one exhausted pending row", q)
+	}
+	if q.EarliestDeadlineAt == nil || !q.EarliestDeadlineAt.Equal(queuedAt.Add(crossnode.CommandQueuePatience)) {
+		t.Fatalf("post-exhaustion deadline = %v, want the unchanged 24h deadline fact", q.EarliestDeadlineAt)
 	}
 
 	// Past the 24h deadline the same row becomes due for the expiry worker's
@@ -178,7 +207,8 @@ func TestNodeStatusIntegration(t *testing.T) {
 	}
 
 	// Text rendering shows the same facts (the pending row is exhausted by
-	// now: attempts 3-5 were recorded above).
+	// now: attempts 3-5 were recorded above). The exhausted regression: the
+	// timestamp renders as a deadline fact, never as an eligibility claim.
 	var textOut bytes.Buffer
 	if err := statusNodes(ctx, pool, &textOut, nil, now); err != nil {
 		t.Fatalf("status: %v", err)
@@ -186,12 +216,17 @@ func TestNodeStatusIntegration(t *testing.T) {
 	for _, want := range []string{
 		"queue via hub https://hub.example",
 		"pending=1 (retryable=0 exhausted=1 due=0)",
+		"deadline=",
 		"last_terminal=done status=201",
 		"last_failure=failed status=502",
+		"last_attempt=" + failedAttemptAt.Format(time.RFC3339),
 	} {
 		if !strings.Contains(textOut.String(), want) {
 			t.Fatalf("text status missing %q:\n%s", want, textOut.String())
 		}
+	}
+	if strings.Contains(textOut.String(), "expiry_eligible") {
+		t.Fatalf("text status still claims expiry eligibility for an exhausted row:\n%s", textOut.String())
 	}
 
 	// --target for an unknown node surfaces the selection refusal.

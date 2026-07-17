@@ -105,6 +105,7 @@ func TestRenderNodeStatusShowsFailureAndRetryFacts(t *testing.T) {
 	now := time.Date(2026, 7, 17, 1, 2, 3, 0, time.UTC)
 	oldest := now.Add(-90 * time.Minute)
 	lastAttempt := now.Add(-5 * time.Minute)
+	failureAttempt := now.Add(-65 * time.Minute)
 	expires := now.Add(22 * time.Hour)
 	failCode := 502
 	doneCode := 201
@@ -116,17 +117,17 @@ func TestRenderNodeStatusShowsFailureAndRetryFacts(t *testing.T) {
 			{TargetNodeID: "island", Status: "active", Error: crossnode.ErrNoRoute.Error()},
 		},
 		Queue: []crossnode.QueueTargetStatus{{
-			TargetNodeID:     "m4",
-			Pending:          3,
-			PendingRetryable: 1,
-			PendingExhausted: 1,
-			PendingDue:       1,
-			OldestQueuedAt:   &oldest,
-			NextExpiresAt:    &expires,
-			MaxAttempts:      5,
-			LastAttemptAt:    &lastAttempt,
-			Done:             4,
-			Failed:           1,
+			TargetNodeID:       "m4",
+			Pending:            3,
+			PendingRetryable:   1,
+			PendingExhausted:   1,
+			PendingDue:         1,
+			OldestQueuedAt:     &oldest,
+			EarliestDeadlineAt: &expires,
+			MaxAttempts:        5,
+			LastAttemptAt:      &lastAttempt,
+			Done:               4,
+			Failed:             1,
 			LastTerminal: &crossnode.TerminalOutcome{
 				CommandPath: "/v1/work-items/y/transition",
 				State:       "done",
@@ -134,10 +135,11 @@ func TestRenderNodeStatusShowsFailureAndRetryFacts(t *testing.T) {
 				At:          now.Add(-30 * time.Minute),
 			},
 			LastFailure: &crossnode.TerminalOutcome{
-				CommandPath: "/v1/work-items/x/transition",
-				State:       "failed",
-				StatusCode:  &failCode,
-				At:          now.Add(-time.Hour),
+				CommandPath:   "/v1/work-items/x/transition",
+				State:         "failed",
+				StatusCode:    &failCode,
+				At:            now.Add(-time.Hour),
+				LastAttemptAt: &failureAttempt,
 			},
 		}},
 		Outcomes: []crossnode.OutcomeHostStatus{{
@@ -161,10 +163,14 @@ func TestRenderNodeStatusShowsFailureAndRetryFacts(t *testing.T) {
 		"attempts=5/5",
 		"oldest=" + oldest.Format(time.RFC3339),
 		"last_attempt=" + lastAttempt.Format(time.RFC3339),
-		"expiry_eligible=" + expires.Format(time.RFC3339),
+		"deadline=" + expires.Format(time.RFC3339),
 		"last_terminal=done status=201",
+		// The last terminal has no recorded attempt; it must say so rather
+		// than omit the field.
+		"last_attempt=- path=/v1/work-items/y/transition",
 		"last_failure=failed status=502",
-		"path=/v1/work-items/x/transition",
+		// The last failure carries its own final attempt time (P2, round 2).
+		"last_attempt=" + failureAttempt.Format(time.RFC3339) + " path=/v1/work-items/x/transition",
 		"cursor_seq=41",
 		"last=expired target=m4",
 		"hub_feed_cursor\t17",

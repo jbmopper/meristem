@@ -17,10 +17,11 @@
 //
 // Retry semantics, stated exactly: a pending command retries on the target's
 // next drain tick only while attempts remain (of 5) and its 24h deadline has
-// not passed. At 5/5 attempts the queue host refuses further execution and
-// the row waits for the expiry worker; past its deadline the row is due for
-// expiry on the worker's next pass. expires_at is an eligibility deadline,
-// not the transition timestamp.
+// not passed. Expiry ELIGIBILITY is exhausted-or-due — the worker selects
+// attempt_count >= 5 OR past-deadline rows — so an exhausted row is eligible
+// immediately, before its deadline. The rendered deadline is therefore only
+// the earliest pending 24h deadline, never an eligibility or transition
+// timestamp.
 package main
 
 import (
@@ -221,8 +222,8 @@ func renderNodeStatus(w io.Writer, r nodeStatusReport) {
 			if q.LastAttemptAt != nil {
 				fmt.Fprintf(w, "\tlast_attempt=%s", q.LastAttemptAt.Format(time.RFC3339))
 			}
-			if q.NextExpiresAt != nil {
-				fmt.Fprintf(w, "\texpiry_eligible=%s", q.NextExpiresAt.Format(time.RFC3339))
+			if q.EarliestDeadlineAt != nil {
+				fmt.Fprintf(w, "\tdeadline=%s", q.EarliestDeadlineAt.Format(time.RFC3339))
 			}
 		}
 		fmt.Fprintf(w, "\tdone=%d refused=%d failed=%d expired=%d", q.Done, q.Refused, q.Failed, q.Expired)
@@ -271,6 +272,10 @@ func terminalBrief(t *crossnode.TerminalOutcome) string {
 	if reason == "" {
 		reason = "-"
 	}
-	return fmt.Sprintf("%s status=%s reason=%s at=%s path=%s",
-		t.State, code, reason, t.At.Format(time.RFC3339), t.CommandPath)
+	lastAttempt := "-"
+	if t.LastAttemptAt != nil {
+		lastAttempt = t.LastAttemptAt.Format(time.RFC3339)
+	}
+	return fmt.Sprintf("%s status=%s reason=%s at=%s last_attempt=%s path=%s",
+		t.State, code, reason, t.At.Format(time.RFC3339), lastAttempt, t.CommandPath)
 }

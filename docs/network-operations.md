@@ -153,13 +153,15 @@ Reading the output:
   splits into three honest states, evaluated at the report instant:
   `retryable` (attempts remain and the 24h deadline has not passed — the
   command retries on the target's next drain tick), `exhausted` (all 5
-  attempts spent — the queue host refuses further execution and the row waits
-  for the expiry worker), and `due` (past its deadline — eligible for the
-  expiry worker's next pass). `expiry_eligible` is the earliest pending
-  deadline; it is an eligibility instant, not the moment the terminal
-  `expired` fact lands. `last_terminal` names the most recent terminal
-  command in event order; `last_failure` names the most recent
-  refused/failed/expired command even when later commands succeeded.
+  attempts spent — the queue host refuses further execution), and `due`
+  (past its deadline). Expiry *eligibility* is exhausted-or-due: the worker
+  selects `attempt_count >= 5 OR past-deadline`, so an exhausted row is
+  eligible immediately, before its deadline. `deadline` is only the earliest
+  pending 24h deadline — a fact about patience, never an eligibility or
+  transition instant. `last_terminal` names the most recent terminal command
+  in event order; `last_failure` names the most recent refused/failed/expired
+  command even when later commands succeeded — each with its final recorded
+  local attempt time (`last_attempt=-` when it terminated without one).
 - **outcome reconciliation** is the origin-side cursor per queue host plus the
   last terminal fact observed from it — a stalled `cursor_seq` with a running
   reconciler is the signal to check the queue host.
