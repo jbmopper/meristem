@@ -127,6 +127,22 @@ func TestLensContractKindNarrowingKeepsWakeSignalsIntegration(t *testing.T) {
 		t.Fatalf("kind_exclude kept a non-addressed transitioned event: %s", body)
 	}
 
+	// Explicit-addressee protection under kind narrowing: a root-authored
+	// generic event explicitly addressed to A survives kind sets that do not
+	// name work_item.event_appended, in both include and exclude form.
+	if err := fixture.work.AppendEvent(fixture.ctx, fixture.assignedA.ID, "agent.quiet_self_test",
+		map[string]any{"marker": "lens-explicit-addressed", "addressee_token_id": fixture.actorA.Token.ID}, fixture.root.Token); err != nil {
+		t.Fatalf("append explicitly addressed note: %v", err)
+	}
+	body = lensRead(t, fixture, assigned, feed.Predicate{Kind: feed.PredicateKindInclude, EventKinds: []string{domain.EventMessageCaptured}})
+	if !strings.Contains(body, "lens-explicit-addressed") {
+		t.Fatalf("kind_include swallowed an explicitly addressed event: %s", body)
+	}
+	body = lensRead(t, fixture, assigned, feed.Predicate{Kind: feed.PredicateKindExclude, EventKinds: []string{domain.EventWorkItemEventAppended}})
+	if !strings.Contains(body, "lens-explicit-addressed") {
+		t.Fatalf("kind_exclude swallowed an explicitly addressed event: %s", body)
+	}
+
 	// The wake-bridge case: a listener lensed to one author (its allowlist)
 	// must still receive directed signals other actors send it. The
 	// root-authored terminal handback survives an actor lens for A; root's

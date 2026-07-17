@@ -112,6 +112,25 @@ func TestNormalizeReadFilterLensVocabulary(t *testing.T) {
 	}
 }
 
+func TestCanonicalPredicateKeyUnifiesNilAndEmptyEventKinds(t *testing.T) {
+	tokenID := uuid.New()
+	filter, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
+		{Kind: PredicateActor, TokenID: tokenID},
+		{Kind: PredicateActor, TokenID: tokenID, EventKinds: []string{}},
+	}})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(filter.Predicates) != 1 {
+		t.Fatalf("nil/empty EventKinds split dedupe: %+v", filter.Predicates)
+	}
+	a := Predicate{Kind: PredicateActor, TokenID: tokenID}
+	b := Predicate{Kind: PredicateActor, TokenID: tokenID, EventKinds: []string{}}
+	if a.canonicalKey() != b.canonicalKey() {
+		t.Fatalf("nil/empty EventKinds split canonical identity: %q vs %q", a.canonicalKey(), b.canonicalKey())
+	}
+}
+
 func TestCanonicalPredicateKeyIsOrderAndDuplicateInsensitive(t *testing.T) {
 	tokenID := uuid.New()
 	itemID := uuid.New()

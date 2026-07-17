@@ -81,7 +81,12 @@ type Predicate struct {
 func (p Predicate) canonicalKey() string {
 	// JSON encoding is unambiguous under arbitrary kind strings — delimiter
 	// characters inside EventKinds entries cannot collide across sets.
-	raw, err := json.Marshal([]any{string(p.Kind), p.TokenID.String(), p.WorkItemID.String(), p.EventKinds})
+	kinds := p.EventKinds
+	if len(kinds) == 0 {
+		// nil and empty are one identity; encode both as [].
+		kinds = []string{}
+	}
+	raw, err := json.Marshal([]any{string(p.Kind), p.TokenID.String(), p.WorkItemID.String(), kinds})
 	if err != nil {
 		// Marshaling strings cannot fail; keep the contract total anyway.
 		return string(p.Kind) + "|" + p.TokenID.String() + "|" + p.WorkItemID.String()
@@ -136,6 +141,9 @@ func normalizePredicate(p Predicate) (Predicate, error) {
 		if p.WorkItemID != uuid.Nil || len(p.EventKinds) != 0 {
 			return Predicate{}, fmt.Errorf("%w: %s accepts only token identity", ErrInvalidPredicate, p.Kind)
 		}
+		// A non-nil empty slice is semantically identical to nil; collapse it
+		// so canonical identity and dedupe cannot split on representation.
+		p.EventKinds = nil
 	case PredicateWorkItem, PredicateWorkItemTree:
 		if p.WorkItemID == uuid.Nil {
 			return Predicate{}, fmt.Errorf("%w: %s requires work item identity", ErrInvalidPredicate, p.Kind)
@@ -143,6 +151,7 @@ func normalizePredicate(p Predicate) (Predicate, error) {
 		if p.TokenID != uuid.Nil || len(p.EventKinds) != 0 {
 			return Predicate{}, fmt.Errorf("%w: %s accepts only work item identity", ErrInvalidPredicate, p.Kind)
 		}
+		p.EventKinds = nil
 	case PredicateKindInclude, PredicateKindExclude:
 		if p.TokenID != uuid.Nil || p.WorkItemID != uuid.Nil {
 			return Predicate{}, fmt.Errorf("%w: %s accepts only event kinds", ErrInvalidPredicate, p.Kind)
