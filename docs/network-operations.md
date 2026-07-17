@@ -143,15 +143,23 @@ Reading the output:
   from the live registry snapshot: `direct <url>` first, then
   `queue via <host> <url>` in relay order. `no plan:` names why a target is
   unreachable (unknown, disabled, or no direct URL and no active queue host).
-  Sender route cooldowns are process-local hints inside a delivering process
-  and are deliberately not shown.
-- **queue** is this node's durable `command_queue` per target: `pending`
-  depth, `attempts=<used>/5`, the oldest queued command, the last local
-  execution attempt, and `expires_next` — the moment the earliest pending row
-  turns terminal if it has not drained. A pending command's next retry is the
-  target's next drain tick (the spoke's poll interval) or that expiry,
-  whichever comes first. `last_terminal` names the most recent terminal
-  command: its state, structural status code, reason, time, and path.
+  An origin retained by legacy replay that current validation rejects renders
+  as `invalid-origin(redacted)` — it is not a usable route. Sender route
+  cooldowns are process-local hints inside a delivering process and are
+  deliberately not shown. The whole report is read in one repeatable-read
+  READ ONLY transaction: sections cannot contradict each other, and the
+  database refuses any write from this path.
+- **queue** is this node's durable `command_queue` per target. `pending`
+  splits into three honest states, evaluated at the report instant:
+  `retryable` (attempts remain and the 24h deadline has not passed — the
+  command retries on the target's next drain tick), `exhausted` (all 5
+  attempts spent — the queue host refuses further execution and the row waits
+  for the expiry worker), and `due` (past its deadline — eligible for the
+  expiry worker's next pass). `expiry_eligible` is the earliest pending
+  deadline; it is an eligibility instant, not the moment the terminal
+  `expired` fact lands. `last_terminal` names the most recent terminal
+  command in event order; `last_failure` names the most recent
+  refused/failed/expired command even when later commands succeeded.
 - **outcome reconciliation** is the origin-side cursor per queue host plus the
   last terminal fact observed from it — a stalled `cursor_seq` with a running
   reconciler is the signal to check the queue host.
@@ -175,9 +183,12 @@ poll intervals requires checking, in order:
 2. outbound DNS, certificate validation, and connectivity to the hub;
 3. hub-token validity;
 4. local API readiness and local-token validity;
-5. acknowledgement errors after a successful local response
-   (`node status` shows them as `last_terminal=failed` with the structural
-   status code).
+5. acknowledgement errors after a successful local response — an ack that
+   fails in transport leaves the row `pending` with `attempts` advancing and
+   no terminal fact; the next tick replays the cached local response and
+   retries the ack. (`last_terminal=failed` means something different: a
+   completed local execution that the spoke reported as failed, with its
+   structural status code.)
 
 Do not manually mutate `command_queue`. Retry by restoring connectivity and
 letting the spoke reuse the queued command's original idempotency key. The

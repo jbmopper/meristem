@@ -53,15 +53,61 @@ func TestBuildRoutePlansMirrorsSelect(t *testing.T) {
 	}
 }
 
+// A legacy-replayed origin that current validation rejects (userinfo here)
+// must never be printed or presented as a usable route.
+func TestBuildRoutePlansRedactsInvalidLegacyOrigins(t *testing.T) {
+	now := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	registry := []domain.Node{
+		{NodeID: "legacy", DirectURL: strptr("https://user:secret@legacy.example"), Status: domain.NodeStatusActive},
+	}
+	plans := buildRoutePlans(registry, now)
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want 1", len(plans))
+	}
+	got := strings.Join(plans[0].Plan, "; ")
+	if strings.Contains(got, "secret") || strings.Contains(got, "user:") {
+		t.Fatalf("plan leaked legacy userinfo: %q", got)
+	}
+	if !strings.Contains(got, redactedOrigin) {
+		t.Fatalf("plan = %q, want %q for an invalid legacy origin", got, redactedOrigin)
+	}
+}
+
+// --target for a node the registry does not know must surface the selection
+// rule's unknown-target refusal, never an empty (or "no nodes") screen.
+func TestFilterRoutesSurfacesUnknownTarget(t *testing.T) {
+	now := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	registry := []domain.Node{
+		{NodeID: "hub", DirectURL: strptr("https://hub.example"), Status: domain.NodeStatusActive},
+	}
+	plans := buildRoutePlans(registry, now)
+
+	got := filterRoutes(plans, registry, "ghost", now)
+	if len(got) != 1 || got[0].TargetNodeID != "ghost" {
+		t.Fatalf("filterRoutes(ghost) = %v, want one ghost report", got)
+	}
+	if got[0].Error != crossnode.ErrUnknownTarget.Error() {
+		t.Fatalf("ghost error = %q, want Select's unknown-target refusal", got[0].Error)
+	}
+
+	kept := filterRoutes(plans, registry, "hub", now)
+	if len(kept) != 1 || kept[0].TargetNodeID != "hub" || kept[0].Error != "" {
+		t.Fatalf("filterRoutes(hub) = %v, want the existing hub plan", kept)
+	}
+}
+
 // The text rendering must carry every diagnostic the operator needs on one
-// screen: route plan, pending depth with attempt budget and expiry, last
-// terminal outcome, reconciler cursor, and spoke bookmark.
+// screen: route plan, the pending retryable/exhausted/due split with attempt
+// budget and expiry eligibility, the last terminal outcome AND the last
+// failure (a later success must not hide it), reconciler cursor, and spoke
+// bookmark.
 func TestRenderNodeStatusShowsFailureAndRetryFacts(t *testing.T) {
 	now := time.Date(2026, 7, 17, 1, 2, 3, 0, time.UTC)
 	oldest := now.Add(-90 * time.Minute)
 	lastAttempt := now.Add(-5 * time.Minute)
 	expires := now.Add(22 * time.Hour)
-	code := 502
+	failCode := 502
+	doneCode := 201
 
 	report := nodeStatusReport{
 		GeneratedAt: now,
@@ -70,18 +116,27 @@ func TestRenderNodeStatusShowsFailureAndRetryFacts(t *testing.T) {
 			{TargetNodeID: "island", Status: "active", Error: crossnode.ErrNoRoute.Error()},
 		},
 		Queue: []crossnode.QueueTargetStatus{{
-			TargetNodeID:   "m4",
-			Pending:        2,
-			OldestQueuedAt: &oldest,
-			NextExpiresAt:  &expires,
-			MaxAttempts:    3,
-			LastAttemptAt:  &lastAttempt,
-			Done:           4,
-			Failed:         1,
+			TargetNodeID:     "m4",
+			Pending:          3,
+			PendingRetryable: 1,
+			PendingExhausted: 1,
+			PendingDue:       1,
+			OldestQueuedAt:   &oldest,
+			NextExpiresAt:    &expires,
+			MaxAttempts:      5,
+			LastAttemptAt:    &lastAttempt,
+			Done:             4,
+			Failed:           1,
 			LastTerminal: &crossnode.TerminalOutcome{
+				CommandPath: "/v1/work-items/y/transition",
+				State:       "done",
+				StatusCode:  &doneCode,
+				At:          now.Add(-30 * time.Minute),
+			},
+			LastFailure: &crossnode.TerminalOutcome{
 				CommandPath: "/v1/work-items/x/transition",
 				State:       "failed",
-				StatusCode:  &code,
+				StatusCode:  &failCode,
 				At:          now.Add(-time.Hour),
 			},
 		}},
@@ -102,12 +157,13 @@ func TestRenderNodeStatusShowsFailureAndRetryFacts(t *testing.T) {
 	for _, want := range []string{
 		"queue via hub https://hub.example",
 		"no plan: " + crossnode.ErrNoRoute.Error(),
-		"pending=2",
-		"attempts=3/5",
+		"pending=3 (retryable=1 exhausted=1 due=1)",
+		"attempts=5/5",
 		"oldest=" + oldest.Format(time.RFC3339),
 		"last_attempt=" + lastAttempt.Format(time.RFC3339),
-		"expires_next=" + expires.Format(time.RFC3339),
-		"last_terminal=failed status=502",
+		"expiry_eligible=" + expires.Format(time.RFC3339),
+		"last_terminal=done status=201",
+		"last_failure=failed status=502",
 		"path=/v1/work-items/x/transition",
 		"cursor_seq=41",
 		"last=expired target=m4",

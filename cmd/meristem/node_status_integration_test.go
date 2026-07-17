@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -23,9 +24,10 @@ import (
 )
 
 // `node status` must answer the parent item's check #4 end to end: route
-// plan, queue state, last failure, and next retry/expiry, read back from the
-// same event-backed projections the delivery path writes — no psql, no
-// mutation, no network.
+// plan, queue state in its honest retry split, last failure retained past a
+// later success, and expiry eligibility — read back from the same
+// event-backed projections the delivery path writes. No psql, no mutation,
+// no network.
 func TestNodeStatusIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t, "meristem_node_status_itest")
@@ -51,59 +53,75 @@ func TestNodeStatusIntegration(t *testing.T) {
 	registerTestNode(t, ctx, pool, writer, actor, "hub", "https://hub.example", nil)
 	registerTestNode(t, ctx, pool, writer, actor, "m4", "", []string{"hub"})
 
-	// Queue: two commands for m4 — one attempted twice and still pending, one
-	// acked as a failed local execution (the "last failure" the operator must
-	// be able to see).
+	// Queue three commands for m4, in event order:
+	//   A — acked as a failed local execution (502): the last FAILURE.
+	//   B — acked done (201) after A: the last TERMINAL. A later success must
+	//       not hide A from last_failure.
+	//   C — still pending with two recorded attempts: the retryable row.
 	svc := crossnode.NewQueueService(pool, writer)
-	pending, err := svc.Enqueue(ctx, crossnode.EnqueueInput{
-		TargetNodeID: "m4", OriginNodeID: "hub",
-		CommandPath: "/v1/work-items/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/transition",
-		CommandBody: json.RawMessage(`{"to":"running"}`), OriginIdempotencyKey: "status-pending",
-	})
-	if err != nil {
-		t.Fatalf("enqueue pending: %v", err)
-	}
-	var queuedAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT queued_at FROM command_queue WHERE id = $1`, pending.EventID).Scan(&queuedAt); err != nil {
-		t.Fatalf("read queued_at: %v", err)
-	}
-	for i := 1; i <= 2; i++ {
-		if _, err := svc.RecordAttempt(ctx, crossnode.RecordAttemptInput{
-			CommandQueueID: pending.EventID,
-			AttemptKey:     string(rune('a' + i - 1)),
-			Now:            queuedAt.Add(time.Duration(i) * time.Minute),
-			ActorTokenID:   actor.ID,
-			Source:         actor.Source,
-		}); err != nil {
-			t.Fatalf("attempt %d: %v", i, err)
+	enqueue := func(key, path string) crossnode.EnqueueResult {
+		t.Helper()
+		res, err := svc.Enqueue(ctx, crossnode.EnqueueInput{
+			TargetNodeID: "m4", OriginNodeID: "hub",
+			CommandPath: path,
+			CommandBody: json.RawMessage(`{"to":"running"}`), OriginIdempotencyKey: key,
+		})
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", key, err)
 		}
+		return res
 	}
-	failed, err := svc.Enqueue(ctx, crossnode.EnqueueInput{
-		TargetNodeID: "m4", OriginNodeID: "hub",
-		CommandPath: "/v1/work-items/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/transition",
-		CommandBody: json.RawMessage(`{"to":"running"}`), OriginIdempotencyKey: "status-failed",
-	})
-	if err != nil {
-		t.Fatalf("enqueue failed-case: %v", err)
-	}
+	failedCmd := enqueue("status-a-failed", "/v1/work-items/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/transition")
 	if _, err := svc.Ack(ctx, crossnode.AckInput{
-		CommandQueueID: failed.EventID, StatusCode: 502, OK: false,
+		CommandQueueID: failedCmd.EventID, StatusCode: 502, OK: false,
 		ActorTokenID: &actor.ID, Source: actor.Source,
 	}); err != nil {
 		t.Fatalf("ack failed-case: %v", err)
 	}
+	doneCmd := enqueue("status-b-done", "/v1/work-items/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/transition")
+	if _, err := svc.Ack(ctx, crossnode.AckInput{
+		CommandQueueID: doneCmd.EventID, StatusCode: 201, OK: true,
+		ActorTokenID: &actor.ID, Source: actor.Source,
+	}); err != nil {
+		t.Fatalf("ack done-case: %v", err)
+	}
+	pendingCmd := enqueue("status-c-pending", "/v1/work-items/cccccccc-cccc-4ccc-8ccc-cccccccccccc/transition")
+	var queuedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT queued_at FROM command_queue WHERE id = $1`, pendingCmd.EventID).Scan(&queuedAt); err != nil {
+		t.Fatalf("read queued_at: %v", err)
+	}
+	recordAttempts := func(from, to int) {
+		t.Helper()
+		for i := from; i <= to; i++ {
+			if _, err := svc.RecordAttempt(ctx, crossnode.RecordAttemptInput{
+				CommandQueueID: pendingCmd.EventID,
+				AttemptKey:     fmt.Sprintf("attempt-%d", i),
+				Now:            queuedAt.Add(time.Duration(i) * time.Minute),
+				ActorTokenID:   actor.ID,
+				Source:         actor.Source,
+			}); err != nil {
+				t.Fatalf("attempt %d: %v", i, err)
+			}
+		}
+	}
+	recordAttempts(1, 2)
 
 	now := queuedAt.Add(10 * time.Minute)
 
-	// JSON: the machine-readable shape carries every fact.
-	var jsonOut bytes.Buffer
-	if err := statusNodes(ctx, pool, &jsonOut, []string{"--json"}, now); err != nil {
-		t.Fatalf("status --json: %v", err)
+	readReport := func(args []string, at time.Time) nodeStatusReport {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := statusNodes(ctx, pool, &buf, append(args, "--json"), at); err != nil {
+			t.Fatalf("status %v: %v", args, err)
+		}
+		var report nodeStatusReport
+		if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+			t.Fatalf("decode report: %v\n%s", err, buf.String())
+		}
+		return report
 	}
-	var report nodeStatusReport
-	if err := json.Unmarshal(jsonOut.Bytes(), &report); err != nil {
-		t.Fatalf("decode report: %v\n%s", err, jsonOut.String())
-	}
+
+	report := readReport(nil, now)
 
 	routes := map[string]routePlanReport{}
 	for _, r := range report.Routes {
@@ -120,8 +138,11 @@ func TestNodeStatusIntegration(t *testing.T) {
 		t.Fatalf("queue targets = %d, want 1 (m4)", len(report.Queue))
 	}
 	q := report.Queue[0]
-	if q.TargetNodeID != "m4" || q.Pending != 1 || q.MaxAttempts != 2 || q.Failed != 1 {
-		t.Fatalf("queue status = %+v, want m4 pending=1 attempts=2 failed=1", q)
+	if q.TargetNodeID != "m4" || q.Pending != 1 || q.PendingRetryable != 1 || q.PendingExhausted != 0 || q.PendingDue != 0 {
+		t.Fatalf("queue split = %+v, want one retryable pending row", q)
+	}
+	if q.MaxAttempts != 2 || q.Done != 1 || q.Failed != 1 {
+		t.Fatalf("queue tallies = %+v, want attempts=2 done=1 failed=1", q)
 	}
 	if q.OldestQueuedAt == nil || q.LastAttemptAt == nil || q.NextExpiresAt == nil {
 		t.Fatalf("queue status missing pending timestamps: %+v", q)
@@ -129,42 +150,69 @@ func TestNodeStatusIntegration(t *testing.T) {
 	if want := queuedAt.Add(crossnode.CommandQueuePatience); !q.NextExpiresAt.Equal(want) {
 		t.Fatalf("next_expires_at = %s, want queued_at + patience = %s", q.NextExpiresAt, want)
 	}
-	if q.LastTerminal == nil || q.LastTerminal.State != "failed" ||
-		q.LastTerminal.StatusCode == nil || *q.LastTerminal.StatusCode != 502 ||
-		q.LastTerminal.CommandQueueID != failed.EventID {
-		t.Fatalf("last terminal = %+v, want the 502-failed command", q.LastTerminal)
+
+	// The regression codex demanded: B (done) is the last terminal, but A
+	// (failed 502) must remain the last failure.
+	if q.LastTerminal == nil || q.LastTerminal.State != "done" || q.LastTerminal.CommandQueueID != doneCmd.EventID {
+		t.Fatalf("last terminal = %+v, want the later done command", q.LastTerminal)
+	}
+	if q.LastFailure == nil || q.LastFailure.State != "failed" ||
+		q.LastFailure.StatusCode == nil || *q.LastFailure.StatusCode != 502 ||
+		q.LastFailure.CommandQueueID != failedCmd.EventID {
+		t.Fatalf("last failure = %+v, want the earlier 502-failed command retained past the later done", q.LastFailure)
 	}
 
-	// Text: the human-readable rendering shows the same facts.
+	// Attempt exhaustion: at 5/5 the row stops being retryable and waits for
+	// the expiry worker — the report must say so.
+	recordAttempts(3, 5)
+	q = readReport(nil, now).Queue[0]
+	if q.Pending != 1 || q.PendingRetryable != 0 || q.PendingExhausted != 1 || q.PendingDue != 0 {
+		t.Fatalf("post-exhaustion split = %+v, want one exhausted pending row", q)
+	}
+
+	// Past the 24h deadline the same row becomes due for the expiry worker's
+	// next pass — an eligibility statement, not an invented timestamp.
+	q = readReport(nil, queuedAt.Add(25*time.Hour)).Queue[0]
+	if q.Pending != 1 || q.PendingRetryable != 0 || q.PendingExhausted != 0 || q.PendingDue != 1 {
+		t.Fatalf("past-deadline split = %+v, want one due pending row", q)
+	}
+
+	// Text rendering shows the same facts (the pending row is exhausted by
+	// now: attempts 3-5 were recorded above).
 	var textOut bytes.Buffer
 	if err := statusNodes(ctx, pool, &textOut, nil, now); err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	for _, want := range []string{
 		"queue via hub https://hub.example",
-		"pending=1",
-		"attempts=2/5",
-		"last_terminal=failed status=502",
+		"pending=1 (retryable=0 exhausted=1 due=0)",
+		"last_terminal=done status=201",
+		"last_failure=failed status=502",
 	} {
 		if !strings.Contains(textOut.String(), want) {
 			t.Fatalf("text status missing %q:\n%s", want, textOut.String())
 		}
 	}
 
-	// --target filters to one node's routes and queue.
-	var filtered bytes.Buffer
-	if err := statusNodes(ctx, pool, &filtered, []string{"--target", "hub", "--json"}, now); err != nil {
-		t.Fatalf("status --target: %v", err)
+	// --target for an unknown node surfaces the selection refusal.
+	ghost := readReport([]string{"--target", "ghost"}, now)
+	if len(ghost.Routes) != 1 || ghost.Routes[0].TargetNodeID != "ghost" ||
+		ghost.Routes[0].Error != crossnode.ErrUnknownTarget.Error() {
+		t.Fatalf("ghost target routes = %v, want the unknown-target refusal", ghost.Routes)
 	}
-	var filteredReport nodeStatusReport
-	if err := json.Unmarshal(filtered.Bytes(), &filteredReport); err != nil {
-		t.Fatalf("decode filtered report: %v", err)
-	}
-	if len(filteredReport.Routes) != 1 || filteredReport.Routes[0].TargetNodeID != "hub" || len(filteredReport.Queue) != 0 {
-		t.Fatalf("filtered report = routes %v queue %v, want hub only", filteredReport.Routes, filteredReport.Queue)
+	if len(ghost.Queue) != 0 {
+		t.Fatalf("ghost target queue = %v, want empty", ghost.Queue)
 	}
 
-	// Read-only: the diagnostics run appended no events.
+	// --target filters to one known node's routes and queue.
+	hubOnly := readReport([]string{"--target", "hub"}, now)
+	if len(hubOnly.Routes) != 1 || hubOnly.Routes[0].TargetNodeID != "hub" || len(hubOnly.Queue) != 0 {
+		t.Fatalf("filtered report = routes %v queue %v, want hub only", hubOnly.Routes, hubOnly.Queue)
+	}
+
+	// Read-only, twice enforced: the production path runs inside a
+	// repeatable-read READ ONLY transaction (the database refuses writes),
+	// and the event log length is unchanged by a status run.
 	var before, after int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events`).Scan(&before); err != nil {
 		t.Fatalf("count events: %v", err)

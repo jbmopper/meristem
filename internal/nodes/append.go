@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/domain"
@@ -127,7 +128,20 @@ func validateRelayVia(relay []string) error {
 // the projectors already produced — the operator's view for verifying the
 // stage-0 exit.
 func List(ctx context.Context, pool *pgxpool.Pool) ([]domain.Node, error) {
-	rows, err := pool.Query(ctx, `
+	return ListFrom(ctx, pool)
+}
+
+// Querier is the read surface List needs; both *pgxpool.Pool and pgx.Tx
+// satisfy it, so callers that need one coherent snapshot (`node status`) can
+// run the registry read inside their own read-only transaction.
+type Querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// ListFrom is List against any Querier, for callers that read the registry
+// inside a transaction.
+func ListFrom(ctx context.Context, q Querier) ([]domain.Node, error) {
+	rows, err := q.Query(ctx, `
 		SELECT node_id, base_url, direct_url, relay_via, status, created_at, updated_at, registry_revision
 		FROM nodes
 		ORDER BY node_id
