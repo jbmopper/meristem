@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -24,14 +25,23 @@ func (tokenCreatedProjector) Kind() string { return domain.EventTokenCreated }
 
 func (tokenCreatedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
 	var payload struct {
-		Name   string   `json:"name"`
-		Hash   string   `json:"hash"`
-		IsRoot bool     `json:"is_root"`
-		Scopes []string `json:"scopes"`
-		Source string   `json:"source"`
+		Name      string   `json:"name"`
+		Hash      string   `json:"hash"`
+		IsRoot    bool     `json:"is_root"`
+		Scopes    []string `json:"scopes"`
+		Source    string   `json:"source"`
+		ExpiresAt string   `json:"expires_at"`
 	}
 	if err := decodePayload(event.Payload, &payload); err != nil {
 		return err
+	}
+	var expiresAt *time.Time
+	if payload.ExpiresAt != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, payload.ExpiresAt)
+		if err != nil {
+			return fmt.Errorf("token.created: parse expires_at: %w", err)
+		}
+		expiresAt = &parsed
 	}
 	if payload.Name == "" {
 		return fmt.Errorf("token.created: name is required")
@@ -58,10 +68,10 @@ func (tokenCreatedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 	// DO NOTHING leaves the original projection row in place and lets
 	// downstream queries notice the discrepancy.
 	_, err = tx.Exec(ctx, `
-		INSERT INTO tokens (id, name, hash, is_root, scopes, source, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO tokens (id, name, hash, is_root, scopes, source, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (id) DO NOTHING
-	`, event.SubjectID, payload.Name, hash, payload.IsRoot, scopes, string(source), event.OccurredAt)
+	`, event.SubjectID, payload.Name, hash, payload.IsRoot, scopes, string(source), event.OccurredAt, expiresAt)
 	return err
 }
 

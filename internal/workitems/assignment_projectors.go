@@ -326,12 +326,15 @@ func decodeAssignmentReleasedPayload(raw any) (assignmentReleasedPayload, error)
 		!payload.Mode.Valid() || !payload.Reason.Valid() {
 		return assignmentReleasedPayload{}, fmt.Errorf("work_item.assignment_released: assignment_event_id, assignee_token_id, valid mode, and valid reason are required")
 	}
-	// v1 release events are only voluntary yield or lease expiry. Terminal
-	// cleanup is derived exclusively from work_item.transitioned in the same
-	// projector transaction, so a standalone release can never manufacture a
-	// terminal assignment sentinel while work_items remains non-terminal.
-	if payload.Reason != domain.AssignmentReleaseYield && payload.Reason != domain.AssignmentReleaseExpired {
-		return assignmentReleasedPayload{}, fmt.Errorf("work_item.assignment_released: v1 reason must be yield|expired; done is derived from work_item.transitioned")
+	// v1 release events are voluntary yield, lease expiry, or a terminally
+	// failed spawned-review launch. Terminal cleanup is derived exclusively
+	// from work_item.transitioned in the same projector transaction, so a
+	// standalone release can never manufacture a terminal assignment sentinel
+	// while work_items remains non-terminal.
+	switch payload.Reason {
+	case domain.AssignmentReleaseYield, domain.AssignmentReleaseExpired, domain.AssignmentReleaseLaunchFailed:
+	default:
+		return assignmentReleasedPayload{}, fmt.Errorf("work_item.assignment_released: v1 reason must be yield|expired|launch_failed; done is derived from work_item.transitioned")
 	}
 	if payload.TerminalState != "" {
 		return assignmentReleasedPayload{}, fmt.Errorf("work_item.assignment_released: terminal_state is derived from work_item.transitioned")

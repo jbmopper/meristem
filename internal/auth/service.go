@@ -22,7 +22,21 @@ var (
 	ErrTokenNotFound = errors.New("auth: token not found")
 	ErrTokenShape    = errors.New("auth: token has invalid shape")
 	ErrTokenRevoked  = errors.New("auth: token revoked")
+	// ErrTokenExpired refuses a bearer whose durable expires_at has passed on
+	// the database clock (0037). Expiry is a hard authority cutoff: it must
+	// hold no matter which process died, so it is enforced here rather than
+	// in any supervisor.
+	ErrTokenExpired = errors.New("auth: token expired")
 )
+
+// ScopeReviewerCredentialsIssue is the dedicated capability for atomic
+// reviewer provisioning (ee916614 slice 3a). It authorizes exactly one
+// operation — ProvisionSpawnedReview's in-transaction mint of a single
+// exact-child, single-use reviewer credential — plus retiring credentials so
+// minted, and is deliberately not implied by any actor class. Deployment
+// pins it to the one configured review-dispatch worker identity. The access
+// package re-exports it with the other scope constants.
+const ScopeReviewerCredentialsIssue = "reviewer_credentials.issue"
 
 // Service owns token creation, revocation, listing, and bearer lookup. All
 // state-changing methods append token events; token rows are projections.
@@ -155,6 +169,96 @@ func (s *Service) CreateDelegatedToken(ctx context.Context, tx pgx.Tx, in Create
 	})
 }
 
+// MintReviewerCredentialInput describes one single-use reviewer credential
+// (ee916614 slice 3a). ExpiresAt is required and comes from the caller's
+// single database-clock observation so token expiry and the binding's
+// ExpiresAt are equal by construction.
+type MintReviewerCredentialInput struct {
+	Name      string
+	Scopes    []string
+	ExpiresAt time.Time
+	Actor     domain.Token
+}
+
+// MintReviewerCredential appends token.created inside the caller-owned
+// provisioning transaction. The caller must be a non-root system actor
+// holding the dedicated reviewer_credentials.issue capability; the minted
+// token is always a non-root agent identity with a hard expiry. This is the
+// only minting path a launcher-side flow may reach, and it cannot influence
+// scopes: the provisioning operation resolves them from the cultivar
+// template before calling here.
+func (s *Service) MintReviewerCredential(ctx context.Context, tx pgx.Tx, in MintReviewerCredentialInput) (CreateTokenResult, error) {
+	if in.Actor.ID == uuid.Nil || in.Actor.IsRoot || in.Actor.RevokedAt != nil {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential minting requires a live non-root actor")
+	}
+	if in.Actor.Source != domain.SourceSystem {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential minting requires a source=%q actor", domain.SourceSystem)
+	}
+	if !hasScope(in.Actor.Scopes, ScopeReviewerCredentialsIssue) {
+		return CreateTokenResult{}, fmt.Errorf("auth: actor %s lacks the %s capability", in.Actor.ID, ScopeReviewerCredentialsIssue)
+	}
+	if in.ExpiresAt.IsZero() {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential requires an expiry")
+	}
+	if len(in.Scopes) == 0 {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential requires resolved scopes")
+	}
+	expiresAt := in.ExpiresAt.UTC()
+	return s.appendTokenCreated(ctx, tx, appendTokenInput{
+		Name:      in.Name,
+		IsRoot:    false,
+		Scopes:    in.Scopes,
+		Source:    domain.SourceAgent,
+		Actor:     &in.Actor,
+		ExpiresAt: &expiresAt,
+	})
+}
+
+// RevokeInTx appends token.revoked inside a caller-owned transaction so a
+// launch-failure resolution can revoke the reviewer credential atomically
+// with releasing its binding. Actor rules extend Revoke narrowly: root, the
+// token revoking itself, or a non-root system actor that holds the
+// reviewer_credentials.issue capability — the identity that provisions
+// reviewer credentials also retires them, and it can never touch root.
+func (s *Service) RevokeInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor domain.Token, reason string) error {
+	systemIssuer := !actor.IsRoot && actor.Source == domain.SourceSystem &&
+		hasScope(actor.Scopes, ScopeReviewerCredentialsIssue)
+	if !actor.IsRoot && actor.ID != id && !systemIssuer {
+		return ErrRootRequired
+	}
+	if reason == "" {
+		reason = "operator_revoke"
+	}
+	tok, err := scanToken(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if tok.IsRoot && !actor.IsRoot {
+		return ErrRootRequired
+	}
+	if tok.RevokedAt != nil {
+		return nil
+	}
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectToken,
+		SubjectID:    id,
+		Kind:         domain.EventTokenRevoked,
+		Source:       sourceForToken(&actor),
+		ActorTokenID: &actor.ID,
+		Payload:      map[string]any{"reason": reason},
+	})
+	return err
+}
+
+func hasScope(scopes []string, want string) bool {
+	for _, scope := range scopes {
+		if scope == want {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeTokenSource(in CreateTokenInput) (domain.Source, error) {
 	tokenSource := in.Source
 	if tokenSource == "" {
@@ -170,12 +274,13 @@ func normalizeTokenSource(in CreateTokenInput) (domain.Source, error) {
 }
 
 type appendTokenInput struct {
-	ID     uuid.UUID
-	Name   string
-	IsRoot bool
-	Scopes []string
-	Source domain.Source
-	Actor  *domain.Token
+	ID        uuid.UUID
+	Name      string
+	IsRoot    bool
+	Scopes    []string
+	Source    domain.Source
+	Actor     *domain.Token
+	ExpiresAt *time.Time
 }
 
 func (s *Service) appendTokenCreated(ctx context.Context, tx pgx.Tx, in appendTokenInput) (CreateTokenResult, error) {
@@ -201,19 +306,23 @@ func (s *Service) appendTokenCreated(ctx context.Context, tx pgx.Tx, in appendTo
 	if in.Actor != nil {
 		actorID = &in.Actor.ID
 	}
+	payload := map[string]any{
+		"name":    in.Name,
+		"hash":    base64.StdEncoding.EncodeToString(hash),
+		"is_root": in.IsRoot,
+		"scopes":  in.Scopes,
+		"source":  tokenSource,
+	}
+	if in.ExpiresAt != nil {
+		payload["expires_at"] = in.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
 	_, _, err = s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectToken,
 		SubjectID:    tokenID,
 		Kind:         domain.EventTokenCreated,
 		Source:       sourceForToken(in.Actor),
 		ActorTokenID: actorID,
-		Payload: map[string]any{
-			"name":    in.Name,
-			"hash":    base64.StdEncoding.EncodeToString(hash),
-			"is_root": in.IsRoot,
-			"scopes":  in.Scopes,
-			"source":  tokenSource,
-		},
+		Payload:      payload,
 	})
 	if err != nil {
 		return CreateTokenResult{}, err
@@ -312,11 +421,15 @@ func (s *Service) Authenticate(ctx context.Context, secret string) (domain.Token
 		return domain.Token{}, ErrTokenShape
 	}
 	hash := HashSecret(secret)
-	tok, err := scanTokenRow(s.pool.QueryRow(ctx, `
-		SELECT id, name, hash, is_root, scopes, source, created_at, revoked_at
+	// Expiry is judged by the database clock in the same read: a process
+	// whose local clock lags must not extend a credential's authority.
+	var expired bool
+	tok, err := scanTokenRowExtra(s.pool.QueryRow(ctx, `
+		SELECT id, name, hash, is_root, scopes, source, created_at, revoked_at, expires_at,
+		       (expires_at IS NOT NULL AND expires_at <= now())
 		FROM tokens
 		WHERE hash = $1
-	`, hash))
+	`, hash), &expired)
 	if err != nil {
 		if errors.Is(err, ErrTokenNotFound) {
 			return domain.Token{}, ErrInvalidToken
@@ -329,6 +442,9 @@ func (s *Service) Authenticate(ctx context.Context, secret string) (domain.Token
 	if tok.RevokedAt != nil {
 		return domain.Token{}, ErrTokenRevoked
 	}
+	if expired {
+		return domain.Token{}, ErrTokenExpired
+	}
 	return tok, nil
 }
 
@@ -337,7 +453,7 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (domain.Token, error) {
 }
 
 func (s *Service) List(ctx context.Context) ([]domain.Token, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, name, hash, is_root, scopes, source, created_at, revoked_at FROM tokens ORDER BY created_at DESC`)
+	rows, err := s.pool.Query(ctx, `SELECT id, name, hash, is_root, scopes, source, created_at, revoked_at, expires_at FROM tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -362,16 +478,24 @@ type queryer interface {
 }
 
 func scanToken(ctx context.Context, q queryer, id uuid.UUID) (domain.Token, error) {
-	row := q.QueryRow(ctx, `SELECT id, name, hash, is_root, scopes, source, created_at, revoked_at FROM tokens WHERE id = $1`, id)
+	row := q.QueryRow(ctx, `SELECT id, name, hash, is_root, scopes, source, created_at, revoked_at, expires_at FROM tokens WHERE id = $1`, id)
 	return scanTokenRow(row)
 }
 
 func scanTokenRow(row rowScanner) (domain.Token, error) {
+	return scanTokenRowExtra(row)
+}
+
+// scanTokenRowExtra scans the canonical token columns plus any caller-added
+// trailing expressions (Authenticate's database-clock expiry check).
+func scanTokenRowExtra(row rowScanner, extra ...any) (domain.Token, error) {
 	var tok domain.Token
 	var scopesRaw []byte
 	var source string
 	var revokedAt *time.Time
-	if err := row.Scan(&tok.ID, &tok.Name, &tok.Hash, &tok.IsRoot, &scopesRaw, &source, &tok.CreatedAt, &revokedAt); err != nil {
+	dest := []any{&tok.ID, &tok.Name, &tok.Hash, &tok.IsRoot, &scopesRaw, &source, &tok.CreatedAt, &revokedAt, &tok.ExpiresAt}
+	dest = append(dest, extra...)
+	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.Token{}, ErrTokenNotFound
 		}

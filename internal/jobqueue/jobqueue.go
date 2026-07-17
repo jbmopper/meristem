@@ -43,8 +43,15 @@ type Job struct {
 	Payload    json.RawMessage
 	Attempts   int
 	LeaseUntil *time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// LeaseOwner and LeaseGeneration make a lease a concrete fenced fact
+	// (0037): provisioning operations verify the exact owner and incarnation
+	// under lock instead of trusting state='leased'. Owner-less legacy claims
+	// leave LeaseOwner nil and cannot pass that fence. Lease fields remain
+	// the narrow operational direct-update exception.
+	LeaseOwner      *uuid.UUID
+	LeaseGeneration int64
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type Service struct {
@@ -173,6 +180,21 @@ func (s *Service) ReconcileDispatchJobs(ctx context.Context) (int, error) {
 // work. Reviewer identity is cross-checked against both the dispatch payload
 // and the work item's event-backed launch metadata.
 func (s *Service) ClaimNextReview(ctx context.Context, lease time.Duration) (Job, bool, error) {
+	return s.claimNextReview(ctx, nil, lease)
+}
+
+// ClaimNextReviewAs is ClaimNextReview with a concrete lease owner stamped on
+// the row. Provisioning (workitems.ProvisionSpawnedReview) fences on the
+// exact owner and lease generation, so a launch-capable executor must claim
+// through this path; owner-less legacy claims fail that fence closed.
+func (s *Service) ClaimNextReviewAs(ctx context.Context, owner uuid.UUID, lease time.Duration) (Job, bool, error) {
+	if owner == uuid.Nil {
+		return Job{}, false, fmt.Errorf("jobqueue: claim owner is required")
+	}
+	return s.claimNextReview(ctx, &owner, lease)
+}
+
+func (s *Service) claimNextReview(ctx context.Context, owner *uuid.UUID, lease time.Duration) (Job, bool, error) {
 	if lease <= 0 {
 		return Job{}, false, ErrInvalidLease
 	}
@@ -187,7 +209,7 @@ func (s *Service) ClaimNextReview(ctx context.Context, lease time.Duration) (Job
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	job, found, err := claimNextReviewInTx(ctx, tx, leaseMillis)
+	job, found, err := claimNextReviewInTx(ctx, tx, owner, leaseMillis)
 	if err != nil {
 		return Job{}, false, err
 	}
@@ -197,7 +219,7 @@ func (s *Service) ClaimNextReview(ctx context.Context, lease time.Duration) (Job
 	return job, found, nil
 }
 
-func claimNextReviewInTx(ctx context.Context, tx pgx.Tx, leaseMillis int64) (Job, bool, error) {
+func claimNextReviewInTx(ctx context.Context, tx pgx.Tx, owner *uuid.UUID, leaseMillis int64) (Job, bool, error) {
 	row := tx.QueryRow(ctx, `
 		WITH candidate AS (
 			SELECT jq.id
@@ -239,12 +261,15 @@ func claimNextReviewInTx(ctx context.Context, tx pgx.Tx, leaseMillis int64) (Job
 		SET state = 'leased',
 		    attempts = attempts + 1,
 		    lease_until = now() + ($1::bigint * interval '1 millisecond'),
+		    lease_owner = $5,
+		    lease_generation = jq.lease_generation + 1,
 		    updated_at = now()
 		FROM candidate
 		WHERE jq.id = candidate.id
 		RETURNING jq.id, jq.kind, jq.work_item_id, jq.state, jq.payload,
-		          jq.attempts, jq.lease_until, jq.created_at, jq.updated_at
-	`, leaseMillis, KindDispatch, reviewerCultivarRoot, reviewVerdictCheck)
+		          jq.attempts, jq.lease_until, jq.lease_owner, jq.lease_generation,
+		          jq.created_at, jq.updated_at
+	`, leaseMillis, KindDispatch, reviewerCultivarRoot, reviewVerdictCheck, owner)
 	job, err := scanJob(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -304,11 +329,14 @@ func claimNextInTx(ctx context.Context, tx pgx.Tx, leaseMillis int64) (Job, bool
 		SET state = 'leased',
 		    attempts = attempts + 1,
 		    lease_until = now() + ($1::bigint * interval '1 millisecond'),
+		    lease_owner = NULL,
+		    lease_generation = jq.lease_generation + 1,
 		    updated_at = now()
 		FROM candidate
 		WHERE jq.id = candidate.id
 		RETURNING jq.id, jq.kind, jq.work_item_id, jq.state, jq.payload,
-		          jq.attempts, jq.lease_until, jq.created_at, jq.updated_at
+		          jq.attempts, jq.lease_until, jq.lease_owner, jq.lease_generation,
+		          jq.created_at, jq.updated_at
 	`, leaseMillis)
 	job, err := scanJob(row)
 	if err != nil {
@@ -333,6 +361,8 @@ func scanJob(row pgx.Row) (Job, error) {
 		&job.Payload,
 		&job.Attempts,
 		&job.LeaseUntil,
+		&job.LeaseOwner,
+		&job.LeaseGeneration,
 		&job.CreatedAt,
 		&job.UpdatedAt,
 	); err != nil {
@@ -340,6 +370,78 @@ func scanJob(row pgx.Row) (Job, error) {
 	}
 	job.State = JobState(state)
 	return job, nil
+}
+
+// RenewReviewLease extends the caller's own leased review job for a retry
+// attempt after a failed launch: the child is already running, so the
+// pending-claim predicate can never re-lease this row, and the retry instead
+// advances the SAME lease under its owner — attempts and generation both
+// increment, so every provisioning attempt stays uniquely keyed and fenced.
+// The xylem attempt budget is enforced by the launch executor before it
+// renews (3b wiring); this operation only guarantees fencing.
+func (s *Service) RenewReviewLease(ctx context.Context, id uuid.UUID, owner uuid.UUID, generation int64, lease time.Duration) (Job, error) {
+	if owner == uuid.Nil {
+		return Job{}, fmt.Errorf("jobqueue: lease renewal requires the lease owner")
+	}
+	if lease <= 0 {
+		return Job{}, ErrInvalidLease
+	}
+	leaseMillis := lease.Milliseconds()
+	if leaseMillis <= 0 {
+		leaseMillis = 1
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE job_queue
+		SET attempts = attempts + 1,
+		    lease_generation = lease_generation + 1,
+		    lease_until = now() + ($4::bigint * interval '1 millisecond'),
+		    updated_at = now()
+		WHERE id = $1
+		  AND state = 'leased'
+		  AND lease_owner = $2
+		  AND lease_generation = $3
+		RETURNING id, kind, work_item_id, state, payload,
+		          attempts, lease_until, lease_owner, lease_generation,
+		          created_at, updated_at
+	`, id, owner, generation, leaseMillis)
+	job, err := scanJob(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Job{}, pgx.ErrNoRows
+		}
+		return Job{}, fmt.Errorf("jobqueue: renew review lease: %w", err)
+	}
+	return job, nil
+}
+
+// ReturnReviewDormant parks a leased review job back to pending and refunds
+// its claim attempt, fenced on the exact lease owner and generation. It is
+// the pre-binding capacity path (accepted design rev 3): a launch that could
+// not reserve capacity did no review work, so the attempt must not count,
+// and a stale or stolen lease must not park a row it no longer owns.
+func (s *Service) ReturnReviewDormant(ctx context.Context, id uuid.UUID, owner uuid.UUID, generation int64) error {
+	if owner == uuid.Nil {
+		return fmt.Errorf("jobqueue: dormant return requires the lease owner")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE job_queue
+		SET state = 'pending',
+		    attempts = GREATEST(attempts - 1, 0),
+		    lease_until = NULL,
+		    lease_owner = NULL,
+		    updated_at = now()
+		WHERE id = $1
+		  AND state = 'leased'
+		  AND lease_owner = $2
+		  AND lease_generation = $3
+	`, id, owner, generation)
+	if err != nil {
+		return fmt.Errorf("jobqueue: return review dormant: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Service) MarkDone(ctx context.Context, id uuid.UUID) error {

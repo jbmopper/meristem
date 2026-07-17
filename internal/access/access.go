@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
 )
@@ -43,6 +44,9 @@ const (
 	// revokes public OAuth clients.
 	ScopeOAuthClientsBind   = "oauth_clients.bind"
 	ScopeOAuthClientsRevoke = "oauth_clients.revoke"
+	// ScopeReviewerCredentialsIssue is canonical in internal/auth, where it
+	// is enforced; re-exported here with the other scope constants.
+	ScopeReviewerCredentialsIssue = auth.ScopeReviewerCredentialsIssue
 
 	scopeWorkItemsTreePrefix = "work_items.tree:"
 )

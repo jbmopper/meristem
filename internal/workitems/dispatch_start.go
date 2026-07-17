@@ -58,6 +58,21 @@ type reviewDispatchPayload struct {
 // lifecycle-blocked jobs are returned to pending without a lease and remain
 // dormant until their gate changes.
 func (s *Service) StartReviewDispatch(ctx context.Context, jobID uuid.UUID, actor domain.Token) (ReviewDispatchResult, error) {
+	return s.startReviewDispatch(ctx, jobID, actor, false)
+}
+
+// StartReviewDispatchForLaunch is the launch-protocol admission (ee916614
+// slice 3a): a Started outcome leaves the queue row leased instead of done,
+// because dispatch is not irreversibly complete until a durable
+// review_launch outcome proves the reviewer process was created for the
+// exact binding (ProvisionSpawnedReview and its outcome events own that).
+// Every gate, revalidation, and dormant/cancel path is identical to
+// StartReviewDispatch, which remains the non-launch legacy semantics.
+func (s *Service) StartReviewDispatchForLaunch(ctx context.Context, jobID uuid.UUID, actor domain.Token) (ReviewDispatchResult, error) {
+	return s.startReviewDispatch(ctx, jobID, actor, true)
+}
+
+func (s *Service) startReviewDispatch(ctx context.Context, jobID uuid.UUID, actor domain.Token, launchProtocol bool) (ReviewDispatchResult, error) {
 	if jobID == uuid.Nil {
 		return ReviewDispatchResult{}, fmt.Errorf("%w: review dispatch job id is required", ErrInvalidRequest)
 	}
@@ -188,6 +203,16 @@ func (s *Service) StartReviewDispatch(ctx context.Context, jobID uuid.UUID, acto
 	}
 
 	result.Transitioned = true
+	if launchProtocol {
+		// Admission commits with the lease intact: the queue row completes
+		// only on a succeeded launch outcome, goes dormant on capacity
+		// shortage, or retries within its budget on launch failure.
+		result.Outcome = ReviewDispatchStarted
+		if err := tx.Commit(ctx); err != nil {
+			return ReviewDispatchResult{}, err
+		}
+		return result, nil
+	}
 	return finishReviewDispatch(ctx, tx, result, ReviewDispatchStarted, "done")
 }
 

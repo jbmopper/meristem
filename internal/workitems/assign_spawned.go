@@ -100,20 +100,90 @@ func (s *Service) AssignSpawned(ctx context.Context, id uuid.UUID, assigneeToken
 	if err != nil {
 		return domain.WorkItemAssignment{}, err
 	}
-	assignment, budgetErr, err := s.appendAssignmentInTx(ctx, tx, item, actor, assigneeTokenID, domain.WorkItemAssignmentSpawn, lease, leaseSource, claimedAt, state.StateEventID)
+	assignment, err := s.appendSpawnAssignmentLocked(ctx, tx, item, state, assigneeTokenID, actor, lease, leaseSource, claimedAt)
 	if err != nil {
 		return domain.WorkItemAssignment{}, err
-	}
-	if budgetErr != nil {
-		if err := tx.Commit(ctx); err != nil {
-			return domain.WorkItemAssignment{}, err
-		}
-		return domain.WorkItemAssignment{}, budgetErr
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.WorkItemAssignment{}, err
 	}
 	return assignment, nil
+}
+
+// appendSpawnAssignmentLocked is the shared spawn-binding tail used by
+// AssignSpawned and ProvisionSpawnedReview once locks are held and any
+// incumbent is handled. It re-validates the assignee under its row lock and
+// enforces the two structural teeth of the accepted lifecycle design before
+// appending: no self-review, and single-use identities.
+func (s *Service) appendSpawnAssignmentLocked(ctx context.Context, tx pgx.Tx, item domain.WorkItem, state assignmentState, assigneeTokenID uuid.UUID, actor domain.Token, lease time.Duration, leaseSource string, claimedAt time.Time) (domain.WorkItemAssignment, error) {
+	if err := validateSpawnAssignee(ctx, tx, assigneeTokenID); err != nil {
+		return domain.WorkItemAssignment{}, err
+	}
+	if err := refuseSpawnRoundImplementer(ctx, tx, item.ID, assigneeTokenID); err != nil {
+		return domain.WorkItemAssignment{}, err
+	}
+	if err := refuseUsedSpawnAssignee(ctx, tx, assigneeTokenID); err != nil {
+		return domain.WorkItemAssignment{}, err
+	}
+	assignment, budgetErr, err := s.appendAssignmentInTx(ctx, tx, item, actor, assigneeTokenID, domain.WorkItemAssignmentSpawn, lease, leaseSource, claimedAt, state.StateEventID)
+	if err != nil {
+		return domain.WorkItemAssignment{}, err
+	}
+	if budgetErr != nil {
+		return domain.WorkItemAssignment{}, budgetErr
+	}
+	return assignment, nil
+}
+
+// refuseSpawnRoundImplementer structurally excludes self-review in the
+// canonical gate: whatever attachment strategy proposes the assignee, the
+// actor that authored the item's current implementation.ready_for_review
+// marker can never be bound to review it.
+func refuseSpawnRoundImplementer(ctx context.Context, tx pgx.Tx, itemID, assigneeTokenID uuid.UUID) error {
+	var author *uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT actor_token_id
+		FROM events
+		WHERE subject_kind = 'work_item'
+		  AND subject_id = $1
+		  AND kind = $2
+		  AND payload->>'inner_kind' = 'implementation.ready_for_review'
+		ORDER BY seq DESC
+		LIMIT 1
+	`, itemID, domain.EventWorkItemEventAppended).Scan(&author)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("workitems: read round implementer: %w", err)
+	}
+	if author != nil && *author == assigneeTokenID {
+		return fmt.Errorf("%w: token %s authored the current round", ErrSpawnAssigneeIsImplementer, assigneeTokenID)
+	}
+	return nil
+}
+
+// refuseUsedSpawnAssignee enforces single-use reviewer identities: an
+// assignee that appears in ANY prior work_item.assigned event — including a
+// released or expired one, on any item — never binds again. The idempotent
+// live same-assignee retry returns before this check, so it only refuses
+// genuinely new bindings.
+func refuseUsedSpawnAssignee(ctx context.Context, tx pgx.Tx, assigneeTokenID uuid.UUID) error {
+	var one int
+	err := tx.QueryRow(ctx, `
+		SELECT 1
+		FROM events
+		WHERE kind = $1
+		  AND payload->>'assignee_token_id' = $2
+		LIMIT 1
+	`, domain.EventWorkItemAssigned, assigneeTokenID.String()).Scan(&one)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("workitems: check spawn assignee history: %w", err)
+	}
+	return fmt.Errorf("%w: token %s", ErrSpawnAssigneeAlreadyUsed, assigneeTokenID)
 }
 
 // ErrVerdictNotFromBoundReviewer refuses a review verdict appended by anyone
@@ -325,18 +395,21 @@ func validateSpawnAssignee(ctx context.Context, tx pgx.Tx, assigneeTokenID uuid.
 		isRoot    bool
 		source    string
 		revokedAt *time.Time
+		expired   bool
 	)
 	err := tx.QueryRow(ctx, `
-		SELECT is_root, source, revoked_at FROM tokens WHERE id = $1 FOR UPDATE
-	`, assigneeTokenID).Scan(&isRoot, &source, &revokedAt)
+		SELECT is_root, source, revoked_at,
+		       (expires_at IS NOT NULL AND expires_at <= now())
+		FROM tokens WHERE id = $1 FOR UPDATE
+	`, assigneeTokenID).Scan(&isRoot, &source, &revokedAt, &expired)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w: token %s not found", ErrSpawnAssigneeInvalid, assigneeTokenID)
 		}
 		return fmt.Errorf("workitems: read spawn assignee token: %w", err)
 	}
-	if isRoot || revokedAt != nil || source != string(domain.SourceAgent) {
-		return fmt.Errorf("%w: token %s (root=%t revoked=%t source=%s)", ErrSpawnAssigneeInvalid, assigneeTokenID, isRoot, revokedAt != nil, source)
+	if isRoot || revokedAt != nil || expired || source != string(domain.SourceAgent) {
+		return fmt.Errorf("%w: token %s (root=%t revoked=%t expired=%t source=%s)", ErrSpawnAssigneeInvalid, assigneeTokenID, isRoot, revokedAt != nil, expired, source)
 	}
 	return nil
 }

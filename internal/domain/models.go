@@ -22,9 +22,25 @@ const (
 	EventWorkItemAssigned = "work_item.assigned"
 	// EventWorkItemAssignmentReleased closes one exact assignment epoch. Its
 	// payload names the work_item.assigned event it releases and one of the
-	// closed reasons (done, yield, expired), so a stale release can never erase
-	// a later assignment during replay or concurrent execution.
-	EventWorkItemAssignmentReleased   = "work_item.assignment_released"
+	// closed reasons (done, yield, expired, launch_failed), so a stale release
+	// can never erase a later assignment during replay or concurrent execution.
+	EventWorkItemAssignmentReleased = "work_item.assignment_released"
+	// EventReviewLaunchReserved opens one durable spawned-review launch
+	// attempt (ee916614 slice 3a): the same transaction that mints the
+	// reviewer credential and appends its work_item.assigned binding reserves
+	// launch capacity, keyed by (work item, review round, attempt).
+	EventReviewLaunchReserved = "work_item.review_launch_reserved"
+	// EventReviewLaunchHandleRecorded stores the supervisor-verified
+	// pid/pgid/start-time run handle for a reserved launch. The supervisor
+	// commits this before releasing the bootstrap, so reviewer code can never
+	// run without an adoptable handle.
+	EventReviewLaunchHandleRecorded = "work_item.review_launch_handle_recorded"
+	// EventReviewLaunchResolved terminally resolves one launch attempt:
+	// succeeded (the only outcome that lets the queue job complete), failed
+	// (confirmed dead or never ran; frees capacity), or abandoned (handle-less
+	// supervisor loss; authority is revoked at once but capacity stays
+	// reserved until the durable deadline).
+	EventReviewLaunchResolved         = "work_item.review_launch_resolved"
 	EventXylemExhausted               = "xylem.exhausted"
 	EventSignalReceived               = "signal.received"
 	EventDeterministicErrorReported   = "deterministic_error.reported"
@@ -190,6 +206,9 @@ var AllEventKinds = []string{
 	EventWorkItemMetadataUpdated,
 	EventWorkItemAssigned,
 	EventWorkItemAssignmentReleased,
+	EventReviewLaunchReserved,
+	EventReviewLaunchHandleRecorded,
+	EventReviewLaunchResolved,
 	EventXylemExhausted,
 	EventSignalReceived,
 	EventDeterministicErrorReported,
@@ -333,6 +352,10 @@ type Token struct {
 	Source    Source
 	CreatedAt time.Time
 	RevokedAt *time.Time
+	// ExpiresAt is the hard durable authority cutoff for ordinary tokens
+	// (0037). NULL means no expiry; the authenticator refuses expired tokens
+	// against the database clock, never a process-local one.
+	ExpiresAt *time.Time
 }
 
 // WorkItemState is the lifecycle state projected for a work item.
@@ -439,18 +462,24 @@ type WorkItem struct {
 // AssignmentReleaseReason is the closed vocabulary for ending one bounded
 // work_item assignment. Done is the projection sentinel derived exclusively
 // from an authoritative terminal work_item.transitioned event; v1
-// work_item.assignment_released payloads accept only yield|expired.
+// work_item.assignment_released payloads accept only
+// yield|expired|launch_failed.
 type AssignmentReleaseReason string
 
 const (
 	AssignmentReleaseDone    AssignmentReleaseReason = "done"
 	AssignmentReleaseYield   AssignmentReleaseReason = "yield"
 	AssignmentReleaseExpired AssignmentReleaseReason = "expired"
+	// AssignmentReleaseLaunchFailed releases a spawned-review binding whose
+	// external launch attempt terminally failed before producing a reviewer
+	// (ee916614 slice 3a). The paired review_launch outcome names the failed
+	// stage; the credential is revoked in the same transaction.
+	AssignmentReleaseLaunchFailed AssignmentReleaseReason = "launch_failed"
 )
 
 func (r AssignmentReleaseReason) Valid() bool {
 	switch r {
-	case AssignmentReleaseDone, AssignmentReleaseYield, AssignmentReleaseExpired:
+	case AssignmentReleaseDone, AssignmentReleaseYield, AssignmentReleaseExpired, AssignmentReleaseLaunchFailed:
 		return true
 	default:
 		return false

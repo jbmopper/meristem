@@ -38,6 +38,9 @@ func TestAssignmentMigrationBackfillsNonterminalItemFromCreatedEvent(t *testing.
 		t.Fatalf("create actor: %v", err)
 	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("roll back reviewer provisioning migration: %v", err)
+	}
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 		t.Fatalf("roll back terminal addressee migration: %v", err)
 	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
@@ -143,9 +146,12 @@ func TestTerminalAddresseeMigrationBackfillsActiveEpochOnly(t *testing.T) {
 		t.Fatalf("claim legacy missing-from fixture: %v", err)
 	}
 
-	// Dropping 0036 erases only the new projection column. The events and
-	// 0035 lifecycle rows left behind are exactly the state an older binary
-	// would present at guarded upgrade time.
+	// Dropping 0037 then 0036 erases only the newer projection surface. The
+	// events and 0035 lifecycle rows left behind are exactly the state an
+	// older binary would present at guarded upgrade time.
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("roll back reviewer provisioning migration: %v", err)
+	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 		t.Fatalf("roll back terminal addressee migration: %v", err)
 	}
@@ -348,6 +354,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back reviewer provisioning migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back terminal addressee migration: %v", err)
 		}
 
@@ -416,6 +425,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back reviewer provisioning migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back terminal addressee migration: %v", err)
 		}
 		// Simulate pre-upgrade projection drift. The migration must abort rather
@@ -443,6 +455,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back reviewer provisioning migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back terminal addressee migration: %v", err)
 		}
 		// A terminal work_item with a nonterminal assignment sentinel cannot be
@@ -468,6 +483,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "missing assignment placeholder")
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back reviewer provisioning migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back terminal addressee migration: %v", err)
 		}
 		if _, err := pool.Exec(ctx, `DELETE FROM work_item_assignment_state WHERE work_item_id=$1`, item.ID); err != nil {
@@ -484,6 +502,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		ctx := context.Background()
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "nonterminal lifecycle drift")
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back reviewer provisioning migration: %v", err)
+		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back terminal addressee migration: %v", err)
 		}
@@ -522,6 +543,9 @@ func migrateMalformedPriorAssignedFixture(t *testing.T, assigneeValue string) er
 	ctx := context.Background()
 	pool, writer, _, actor, _ := newAssignmentTestStack(t, ctx)
 	item := createClaimableItem(t, ctx, NewService(pool, writer), actor, "malformed prior assigned control")
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("roll back reviewer provisioning migration: %v", err)
+	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 		t.Fatalf("roll back terminal addressee migration: %v", err)
 	}

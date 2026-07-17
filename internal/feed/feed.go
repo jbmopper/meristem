@@ -82,6 +82,12 @@ var ExcludedKinds = []string{
 	// Assigned Lane defines their filtered/default-feed projection.
 	domain.EventWorkItemAssigned,
 	domain.EventWorkItemAssignmentReleased,
+	// Review-launch lifecycle facts are launch-supervision coordination
+	// (reservation, run handle, outcome) carrying token identity; they are
+	// audit, not the human activity narrative.
+	domain.EventReviewLaunchReserved,
+	domain.EventReviewLaunchHandleRecorded,
+	domain.EventReviewLaunchResolved,
 	// Node registry maintenance is fleet-topology audit, not the human
 	// activity narrative; it belongs to the log, not /v1/feed.
 	domain.EventNodeRegistered,

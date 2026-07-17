@@ -148,14 +148,15 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create short-lease item: %v", err)
 	}
-	shortBound, err := svc.AssignSpawned(ctx, shortItem.ID, reviewerX.ID, spawner)
+	reviewerS := createAssignmentToken(t, ctx, pool, writer, "verdict-short-lease", domain.SourceAgent, false, root)
+	shortBound, err := svc.AssignSpawned(ctx, shortItem.ID, reviewerS.ID, spawner)
 	if err != nil {
 		t.Fatalf("bind short-lease: %v", err)
 	}
 	if wait := time.Until(shortBound.ExpiresAt) + 100*time.Millisecond; wait > 0 {
 		time.Sleep(wait)
 	}
-	if err := svc.AppendEvent(ctx, shortItem.ID, ReviewVerdictInnerKind, verdict(shortBound.AssignmentEventID), reviewerX); !errors.Is(err, ErrVerdictBindingRequired) {
+	if err := svc.AppendEvent(ctx, shortItem.ID, ReviewVerdictInnerKind, verdict(shortBound.AssignmentEventID), reviewerS); !errors.Is(err, ErrVerdictBindingRequired) {
 		t.Fatalf("expired holder verdict = %v, want ErrVerdictBindingRequired", err)
 	}
 
@@ -170,7 +171,7 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	if g2 == shortBound.AssignmentEventID {
 		t.Fatal("rebind reused the expired generation")
 	}
-	if err := svc.AppendEvent(ctx, shortItem.ID, ReviewVerdictInnerKind, verdict(shortBound.AssignmentEventID), reviewerX); !errors.Is(err, ErrVerdictNotFromBoundReviewer) {
+	if err := svc.AppendEvent(ctx, shortItem.ID, ReviewVerdictInnerKind, verdict(shortBound.AssignmentEventID), reviewerS); !errors.Is(err, ErrVerdictNotFromBoundReviewer) {
 		t.Fatalf("stale holder after rebind = %v, want ErrVerdictNotFromBoundReviewer", err)
 	}
 	if err := svc.AppendEvent(ctx, shortItem.ID, ReviewVerdictInnerKind, verdict(shortBound.AssignmentEventID), reviewerY); !errors.Is(err, ErrVerdictStaleGeneration) {
@@ -190,7 +191,8 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	if err := svc.AppendEvent(ctx, rounds.ID, "implementation.ready_for_review", roundA, actorA); err != nil {
 		t.Fatalf("declare round A: %v", err)
 	}
-	roundBound, err := svc.AssignSpawned(ctx, rounds.ID, reviewerX.ID, spawner)
+	reviewerR1 := createAssignmentToken(t, ctx, pool, writer, "verdict-round-a", domain.SourceAgent, false, root)
+	roundBound, err := svc.AssignSpawned(ctx, rounds.ID, reviewerR1.ID, spawner)
 	if err != nil {
 		t.Fatalf("bind for round A: %v", err)
 	}
@@ -201,10 +203,10 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 		return p
 	}
 	// Wrong artifact refused; right artifact lands.
-	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "wrong000"), reviewerX); !errors.Is(err, ErrVerdictWrongArtifact) {
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "wrong000"), reviewerR1); !errors.Is(err, ErrVerdictWrongArtifact) {
 		t.Fatalf("wrong-commit verdict = %v, want ErrVerdictWrongArtifact", err)
 	}
-	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "aaaa111"), reviewerX); err != nil {
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "aaaa111"), reviewerR1); err != nil {
 		t.Fatalf("round A verdict: %v", err)
 	}
 	// The artifact moves A -> B with the SAME binding generation active: the
@@ -214,26 +216,27 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	if err := svc.AppendEvent(ctx, rounds.ID, "implementation.ready_for_review", roundB, actorA); err != nil {
 		t.Fatalf("declare round B: %v", err)
 	}
-	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "aaaa111"), reviewerX); !errors.Is(err, ErrVerdictStaleRound) {
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "aaaa111"), reviewerR1); !errors.Is(err, ErrVerdictStaleRound) {
 		t.Fatalf("same-generation stale-round verdict (old commit) = %v, want ErrVerdictStaleRound", err)
 	}
-	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "bbbb222"), reviewerX); !errors.Is(err, ErrVerdictStaleRound) {
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "bbbb222"), reviewerR1); !errors.Is(err, ErrVerdictStaleRound) {
 		t.Fatalf("same-generation stale-round verdict (new commit) = %v, want ErrVerdictStaleRound", err)
 	}
 	// Rebinding against round B restores authority for exactly round B. The
 	// expired-epoch release path needs the incumbent gone first: the holder
 	// yields, then the spawner rebinds.
-	if _, err := svc.Yield(ctx, rounds.ID, reviewerX); err != nil {
+	if _, err := svc.Yield(ctx, rounds.ID, reviewerR1); err != nil {
 		t.Fatalf("yield round-A binding: %v", err)
 	}
-	reboundRound, err := svc.AssignSpawned(ctx, rounds.ID, reviewerX.ID, spawner)
+	reviewerR2 := createAssignmentToken(t, ctx, pool, writer, "verdict-round-b", domain.SourceAgent, false, root)
+	reboundRound, err := svc.AssignSpawned(ctx, rounds.ID, reviewerR2.ID, spawner)
 	if err != nil {
 		t.Fatalf("rebind for round B: %v", err)
 	}
-	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(reboundRound.AssignmentEventID, "aaaa111"), reviewerX); !errors.Is(err, ErrVerdictWrongArtifact) {
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(reboundRound.AssignmentEventID, "aaaa111"), reviewerR2); !errors.Is(err, ErrVerdictWrongArtifact) {
 		t.Fatalf("rebound verdict citing old commit = %v, want ErrVerdictWrongArtifact", err)
 	}
-	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(reboundRound.AssignmentEventID, "bbbb222"), reviewerX); err != nil {
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(reboundRound.AssignmentEventID, "bbbb222"), reviewerR2); err != nil {
 		t.Fatalf("rebound verdict for round B: %v", err)
 	}
 
@@ -251,14 +254,15 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	if err := svc.AppendEvent(ctx, liveShape.ID, "implementation.ready_for_review", string(encodedRound), actorA); err != nil {
 		t.Fatalf("declare string-shaped round: %v", err)
 	}
-	liveBound, err := svc.AssignSpawned(ctx, liveShape.ID, reviewerX.ID, spawner)
+	reviewerLv := createAssignmentToken(t, ctx, pool, writer, "verdict-live-shape", domain.SourceAgent, false, root)
+	liveBound, err := svc.AssignSpawned(ctx, liveShape.ID, reviewerLv.ID, spawner)
 	if err != nil {
 		t.Fatalf("bind string-shaped round: %v", err)
 	}
-	if err := svc.AppendEvent(ctx, liveShape.ID, ReviewVerdictInnerKind, withCommit(liveBound.AssignmentEventID, "wrong999"), reviewerX); !errors.Is(err, ErrVerdictWrongArtifact) {
+	if err := svc.AppendEvent(ctx, liveShape.ID, ReviewVerdictInnerKind, withCommit(liveBound.AssignmentEventID, "wrong999"), reviewerLv); !errors.Is(err, ErrVerdictWrongArtifact) {
 		t.Fatalf("string-shape wrong-commit verdict = %v, want ErrVerdictWrongArtifact", err)
 	}
-	if err := svc.AppendEvent(ctx, liveShape.ID, ReviewVerdictInnerKind, withCommit(liveBound.AssignmentEventID, "cccc333"), reviewerX); err != nil {
+	if err := svc.AppendEvent(ctx, liveShape.ID, ReviewVerdictInnerKind, withCommit(liveBound.AssignmentEventID, "cccc333"), reviewerLv); err != nil {
 		t.Fatalf("string-shape correct verdict: %v", err)
 	}
 
@@ -267,11 +271,12 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	if err := svc.AppendEvent(ctx, noCommit.ID, "implementation.ready_for_review", map[string]any{"branch": "claude/no-commit"}, actorA); err != nil {
 		t.Fatalf("declare commitless round: %v", err)
 	}
-	ncBound, err := svc.AssignSpawned(ctx, noCommit.ID, reviewerX.ID, spawner)
+	reviewerNc := createAssignmentToken(t, ctx, pool, writer, "verdict-commitless", domain.SourceAgent, false, root)
+	ncBound, err := svc.AssignSpawned(ctx, noCommit.ID, reviewerNc.ID, spawner)
 	if err != nil {
 		t.Fatalf("bind commitless round: %v", err)
 	}
-	if err := svc.AppendEvent(ctx, noCommit.ID, ReviewVerdictInnerKind, withCommit(ncBound.AssignmentEventID, "anything"), reviewerX); !errors.Is(err, ErrVerdictRoundArtifactInvalid) {
+	if err := svc.AppendEvent(ctx, noCommit.ID, ReviewVerdictInnerKind, withCommit(ncBound.AssignmentEventID, "anything"), reviewerNc); !errors.Is(err, ErrVerdictRoundArtifactInvalid) {
 		t.Fatalf("commitless-round verdict = %v, want ErrVerdictRoundArtifactInvalid", err)
 	}
 
@@ -280,11 +285,12 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	if err := svc.AppendEvent(ctx, conflicted.ID, "implementation.ready_for_review", map[string]any{"commit": "dddd444", "exact_commit": "eeee555"}, actorA); err != nil {
 		t.Fatalf("declare conflicting round: %v", err)
 	}
-	cfBound, err := svc.AssignSpawned(ctx, conflicted.ID, reviewerX.ID, spawner)
+	reviewerCf := createAssignmentToken(t, ctx, pool, writer, "verdict-conflicted", domain.SourceAgent, false, root)
+	cfBound, err := svc.AssignSpawned(ctx, conflicted.ID, reviewerCf.ID, spawner)
 	if err != nil {
 		t.Fatalf("bind conflicting round: %v", err)
 	}
-	if err := svc.AppendEvent(ctx, conflicted.ID, ReviewVerdictInnerKind, withCommit(cfBound.AssignmentEventID, "dddd444"), reviewerX); !errors.Is(err, ErrVerdictRoundArtifactInvalid) {
+	if err := svc.AppendEvent(ctx, conflicted.ID, ReviewVerdictInnerKind, withCommit(cfBound.AssignmentEventID, "dddd444"), reviewerCf); !errors.Is(err, ErrVerdictRoundArtifactInvalid) {
 		t.Fatalf("conflicting-round verdict = %v, want ErrVerdictRoundArtifactInvalid", err)
 	}
 
@@ -301,15 +307,18 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 	}
 
 	// Yield releases the binding; the gap fails closed until a rebind.
+	// (Reviewer identities are single-use since slice 3a, so every fresh
+	// binding in this test provisions a fresh token.)
 	yielded := createClaimableItem(t, ctx, svc, actorA, "yielded verdict item")
-	yBound, err := svc.AssignSpawned(ctx, yielded.ID, reviewerX.ID, spawner)
+	reviewerYd := createAssignmentToken(t, ctx, pool, writer, "verdict-yield", domain.SourceAgent, false, root)
+	yBound, err := svc.AssignSpawned(ctx, yielded.ID, reviewerYd.ID, spawner)
 	if err != nil {
 		t.Fatalf("bind for yield: %v", err)
 	}
-	if _, err := svc.Yield(ctx, yielded.ID, reviewerX); err != nil {
+	if _, err := svc.Yield(ctx, yielded.ID, reviewerYd); err != nil {
 		t.Fatalf("yield: %v", err)
 	}
-	if err := svc.AppendEvent(ctx, yielded.ID, ReviewVerdictInnerKind, verdict(yBound.AssignmentEventID), reviewerX); !errors.Is(err, ErrVerdictBindingRequired) {
+	if err := svc.AppendEvent(ctx, yielded.ID, ReviewVerdictInnerKind, verdict(yBound.AssignmentEventID), reviewerYd); !errors.Is(err, ErrVerdictBindingRequired) {
 		t.Fatalf("verdict after yield = %v, want ErrVerdictBindingRequired", err)
 	}
 	if err := svc.AppendEvent(ctx, yielded.ID, ReviewVerdictInnerKind, verdict(uuid.Nil), actorB); !errors.Is(err, ErrVerdictBindingRequired) {
