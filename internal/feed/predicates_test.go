@@ -70,8 +70,8 @@ func TestNormalizeReadFilterLensVocabulary(t *testing.T) {
 		{Kind: PredicateActor, TokenID: tokenID},
 		{Kind: PredicateWorkItem, WorkItemID: itemID},
 		{Kind: PredicateWorkItemTree, WorkItemID: itemID},
-		{Kind: PredicateKindInclude, EventKinds: []string{" b ", "a", "b"}},
-		{Kind: PredicateKindExclude, EventKinds: []string{"c"}},
+		{Kind: PredicateKindInclude, EventKinds: []string{" " + domain.EventWorkItemTransitioned + " ", domain.EventMessageCaptured, domain.EventWorkItemTransitioned}},
+		{Kind: PredicateKindExclude, EventKinds: []string{domain.EventWorkItemCreated}},
 	}
 	filter, err := NormalizeReadFilter(ReadFilter{Predicates: valid})
 	if err != nil {
@@ -82,7 +82,9 @@ func TestNormalizeReadFilterLensVocabulary(t *testing.T) {
 	}
 	for _, predicate := range filter.Predicates {
 		if predicate.Kind == PredicateKindInclude {
-			if len(predicate.EventKinds) != 2 || predicate.EventKinds[0] != "a" || predicate.EventKinds[1] != "b" {
+			want := []string{domain.EventMessageCaptured, domain.EventWorkItemTransitioned}
+			slices.Sort(want)
+			if !slices.Equal(predicate.EventKinds, want) {
 				t.Fatalf("EventKinds not canonicalized: %+v", predicate.EventKinds)
 			}
 		}
@@ -91,15 +93,17 @@ func TestNormalizeReadFilterLensVocabulary(t *testing.T) {
 	invalid := []Predicate{
 		{Kind: PredicateActor},
 		{Kind: PredicateActor, TokenID: tokenID, WorkItemID: itemID},
-		{Kind: PredicateActor, TokenID: tokenID, EventKinds: []string{"a"}},
+		{Kind: PredicateActor, TokenID: tokenID, EventKinds: []string{domain.EventMessageCaptured}},
 		{Kind: PredicateWorkItem},
 		{Kind: PredicateWorkItem, WorkItemID: itemID, TokenID: tokenID},
-		{Kind: PredicateWorkItemTree, WorkItemID: itemID, EventKinds: []string{"a"}},
+		{Kind: PredicateWorkItemTree, WorkItemID: itemID, EventKinds: []string{domain.EventMessageCaptured}},
 		{Kind: PredicateKindInclude},
 		{Kind: PredicateKindInclude, EventKinds: []string{""}},
 		{Kind: PredicateKindInclude, EventKinds: []string{"  "}},
-		{Kind: PredicateKindExclude, EventKinds: []string{"a"}, TokenID: tokenID},
-		{Kind: PredicateKindExclude, EventKinds: []string{"a"}, WorkItemID: itemID},
+		{Kind: PredicateKindInclude, EventKinds: []string{"work_item.transitionedd"}},
+		{Kind: PredicateKindExclude, EventKinds: []string{"totally.unknown"}},
+		{Kind: PredicateKindExclude, EventKinds: []string{domain.EventMessageCaptured}, TokenID: tokenID},
+		{Kind: PredicateKindExclude, EventKinds: []string{domain.EventMessageCaptured}, WorkItemID: itemID},
 	}
 	for i, predicate := range invalid {
 		if _, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{predicate}}); !errors.Is(err, ErrInvalidPredicate) {
@@ -112,7 +116,7 @@ func TestCanonicalPredicateKeyIsOrderAndDuplicateInsensitive(t *testing.T) {
 	tokenID := uuid.New()
 	itemID := uuid.New()
 	a, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
-		{Kind: PredicateKindInclude, EventKinds: []string{"y", "x"}},
+		{Kind: PredicateKindInclude, EventKinds: []string{domain.EventWorkItemTransitioned, domain.EventMessageCaptured}},
 		{Kind: PredicateActor, TokenID: tokenID},
 		{Kind: PredicateWorkItemTree, WorkItemID: itemID},
 		{Kind: PredicateActor, TokenID: tokenID},
@@ -122,7 +126,7 @@ func TestCanonicalPredicateKeyIsOrderAndDuplicateInsensitive(t *testing.T) {
 	}
 	b, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{
 		{Kind: PredicateWorkItemTree, WorkItemID: itemID},
-		{Kind: PredicateKindInclude, EventKinds: []string{"x", "y", "x"}},
+		{Kind: PredicateKindInclude, EventKinds: []string{domain.EventMessageCaptured, domain.EventWorkItemTransitioned, domain.EventMessageCaptured}},
 		{Kind: PredicateActor, TokenID: tokenID},
 	}})
 	if err != nil {
@@ -152,18 +156,13 @@ func TestQueryKindsPushdownRetainsWakeKindsForAssignedLane(t *testing.T) {
 		t.Fatalf("normalize narrow: %v", err)
 	}
 	kinds := narrow.queryKinds()
-	for _, required := range []string{
-		domain.EventMessageCaptured,
-		domain.EventWorkItemTransitioned,
-		domain.EventWorkItemAssigned,
-		domain.EventWorkItemAssignmentReleased,
-	} {
+	// Under the assigned lane kind pushdown is disabled: every base kind can
+	// carry an explicit addressee, so the full set plus controls must scan.
+	for _, required := range append(slices.Clone(IncludedKinds),
+		domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased) {
 		if !slices.Contains(kinds, required) {
-			t.Errorf("assigned narrow pushdown dropped wake kind %s: %v", required, kinds)
+			t.Errorf("assigned lane pushdown dropped scannable kind %s: %v", required, kinds)
 		}
-	}
-	if slices.Contains(kinds, domain.EventWorkItemCreated) {
-		t.Errorf("pushdown retained non-included content kind: %v", kinds)
 	}
 
 	broad, err := NormalizeReadFilter(ReadFilter{Predicates: []Predicate{

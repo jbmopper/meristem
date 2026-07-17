@@ -207,9 +207,13 @@ func TestQuietSelfDirectedSignalsSurviveExclusionIntegration(t *testing.T) {
 			t.Fatalf("baseline assigned feed missing %q: %s", marker, baseline.Body.String())
 		}
 	}
+	if err := fixture.work.AppendEvent(fixture.ctx, fixture.assignedA.ID, "agent.quiet_self_test",
+		map[string]any{"marker": "a-outbound-directed", "addressee_token_id": fixture.actorB.Token.ID}, fixture.actorA.Token); err != nil {
+		t.Fatalf("append outbound directed note: %v", err)
+	}
 	rec = doREST(t, fixture.server.Handler(), http.MethodGet, "/v1/feed?limit=100&exclude_actor=self", fixture.actorA.Secret, "", nil)
 	assertRESTStatus(t, rec, http.StatusOK)
-	for _, hidden := range []string{"a-own-note", "quiet-self-own-terminalize"} {
+	for _, hidden := range []string{"a-own-note", "quiet-self-own-terminalize", "a-outbound-directed"} {
 		if strings.Contains(rec.Body.String(), hidden) {
 			t.Fatalf("exclude_actor=self leaked %q: %s", hidden, rec.Body.String())
 		}
@@ -240,6 +244,10 @@ func TestQuietSelfLongPollAndSSEIgnoreExcludedTrafficIntegration(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 	appendQuietSelfNote(t, fixture, "assignedB", "long-poll-excluded-b", fixture.actorB.Token)
+	if err := fixture.work.AppendEvent(fixture.ctx, fixture.assignedB.ID, "agent.quiet_self_test",
+		map[string]any{"marker": "long-poll-excluded-directed", "addressee_token_id": fixture.root.Token.ID}, fixture.actorB.Token); err != nil {
+		t.Fatalf("append excluded directed note: %v", err)
+	}
 	select {
 	case got := <-done:
 		t.Fatalf("excluded traffic ended long-poll early: status=%d body=%s", got.code, got.body)
@@ -252,8 +260,10 @@ func TestQuietSelfLongPollAndSSEIgnoreExcludedTrafficIntegration(t *testing.T) {
 		if got.code != http.StatusOK || !strings.Contains(got.body, "long-poll-included-root") {
 			t.Fatalf("included wake result: status=%d body=%s", got.code, got.body)
 		}
-		if strings.Contains(got.body, "long-poll-excluded-b") {
-			t.Fatalf("wake page leaked excluded event: %s", got.body)
+		for _, hidden := range []string{"long-poll-excluded-b", "long-poll-excluded-directed"} {
+			if strings.Contains(got.body, hidden) {
+				t.Fatalf("wake page leaked excluded event %q: %s", hidden, got.body)
+			}
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("long-poll did not wake on non-excluded event")
@@ -278,6 +288,10 @@ func TestQuietSelfLongPollAndSSEIgnoreExcludedTrafficIntegration(t *testing.T) {
 	}
 
 	appendQuietSelfNote(t, fixture, "assignedB", "sse-excluded-b", fixture.actorB.Token)
+	if err := fixture.work.AppendEvent(fixture.ctx, fixture.assignedB.ID, "agent.quiet_self_test",
+		map[string]any{"marker": "sse-excluded-directed", "addressee_token_id": fixture.root.Token.ID}, fixture.actorB.Token); err != nil {
+		t.Fatalf("append excluded directed sse note: %v", err)
+	}
 	select {
 	case frame := <-frames:
 		t.Fatalf("excluded traffic emitted an SSE frame: %s", frame.data)
