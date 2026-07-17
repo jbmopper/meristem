@@ -43,6 +43,7 @@ DEFAULT_TARGETS=(
 targets=("${DEFAULT_TARGETS[@]}")
 apply_claude_code=false
 print_remote=false
+session_target=""
 
 usage() {
   cat <<'USAGE'
@@ -51,6 +52,12 @@ usage:
 
 options:
   --targets a,b,c       Provision only these target names.
+  --session NAME        Mint one per-session credential (source=agent) named
+                        NAME, write .meristem/NAME.token, and print the
+                        MERISTEM_TOKEN_FILE export for this session. Touches
+                        no shared wrapper config. Name the credential under
+                        the agent persona's lineage (claude-fork, codex-0716)
+                        so principal rollup stays a naming query (3818efed).
   --apply-claude-code   Run `claude mcp add ...` if the Claude CLI is installed.
   --print-remote        Print remote-only targets that are intentionally not minted.
   -h, --help            Show this help.
@@ -83,6 +90,14 @@ while (($#)); do
       ;;
     --apply-claude-code)
       apply_claude_code=true
+      shift
+      ;;
+    --session)
+      session_target="${2:?--session requires a name}"
+      shift 2
+      ;;
+    --session=*)
+      session_target="${1#--session=}"
       shift
       ;;
     --print-remote)
@@ -210,7 +225,10 @@ if [[ ! -x "\$meristem_bin" ]]; then
 fi
 cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
-export MERISTEM_TOKEN="\$(cat "\$primary_repo/.meristem/claude-code-gui.token")"
+# MERISTEM_TOKEN_FILE lets a session point this wrapper at its own per-session
+# credential (minted with provision-assistant-access.sh --session) without
+# editing shared config; the per-app token remains the default (3818efed).
+export MERISTEM_TOKEN="\$(cat "\${MERISTEM_TOKEN_FILE:-\$primary_repo/.meristem/claude-code-gui.token}")"
 # Claude (like Cursor) rejects dot-namespaced MCP tool names; advertise the
 # underscore aliases. Dispatch still accepts canonical names.
 export MERISTEM_MCP_TOOL_NAMES="\${MERISTEM_MCP_TOOL_NAMES:-cursor}"
@@ -241,7 +259,8 @@ if [[ ! -x "\$meristem_bin" ]]; then
 fi
 cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
-export MERISTEM_TOKEN="\$(cat "\$primary_repo/.meristem/codex.token")"
+# Same per-session override contract as the Claude wrapper (3818efed).
+export MERISTEM_TOKEN="\$(cat "\${MERISTEM_TOKEN_FILE:-\$primary_repo/.meristem/codex.token}")"
 exec "\$meristem_bin" mcp
 EOF
   chmod 700 "$GENERATED_DIR/codex-meristem-command.sh"
@@ -274,6 +293,30 @@ apply_claude_code_config() {
 
 mkdir -p "$TOKEN_DIR"
 chmod 700 "$TOKEN_DIR"
+
+if [[ -n "$session_target" ]]; then
+  # Per-session credential: one mint, no shared wrapper regeneration, no
+  # claude-mcp registration. The session exports MERISTEM_TOKEN_FILE so the
+  # existing generated wrappers pick up its credential; every other session
+  # keeps its own.
+  $apply_claude_code && die "--session cannot be combined with --apply-claude-code"
+  log "provisioning per-session credential $session_target"
+  mint_target "$session_target"
+  session_file="$(token_file_for "$session_target")"
+  case "$session_file" in
+    /*) session_file_abs="$session_file" ;;
+    *)  session_file_abs="$REPO_ROOT/$session_file" ;;
+  esac
+  cat <<EOF
+
+done. Point this session's MCP wrapper at its own credential with:
+
+  export MERISTEM_TOKEN_FILE=$session_file_abs
+
+The shared per-app tokens and generated wrappers are unchanged.
+EOF
+  exit 0
+fi
 
 log "provisioning assistant tokens"
 for target in "${targets[@]}"; do
