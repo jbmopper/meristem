@@ -14,6 +14,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/jobqueue"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -262,7 +263,8 @@ func TestReviewDispatchBlockedRaceReturnsJobDormant(t *testing.T) {
 	if result.Outcome != workitems.ReviewDispatchDormant || result.Transitioned {
 		t.Fatalf("blocked review outcome = %+v, want dormant without transition", result)
 	}
-	assertJobState(t, ctx, pool, dispatchID, jobqueue.JobPending, 1, false)
+	// The dormant pass did no review work, so its claim attempt is refunded.
+	assertJobState(t, ctx, pool, dispatchID, jobqueue.JobPending, 0, false)
 	if canceled, err := queue.ReconcileDispatchJobs(ctx); err != nil {
 		t.Fatalf("reconcile blocked review job: %v", err)
 	} else if canceled != 0 {
@@ -272,6 +274,121 @@ func TestReviewDispatchBlockedRaceReturnsJobDormant(t *testing.T) {
 		t.Fatalf("claim blocked review: %v", err)
 	} else if found {
 		t.Fatal("blocked review job was claimable, want dormant")
+	}
+}
+
+// TestReviewDispatchBudgetDormantRefundsAttemptAndEscalates pins the 55d7995
+// accepted-review nit (fixed under ee916614): a job made dormant by the
+// concurrent-running budget stays claimable, so before the dormant refund
+// every worker pass consumed one attempt against a job that was never
+// startable — unbounded inflation for as long as the budget stayed full.
+// Each full claim→dormant cycle must now be attempts-neutral.
+func TestReviewDispatchBudgetDormantRefundsAttemptAndEscalates(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "review-dispatch-budget-dormant")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	// This test's database defines reviewer@1 itself (rootstocks are
+	// immutable, so it cannot layer a variant on seedReviewerCultivar): the
+	// xylem caps the dispatch actor at ONE concurrently running item, so a
+	// single started review child exhausts the budget for every later one.
+	svc := registry.NewService(pool, writer)
+	if _, _, err := svc.DefineTropism(ctx, systemTok.Token, registry.DefineTropismInput{
+		Name:        "checklist-all",
+		Version:     1,
+		Reducer:     registry.ReducerRef{Identity: "all_pass_checklist", Version: 1},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "all checklist items pass",
+	}); err != nil {
+		t.Fatalf("define reviewer tropism: %v", err)
+	}
+	if _, _, err := svc.DefineCultivar(ctx, systemTok.Token, registry.DefineCultivarInput{
+		Name:      "reviewer",
+		Version:   1,
+		Rootstock: true,
+		Tropism:   registry.TropismRef{Name: "checklist-all", Version: 1},
+		Profile: registry.Profile{
+			Briefing:       "briefings/reviewer.md",
+			ScopesTemplate: []string{"work_items.tree:{root}", "work_items.read", "work_items.write"},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 2, MaxWallSeconds: 3600, MaxDepth: 1, MaxConcurrentRunningPerToken: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "reviewer rootstock with a one-item concurrency budget",
+	}); err != nil {
+		t.Fatalf("define capped reviewer cultivar: %v", err)
+	}
+
+	createCapped := func(title string) domain.WorkItem {
+		t.Helper()
+		item, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+			Title:                      title,
+			State:                      domain.WorkItemTriaged,
+			SuggestedConvergenceChecks: []string{workitems.ReviewVerdictCheck},
+			HumanReviewStatus:          domain.HumanReviewWavedThrough,
+			Cultivar:                   "reviewer@1",
+			Actor:                      systemTok.Token,
+		})
+		if err != nil {
+			t.Fatalf("create capped reviewer item: %v", err)
+		}
+		return item
+	}
+
+	queue := jobqueue.NewService(pool)
+	service := workitems.NewService(pool, writer)
+
+	// First review child consumes the whole one-item budget.
+	first := createCapped("budget dormant first")
+	firstJob := appendDispatchRequestedForEpoch(t, ctx, pool, writer, systemTok.Token, first.ID, first.State, first.StateEnteredAt.Unix(), "reviewer@1")
+	if job, found, err := queue.ClaimNextReview(ctx, time.Minute); err != nil || !found || job.ID != firstJob {
+		t.Fatalf("claim first review = (%+v, %t, %v), want job %s", job, found, err, firstJob)
+	}
+	if started, err := service.StartReviewDispatch(ctx, firstJob, systemTok.Token); err != nil || started.Outcome != workitems.ReviewDispatchStarted {
+		t.Fatalf("start first review = (%+v, %v), want started", started, err)
+	}
+
+	// Second child can be claimed but not started while the budget is full.
+	// The dormant pass must refund its attempt — attempts count startable
+	// work, never gate collisions — and the exhaustion escalates the item to
+	// a human, which parks the job unclaimable instead of letting it spin.
+	second := createCapped("budget dormant second")
+	secondJob := appendDispatchRequestedForEpoch(t, ctx, pool, writer, systemTok.Token, second.ID, second.State, second.StateEnteredAt.Unix(), "reviewer@1")
+	job, found, err := queue.ClaimNextReview(ctx, time.Minute)
+	if err != nil || !found || job.ID != secondJob {
+		t.Fatalf("claim second review = (%+v, %t, %v), want job %s", job, found, err, secondJob)
+	}
+	if job.Attempts != 1 {
+		t.Fatalf("claimed attempts = %d, want 1", job.Attempts)
+	}
+	result, err := service.StartReviewDispatch(ctx, secondJob, systemTok.Token)
+	if err != nil {
+		t.Fatalf("start second review: %v", err)
+	}
+	if result.Outcome != workitems.ReviewDispatchDormant || result.Transitioned {
+		t.Fatalf("budget outcome = %+v, want dormant without transition", result)
+	}
+	assertJobState(t, ctx, pool, secondJob, jobqueue.JobPending, 0, false)
+
+	// The exhaustion escalated the child to human attention; while the human
+	// gate holds, the pending job is not claimable, so attempts cannot spin.
+	got, err := service.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("get dormant child: %v", err)
+	}
+	if got.HumanReviewStatus != domain.HumanReviewBlocked {
+		t.Fatalf("dormant child human_review_status = %s, want blocked via xylem escalation", got.HumanReviewStatus)
+	}
+	if _, found, err := queue.ClaimNextReview(ctx, time.Minute); err != nil {
+		t.Fatalf("claim while escalated: %v", err)
+	} else if found {
+		t.Fatal("escalated dormant job was claimable, want parked")
 	}
 }
 
