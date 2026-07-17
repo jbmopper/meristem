@@ -385,7 +385,7 @@ func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind strin
 		return err
 	}
 	if innerKind == ReviewVerdictInnerKind {
-		if err := s.requireVerdictAuthority(ctx, tx, id, actor, verdictDetail.AssignmentEventID); err != nil {
+		if err := s.requireVerdictAuthority(ctx, tx, id, actor, verdictDetail); err != nil {
 			return err
 		}
 	}

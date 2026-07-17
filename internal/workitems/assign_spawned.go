@@ -135,6 +135,17 @@ var ErrVerdictGenerationRequired = errors.New("workitems: review verdict must na
 // authority in the gap, so a stale process cannot slip through it.
 var ErrVerdictBindingRequired = errors.New("workitems: this item's reviewer binding was released; rebind before recording a verdict")
 
+// ErrVerdictStaleRound refuses a verdict whose binding predates the item's
+// current review round: a new implementation.ready_for_review declares a new
+// artifact, and a binding created before it cannot carry a verdict for it —
+// the executor must rebind, so a verdict for commit A can never satisfy the
+// checklist for commit B.
+var ErrVerdictStaleRound = errors.New("workitems: the reviewer binding predates the current review round; rebind against the new artifact")
+
+// ErrVerdictWrongArtifact refuses a verdict whose reviewed_commit does not
+// name the current round's exact artifact commit.
+var ErrVerdictWrongArtifact = errors.New("workitems: review verdict does not name the current round's exact reviewed commit")
+
 // requireVerdictAuthority is the verdict-authority gate (ee916614 slice 2),
 // enforced here in the one canonical domain operation REST, MCP, and worker
 // paths share. Authority is fenced to the binding GENERATION, not just the
@@ -154,7 +165,7 @@ var ErrVerdictBindingRequired = errors.New("workitems: this item's reviewer bind
 // guarantees no unauthorized verdict enters the log while bindings are in
 // use. The assignment row is read under lock so a concurrent release or
 // claim serializes against the verdict.
-func (s *Service) requireVerdictAuthority(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor domain.Token, claimedGeneration uuid.UUID) error {
+func (s *Service) requireVerdictAuthority(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor domain.Token, detail ReviewVerdictDetail) error {
 	state, err := scanAssignmentStateForUpdate(ctx, tx, id)
 	if err != nil {
 		if errors.Is(err, ErrAssignmentStateMissing) {
@@ -172,13 +183,13 @@ func (s *Service) requireVerdictAuthority(ctx context.Context, tx pgx.Tx, id uui
 			if state.Assignment.HolderTokenID != actor.ID {
 				return fmt.Errorf("%w: holder=%s actor=%s expires_at=%s", ErrVerdictNotFromBoundReviewer, state.Assignment.HolderTokenID, actor.ID, state.Assignment.ExpiresAt.Format(time.RFC3339))
 			}
-			if claimedGeneration == uuid.Nil {
+			if detail.AssignmentEventID == uuid.Nil {
 				return fmt.Errorf("%w: current generation is %s", ErrVerdictGenerationRequired, state.Assignment.AssignmentEventID)
 			}
-			if claimedGeneration != state.Assignment.AssignmentEventID {
-				return fmt.Errorf("%w: named %s, current is %s", ErrVerdictStaleGeneration, claimedGeneration, state.Assignment.AssignmentEventID)
+			if detail.AssignmentEventID != state.Assignment.AssignmentEventID {
+				return fmt.Errorf("%w: named %s, current is %s", ErrVerdictStaleGeneration, detail.AssignmentEventID, state.Assignment.AssignmentEventID)
 			}
-			return nil
+			return s.requireCurrentReviewRound(ctx, tx, id, state.StateEventSeq, detail)
 		}
 		// The recorded binding has expired and nothing rebound: authority
 		// ended with the lease.
@@ -190,8 +201,44 @@ func (s *Service) requireVerdictAuthority(ctx context.Context, tx pgx.Tx, id uui
 	}
 	// Never bound: legacy latest-verdict-wins — but a generation claim that
 	// cannot possibly be current is refused, never ignored.
-	if claimedGeneration != uuid.Nil {
-		return fmt.Errorf("%w: named %s on an item with no binding", ErrVerdictStaleGeneration, claimedGeneration)
+	if detail.AssignmentEventID != uuid.Nil {
+		return fmt.Errorf("%w: named %s on an item with no binding", ErrVerdictStaleGeneration, detail.AssignmentEventID)
+	}
+	return nil
+}
+
+// requireCurrentReviewRound is the artifact half of verdict fencing: the
+// binding must POSTDATE the item's current review round, and when the round
+// declares an exact commit the verdict must name it. A new
+// implementation.ready_for_review declares a new artifact; a binding created
+// before it cannot carry a verdict for it, so the executor rebinds per round
+// and a verdict for commit A structurally cannot satisfy the checklist for
+// commit B. Items that declare no rounds are unaffected.
+func (s *Service) requireCurrentReviewRound(ctx context.Context, tx pgx.Tx, id uuid.UUID, bindingSeq int64, detail ReviewVerdictDetail) error {
+	var roundSeq int64
+	var roundCommit string
+	err := tx.QueryRow(ctx, `
+		SELECT seq,
+		       COALESCE(payload->'inner'->>'commit', payload->'inner'->>'exact_commit', '')
+		FROM events
+		WHERE subject_kind = 'work_item'
+		  AND subject_id = $1
+		  AND kind = $2
+		  AND payload->>'inner_kind' = 'implementation.ready_for_review'
+		ORDER BY seq DESC
+		LIMIT 1
+	`, id, domain.EventWorkItemEventAppended).Scan(&roundSeq, &roundCommit)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("workitems: read current review round: %w", err)
+	}
+	if roundSeq > bindingSeq {
+		return fmt.Errorf("%w: round seq %d postdates binding seq %d", ErrVerdictStaleRound, roundSeq, bindingSeq)
+	}
+	if roundCommit != "" && detail.ReviewedCommit != roundCommit {
+		return fmt.Errorf("%w: verdict names %q, current round is %s", ErrVerdictWrongArtifact, detail.ReviewedCommit, roundCommit)
 	}
 	return nil
 }

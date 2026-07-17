@@ -28,12 +28,14 @@ const (
 )
 
 // ReviewVerdictDetail is the typed portion of a review verdict payload plus
-// the binding-generation claim used by the verdict-authority gate (ee916614
-// slice 2). AssignmentEventID is the work_item.assigned event the reviewer
-// believes authorizes it; uuid.Nil means the payload named none.
+// the authority claims used by the verdict gate (ee916614 slice 2).
+// AssignmentEventID is the work_item.assigned event the reviewer believes
+// authorizes it (uuid.Nil: none named); ReviewedCommit is the exact artifact
+// the reviewer read (empty: none named).
 type ReviewVerdictDetail struct {
 	Verdict           ReviewVerdict
 	AssignmentEventID uuid.UUID
+	ReviewedCommit    string
 }
 
 // ParseReviewVerdict validates the typed portion of a review verdict payload.
@@ -60,6 +62,7 @@ func ParseReviewVerdictDetail(payload any) (ReviewVerdictDetail, error) {
 		PayloadVersion    *int          `json:"payload_version"`
 		Verdict           ReviewVerdict `json:"verdict"`
 		AssignmentEventID *string       `json:"assignment_event_id"`
+		ReviewedCommit    string        `json:"reviewed_commit"`
 	}
 	if err := json.Unmarshal(encoded, &header); err != nil {
 		return ReviewVerdictDetail{}, fmt.Errorf("%w: review verdict payload must be an object: %v", ErrInvalidRequest, err)
@@ -74,7 +77,7 @@ func ParseReviewVerdictDetail(payload any) (ReviewVerdictDetail, error) {
 	if version != 1 {
 		return ReviewVerdictDetail{}, fmt.Errorf("%w: unsupported review verdict payload_version %d", ErrInvalidRequest, version)
 	}
-	detail := ReviewVerdictDetail{}
+	detail := ReviewVerdictDetail{ReviewedCommit: header.ReviewedCommit}
 	if rawClaim, present := object["assignment_event_id"]; present {
 		if string(rawClaim) == "null" || header.AssignmentEventID == nil {
 			return ReviewVerdictDetail{}, fmt.Errorf("%w: review verdict assignment_event_id must be a UUID string", ErrInvalidRequest)

@@ -179,6 +179,63 @@ func TestVerdictAuthorityGenerationFencing(t *testing.T) {
 		t.Fatalf("new holder with current generation: %v", err)
 	}
 
+	// Round fencing (codex round-2 P1): while ONE binding generation stays
+	// active, the artifact must not be able to move under it. A new
+	// implementation.ready_for_review postdating the binding voids its
+	// verdict authority — the executor must rebind per round — and the
+	// verdict must name the round's exact commit.
+	rounds := createClaimableItem(t, ctx, svc, actorA, "round fenced item")
+	roundA := map[string]any{"commit": "aaaa111", "branch": "claude/demo"}
+	if err := svc.AppendEvent(ctx, rounds.ID, "implementation.ready_for_review", roundA, actorA); err != nil {
+		t.Fatalf("declare round A: %v", err)
+	}
+	roundBound, err := svc.AssignSpawned(ctx, rounds.ID, reviewerX.ID, spawner)
+	if err != nil {
+		t.Fatalf("bind for round A: %v", err)
+	}
+	gr := roundBound.AssignmentEventID
+	withCommit := func(generation uuid.UUID, commit string) map[string]any {
+		p := verdict(generation)
+		p["reviewed_commit"] = commit
+		return p
+	}
+	// Wrong artifact refused; right artifact lands.
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "wrong000"), reviewerX); !errors.Is(err, ErrVerdictWrongArtifact) {
+		t.Fatalf("wrong-commit verdict = %v, want ErrVerdictWrongArtifact", err)
+	}
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "aaaa111"), reviewerX); err != nil {
+		t.Fatalf("round A verdict: %v", err)
+	}
+	// The artifact moves A -> B with the SAME binding generation active: the
+	// old generation must not carry a verdict for the new round, with the old
+	// commit or the new one.
+	roundB := map[string]any{"commit": "bbbb222", "branch": "claude/demo"}
+	if err := svc.AppendEvent(ctx, rounds.ID, "implementation.ready_for_review", roundB, actorA); err != nil {
+		t.Fatalf("declare round B: %v", err)
+	}
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "aaaa111"), reviewerX); !errors.Is(err, ErrVerdictStaleRound) {
+		t.Fatalf("same-generation stale-round verdict (old commit) = %v, want ErrVerdictStaleRound", err)
+	}
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(gr, "bbbb222"), reviewerX); !errors.Is(err, ErrVerdictStaleRound) {
+		t.Fatalf("same-generation stale-round verdict (new commit) = %v, want ErrVerdictStaleRound", err)
+	}
+	// Rebinding against round B restores authority for exactly round B. The
+	// expired-epoch release path needs the incumbent gone first: the holder
+	// yields, then the spawner rebinds.
+	if _, err := svc.Yield(ctx, rounds.ID, reviewerX); err != nil {
+		t.Fatalf("yield round-A binding: %v", err)
+	}
+	reboundRound, err := svc.AssignSpawned(ctx, rounds.ID, reviewerX.ID, spawner)
+	if err != nil {
+		t.Fatalf("rebind for round B: %v", err)
+	}
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(reboundRound.AssignmentEventID, "aaaa111"), reviewerX); !errors.Is(err, ErrVerdictWrongArtifact) {
+		t.Fatalf("rebound verdict citing old commit = %v, want ErrVerdictWrongArtifact", err)
+	}
+	if err := svc.AppendEvent(ctx, rounds.ID, ReviewVerdictInnerKind, withCommit(reboundRound.AssignmentEventID, "bbbb222"), reviewerX); err != nil {
+		t.Fatalf("rebound verdict for round B: %v", err)
+	}
+
 	// Yield releases the binding; the gap fails closed until a rebind.
 	yielded := createClaimableItem(t, ctx, svc, actorA, "yielded verdict item")
 	yBound, err := svc.AssignSpawned(ctx, yielded.ID, reviewerX.ID, spawner)
