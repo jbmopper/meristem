@@ -3,6 +3,7 @@ package workitems
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -138,5 +139,89 @@ func TestReviewLaunchProjectorsReplayIdempotent(t *testing.T) {
 	}
 	if state != "succeeded" || updatedEvent != resolved.ID {
 		t.Fatalf("row after replay = %s/%s, want succeeded/%s", state, updatedEvent, resolved.ID)
+	}
+
+	// Per-step causal identity (round-2 finding): replaying an EARLIER exact
+	// event after later transitions is still a no-op — the row remembers
+	// which event caused each step, not only the latest update.
+	tx, err = s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (reviewLaunchHandleProjector{}).Apply(ctx, tx, handled); err != nil {
+		t.Fatalf("handle replay after success: %v", err)
+	}
+	if err := (reviewLaunchReservedProjector{}).Apply(ctx, tx, reserved); err != nil {
+		t.Fatalf("reserved replay after success: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT state FROM review_launch
+		WHERE work_item_id = $1 AND round_seq = $2 AND attempt = $3
+	`, item.ID, res.RoundSeq, job.Attempts).Scan(&state); err != nil {
+		t.Fatalf("read row after out-of-order replay: %v", err)
+	}
+	if state != "succeeded" {
+		t.Fatalf("out-of-order replay changed state to %s", state)
+	}
+}
+
+// v1 (exact-parent) reservation events replay with their original shape:
+// the fencing fields project as NULL, and every fenced operation fails
+// closed on them rather than trusting an unfenced incarnation.
+func TestReviewLaunchV1ReservationCompat(t *testing.T) {
+	ctx := context.Background()
+	s := newProvisionStack(t, ctx, 3600)
+	item, job := s.admitReviewChild(t, ctx, "v1 compat child", "v1c1111")
+
+	v1 := domain.Event{
+		ID:          uuid.New(),
+		SubjectKind: domain.SubjectWorkItem,
+		SubjectID:   item.ID,
+		Kind:        domain.EventReviewLaunchReserved,
+		Source:      domain.SourceSystem,
+	}
+	payload, err := json.Marshal(map[string]any{
+		"payload_version":     1,
+		"job_id":              job.ID.String(),
+		"round_seq":           1,
+		"attempt":             1,
+		"assignment_event_id": uuid.NewString(),
+		"reviewer_token_id":   s.actorA.ID.String(),
+		"deadline":            "2026-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1.Payload = json.RawMessage(payload)
+	v1.OccurredAt = item.CreatedAt
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (reviewLaunchReservedProjector{}).Apply(ctx, tx, v1); err != nil {
+		t.Fatalf("v1 reservation replay: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var issuer *uuid.UUID
+	if err := s.pool.QueryRow(ctx, `
+		SELECT issuer_token_id FROM review_launch
+		WHERE work_item_id = $1 AND round_seq = 1 AND attempt = 1
+	`, item.ID).Scan(&issuer); err != nil {
+		t.Fatalf("read v1 row: %v", err)
+	}
+	if issuer != nil {
+		t.Fatal("v1 reservation must project without fencing identity")
+	}
+	// Fenced operations fail closed on the v1 row.
+	if err := s.svc.RecordReviewLaunchHandle(ctx, ReviewLaunchHandleInput{
+		WorkItemID: item.ID, RoundSeq: 1, Attempt: 1,
+		AssignmentEventID: uuid.New(), Pid: 1, Pgid: 1, StartToken: "x",
+	}, s.issuer); !errors.Is(err, ErrReviewLaunchState) {
+		t.Fatalf("handle on v1 row = %v, want fail-closed ErrReviewLaunchState", err)
 	}
 }

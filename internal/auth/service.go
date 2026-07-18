@@ -217,14 +217,44 @@ func (s *Service) MintReviewerCredential(ctx context.Context, tx pgx.Tx, in Mint
 	if len(in.TemplateScopes) == 0 {
 		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential requires a scopes template")
 	}
+	// Canonicalize FIRST, then judge (round-2 finding: a blank scope became
+	// legacy-unscoped broad authority and a whitespace-prefixed foreign tree
+	// slipped the prefix check). Only the closed reviewer-safe vocabulary
+	// mints, plus the exact child tree scope, which must be present.
 	const treePrefix = "work_items.tree:"
+	childTree := treePrefix + in.ChildID.String()
+	reviewerSafe := map[string]bool{
+		"work_items.read":          true,
+		"work_items.write":         true,
+		"work_items.tracker_write": true,
+		"feed.read_assigned":       true,
+	}
 	scopes := make([]string, 0, len(in.TemplateScopes))
-	for _, scope := range in.TemplateScopes {
-		resolved := strings.ReplaceAll(scope, "{root}", in.ChildID.String())
-		if strings.HasPrefix(resolved, treePrefix) && resolved != treePrefix+in.ChildID.String() {
-			return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential tree scope %q does not name the exact review child", scope)
+	seen := make(map[string]bool, len(in.TemplateScopes))
+	hasChildTree := false
+	for _, raw := range in.TemplateScopes {
+		resolved := strings.TrimSpace(strings.ReplaceAll(raw, "{root}", in.ChildID.String()))
+		if resolved == "" {
+			return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential template contains a blank scope")
+		}
+		if seen[resolved] {
+			return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential template repeats scope %q", resolved)
+		}
+		seen[resolved] = true
+		switch {
+		case resolved == childTree:
+			hasChildTree = true
+		case strings.HasPrefix(resolved, treePrefix):
+			return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential tree scope %q does not name the exact review child", raw)
+		case reviewerSafe[resolved]:
+			// Allowed non-tree vocabulary.
+		default:
+			return CreateTokenResult{}, fmt.Errorf("auth: scope %q is outside the reviewer-safe vocabulary", resolved)
 		}
 		scopes = append(scopes, resolved)
+	}
+	if !hasChildTree {
+		return CreateTokenResult{}, fmt.Errorf("auth: reviewer credential must carry the exact child tree scope %s", childTree)
 	}
 	expiresAt := in.ExpiresAt.UTC()
 	return s.appendTokenCreated(ctx, tx, appendTokenInput{

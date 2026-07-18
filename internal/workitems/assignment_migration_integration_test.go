@@ -38,6 +38,9 @@ func TestAssignmentMigrationBackfillsNonterminalItemFromCreatedEvent(t *testing.
 		t.Fatalf("create actor: %v", err)
 	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("roll back launch fencing migration: %v", err)
+	}
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 		t.Fatalf("roll back reviewer provisioning migration: %v", err)
 	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
@@ -149,6 +152,9 @@ func TestTerminalAddresseeMigrationBackfillsActiveEpochOnly(t *testing.T) {
 	// Dropping 0037 then 0036 erases only the newer projection surface. The
 	// events and 0035 lifecycle rows left behind are exactly the state an
 	// older binary would present at guarded upgrade time.
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("roll back launch fencing migration: %v", err)
+	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 		t.Fatalf("roll back reviewer provisioning migration: %v", err)
 	}
@@ -354,6 +360,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back launch fencing migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back reviewer provisioning migration: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
@@ -425,6 +434,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back launch fencing migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back reviewer provisioning migration: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
@@ -455,6 +467,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back launch fencing migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back reviewer provisioning migration: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
@@ -483,6 +498,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "missing assignment placeholder")
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back launch fencing migration: %v", err)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back reviewer provisioning migration: %v", err)
 		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
@@ -502,6 +520,9 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		ctx := context.Background()
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "nonterminal lifecycle drift")
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back launch fencing migration: %v", err)
+		}
 		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 			t.Fatalf("roll back reviewer provisioning migration: %v", err)
 		}
@@ -543,6 +564,9 @@ func migrateMalformedPriorAssignedFixture(t *testing.T, assigneeValue string) er
 	ctx := context.Background()
 	pool, writer, _, actor, _ := newAssignmentTestStack(t, ctx)
 	item := createClaimableItem(t, ctx, NewService(pool, writer), actor, "malformed prior assigned control")
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("roll back launch fencing migration: %v", err)
+	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 		t.Fatalf("roll back reviewer provisioning migration: %v", err)
 	}

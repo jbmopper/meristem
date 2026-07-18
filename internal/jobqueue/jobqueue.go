@@ -255,6 +255,17 @@ func (s *Service) ClaimAdmittedReviewAs(ctx context.Context, owner uuid.UUID, le
 			      AND created.kind = 'work_item.created'
 			      AND split_part(btrim(COALESCE(created.payload->>'cultivar', '')), '@', 1) = $3
 			  )
+			  -- A launch still reserved, handled, or running for this job's
+			  -- current attempt must not have its lease generation advanced
+			  -- underneath it: success and handle commits fence on the exact
+			  -- incarnation, and this reclaim racing them would strand a live
+			  -- launch behind a newer lease (round-2 finding).
+			  AND NOT EXISTS (
+			    SELECT 1 FROM review_launch rl
+			    WHERE rl.job_id = jq.id
+			      AND rl.attempt = jq.attempts
+			      AND rl.state IN ('reserved', 'handled', 'succeeded')
+			  )
 			ORDER BY jq.created_at ASC, jq.id ASC
 			FOR UPDATE OF jq SKIP LOCKED
 			LIMIT 1
@@ -484,19 +495,38 @@ func (s *Service) RenewReviewLease(ctx context.Context, id uuid.UUID, owner uuid
 	if leaseMillis <= 0 {
 		leaseMillis = 1
 	}
+	// clock_timestamp everywhere: a blocking wait on the row lock must not
+	// let a stale transaction clock revive an expired lease. Renewal is the
+	// live-supervisor retry AFTER a terminally failed or abandoned launch:
+	// it requires an unexpired lease and refuses to supersede an attempt
+	// whose launch is still reserved, handled, or running (round-2 finding).
 	row := s.pool.QueryRow(ctx, `
-		UPDATE job_queue
-		SET attempts = attempts + 1,
-		    lease_generation = lease_generation + 1,
-		    lease_until = now() + ($4::bigint * interval '1 millisecond'),
+		UPDATE job_queue jq
+		SET attempts = jq.attempts + 1,
+		    lease_generation = jq.lease_generation + 1,
+		    lease_until = clock_timestamp() + ($4::bigint * interval '1 millisecond'),
 		    updated_at = now()
-		WHERE id = $1
-		  AND state = 'leased'
-		  AND lease_owner = $2
-		  AND lease_generation = $3
-		RETURNING id, kind, work_item_id, state, payload,
-		          attempts, lease_until, lease_owner, lease_generation,
-		          created_at, updated_at
+		WHERE jq.id = $1
+		  AND jq.state = 'leased'
+		  AND jq.lease_owner = $2
+		  AND jq.lease_generation = $3
+		  AND jq.lease_until IS NOT NULL
+		  AND jq.lease_until > clock_timestamp()
+		  AND EXISTS (
+		    SELECT 1 FROM review_launch rl
+		    WHERE rl.job_id = jq.id
+		      AND rl.attempt = jq.attempts
+		      AND rl.state IN ('failed', 'abandoned')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM review_launch rl
+		    WHERE rl.job_id = jq.id
+		      AND rl.attempt = jq.attempts
+		      AND rl.state IN ('reserved', 'handled', 'succeeded')
+		  )
+		RETURNING jq.id, jq.kind, jq.work_item_id, jq.state, jq.payload,
+		          jq.attempts, jq.lease_until, jq.lease_owner, jq.lease_generation,
+		          jq.created_at, jq.updated_at
 	`, id, owner, generation, leaseMillis)
 	job, err := scanJob(row)
 	if err != nil {

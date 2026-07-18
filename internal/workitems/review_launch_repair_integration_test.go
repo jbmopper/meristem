@@ -140,8 +140,19 @@ func TestHandledLaunchAtDeadlineIsMarkedNotFreed(t *testing.T) {
 	}, s.issuer); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
+	// Termination marking is an authorized post-deadline act (round-2
+	// finding): before the deadline it is refused even for the issuer, and
+	// an unrelated system actor without the recovery capability can never
+	// demand a kill.
+	if err := s.svc.MarkReviewLaunchTerminationDue(ctx, item.ID, res.RoundSeq, job.Attempts, s.issuer); !errors.Is(err, ErrReviewLaunchState) {
+		t.Fatalf("pre-deadline termination mark = %v, want ErrReviewLaunchState", err)
+	}
+	stranger := createAssignmentToken(t, ctx, s.pool, s.writer, "termination-stranger", domain.SourceSystem, false, s.root)
 	if wait := time.Until(res.Deadline) + 150*time.Millisecond; wait > 0 {
 		time.Sleep(wait)
+	}
+	if err := s.svc.MarkReviewLaunchTerminationDue(ctx, item.ID, res.RoundSeq, job.Attempts, stranger); !errors.Is(err, ErrReviewLaunchState) {
+		t.Fatalf("unauthorized termination mark = %v, want ErrReviewLaunchState", err)
 	}
 	if _, err := s.svc.ReconcileReviewLaunches(ctx, s.auth, s.issuer); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -213,19 +224,29 @@ func TestLaunchHandleAndSuccessFencing(t *testing.T) {
 		t.Fatalf("conflicting handle replay = %v, want ErrReviewLaunchState", err)
 	}
 
-	// A renewed lease supersedes the reservation: its stale success must
-	// fail closed instead of completing the newer attempt's job.
-	renewed, err := s.queue.RenewReviewLease(ctx, job.ID, s.issuer.ID, job.LeaseGeneration, time.Minute)
-	if err != nil {
-		t.Fatalf("renew: %v", err)
+	// While a launch is reserved/handled/running, the lease generation
+	// cannot legally move underneath it (round-2 race finding): renewal is
+	// refused because the attempt's launch is not failed/abandoned, and the
+	// admitted-reclaim path excludes the job entirely.
+	if _, err := s.queue.RenewReviewLease(ctx, job.ID, s.issuer.ID, job.LeaseGeneration, time.Minute); err == nil {
+		t.Fatal("renewal must be refused while the attempt's launch is handled")
 	}
+	if _, err := s.pool.Exec(ctx, `UPDATE job_queue SET lease_until = now() - interval '1 second' WHERE id = $1`, job.ID); err != nil {
+		t.Fatalf("lapse lease: %v", err)
+	}
+	if reclaimed, found, err := s.queue.ClaimAdmittedReviewAs(ctx, s.issuer.ID, time.Minute); err != nil {
+		t.Fatalf("reclaim probe: %v", err)
+	} else if found && reclaimed.ID == job.ID {
+		t.Fatal("reclaim must exclude a job whose launch is still handled")
+	}
+	// With the lease lapsed, the handled reservation no longer owns a live
+	// incarnation: success fails closed rather than completing anything.
 	if err := s.svc.ResolveReviewLaunch(ctx, s.auth, ResolveReviewLaunchInput{
 		WorkItemID: item.ID, RoundSeq: res.RoundSeq, Attempt: job.Attempts,
 		Outcome: ReviewLaunchSucceeded,
 	}, s.issuer); !errors.Is(err, ErrReviewLaunchState) {
-		t.Fatalf("stale-generation success = %v, want ErrReviewLaunchState", err)
+		t.Fatalf("lapsed-lease success = %v, want ErrReviewLaunchState", err)
 	}
-	_ = renewed
 }
 
 func TestClaimRefusesSelfReviewOnReviewChildren(t *testing.T) {
@@ -285,20 +306,31 @@ func TestReviewerCredentialAuthorityNarrowing(t *testing.T) {
 	}
 	_ = tx.Rollback(ctx)
 
-	// Foreign tree scopes never mint: a template violating the exact-child
-	// rule is refused inside auth, whatever the caller resolved.
-	tx, err = s.pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
+	// Scope canonicalization judges AFTER trimming and admits only the
+	// reviewer-safe vocabulary plus the exact child tree (round-2 finding:
+	// blank scopes minted legacy-unscoped broad authority and whitespace
+	// smuggled foreign trees past the prefix check).
+	for name, template := range map[string][]string{
+		"foreign tree":            {"work_items.tree:" + uuid.NewString(), "work_items.tree:{root}"},
+		"blank scope":             {"", "work_items.tree:{root}"},
+		"whitespace foreign tree": {" work_items.tree:" + uuid.NewString(), "work_items.tree:{root}"},
+		"portfolio-wide scope":    {"work_items.write_all", "work_items.tree:{root}"},
+		"duplicate scope":         {"work_items.read", "work_items.read", "work_items.tree:{root}"},
+		"missing child tree":      {"work_items.read"},
+	} {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.auth.MintReviewerCredential(ctx, tx, auth.MintReviewerCredentialInput{
+			Name: "widened", ChildID: item.ID,
+			TemplateScopes: template,
+			ExpiresAt:      time.Now().Add(time.Hour), Actor: s.issuer,
+		}); err == nil {
+			t.Fatalf("minted a credential from a %s template", name)
+		}
+		_ = tx.Rollback(ctx)
 	}
-	if _, err := s.auth.MintReviewerCredential(ctx, tx, auth.MintReviewerCredentialInput{
-		Name: "widened", ChildID: item.ID,
-		TemplateScopes: []string{"work_items.tree:" + uuid.NewString()},
-		ExpiresAt:      time.Now().Add(time.Hour), Actor: s.issuer,
-	}); err == nil {
-		t.Fatal("minted a credential whose tree scope names a foreign item")
-	}
-	_ = tx.Rollback(ctx)
 
 	// ValidateLive is the session-revalidation seam: live now, refused the
 	// moment the credential is revoked mid-session.

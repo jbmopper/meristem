@@ -21,11 +21,19 @@ import (
 // event claiming the same lifecycle key fails loudly.
 
 // reviewLaunchAppliedBy reports whether the projection row already reflects
-// the given event (exact replay) by matching its causal event ids.
-func reviewLaunchAppliedBy(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID, roundSeq int64, attempt int, eventID uuid.UUID) (bool, error) {
+// the given event (exact replay) by matching the PER-STEP causal event id
+// column. The row remembers every lifecycle step's causing event, so
+// replaying an earlier exact event after later transitions still no-ops
+// (round-2 finding: remembering only the latest update was not enough).
+func reviewLaunchAppliedBy(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID, roundSeq int64, attempt int, column string, eventID uuid.UUID) (bool, error) {
+	switch column {
+	case "created_event_id", "handle_event_id", "resolved_event_id", "termination_event_id":
+	default:
+		return false, fmt.Errorf("review_launch projection lookup: unknown causal column %q", column)
+	}
 	var applied bool
 	err := tx.QueryRow(ctx, `
-		SELECT created_event_id = $4 OR updated_event_id = $4
+		SELECT COALESCE(`+column+` = $4, FALSE)
 		FROM review_launch
 		WHERE work_item_id = $1 AND round_seq = $2 AND attempt = $3
 	`, workItemID, roundSeq, attempt, eventID).Scan(&applied)
@@ -51,15 +59,26 @@ func (reviewLaunchReservedProjector) Apply(ctx context.Context, tx pgx.Tx, event
 		return fmt.Errorf("review_launch_reserved: %w", err)
 	}
 	if payload.PayloadVersion == 0 {
-		payload.PayloadVersion = reviewLaunchPayloadVersion
+		payload.PayloadVersion = reviewLaunchPayloadVersionV1
 	}
-	if payload.PayloadVersion != reviewLaunchPayloadVersion {
+	if payload.PayloadVersion != reviewLaunchPayloadVersionV1 && payload.PayloadVersion != reviewLaunchPayloadVersion {
 		return fmt.Errorf("review_launch_reserved: unsupported payload_version %d", payload.PayloadVersion)
 	}
 	if payload.JobID == uuid.Nil || payload.AssignmentEventID == uuid.Nil ||
-		payload.ReviewerTokenID == uuid.Nil || payload.IssuerTokenID == uuid.Nil ||
-		payload.LeaseOwner == uuid.Nil || payload.Attempt <= 0 || payload.Deadline.IsZero() {
-		return fmt.Errorf("review_launch_reserved: job_id, assignment_event_id, reviewer_token_id, issuer_token_id, lease_owner, positive attempt, and deadline are required")
+		payload.ReviewerTokenID == uuid.Nil || payload.Attempt <= 0 || payload.Deadline.IsZero() {
+		return fmt.Errorf("review_launch_reserved: job_id, assignment_event_id, reviewer_token_id, positive attempt, and deadline are required")
+	}
+	// v1 (exact-parent) reservations predate the fencing fields and project
+	// with NULLs — every fenced operation fails closed on them. v2 requires
+	// the full incarnation identity.
+	var issuer, leaseOwner *uuid.UUID
+	var leaseGeneration *int64
+	if payload.PayloadVersion >= reviewLaunchPayloadVersion {
+		if payload.IssuerTokenID == uuid.Nil || payload.LeaseOwner == uuid.Nil {
+			return fmt.Errorf("review_launch_reserved: v2 requires issuer_token_id and lease_owner")
+		}
+		issuer, leaseOwner = &payload.IssuerTokenID, &payload.LeaseOwner
+		leaseGeneration = &payload.LeaseGeneration
 	}
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO review_launch (
@@ -71,8 +90,8 @@ func (reviewLaunchReservedProjector) Apply(ctx context.Context, tx pgx.Tx, event
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $11, $11, $12, $12)
 		ON CONFLICT (work_item_id, round_seq, attempt) DO NOTHING
 	`, event.SubjectID, payload.RoundSeq, payload.Attempt, payload.JobID,
-		payload.AssignmentEventID, payload.ReviewerTokenID, payload.IssuerTokenID,
-		payload.LeaseOwner, payload.LeaseGeneration, payload.Deadline,
+		payload.AssignmentEventID, payload.ReviewerTokenID, issuer,
+		leaseOwner, leaseGeneration, payload.Deadline,
 		event.ID, event.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("review_launch_reserved: insert projection: %w", err)
@@ -108,15 +127,15 @@ func (reviewLaunchHandleProjector) Apply(ctx context.Context, tx pgx.Tx, event d
 		return fmt.Errorf("review_launch_handle_recorded: %w", err)
 	}
 	if payload.PayloadVersion == 0 {
-		payload.PayloadVersion = reviewLaunchPayloadVersion
+		payload.PayloadVersion = reviewLaunchPayloadVersionV1
 	}
-	if payload.PayloadVersion != reviewLaunchPayloadVersion {
+	if payload.PayloadVersion != reviewLaunchPayloadVersionV1 && payload.PayloadVersion != reviewLaunchPayloadVersion {
 		return fmt.Errorf("review_launch_handle_recorded: unsupported payload_version %d", payload.PayloadVersion)
 	}
 	if payload.Pid <= 0 || payload.Pgid <= 0 || payload.StartToken == "" || payload.AssignmentEventID == uuid.Nil {
 		return fmt.Errorf("review_launch_handle_recorded: pid, pgid, start_token, and assignment_event_id are required")
 	}
-	applied, err := reviewLaunchAppliedBy(ctx, tx, event.SubjectID, payload.RoundSeq, payload.Attempt, event.ID)
+	applied, err := reviewLaunchAppliedBy(ctx, tx, event.SubjectID, payload.RoundSeq, payload.Attempt, "handle_event_id", event.ID)
 	if err != nil {
 		return fmt.Errorf("review_launch_handle_recorded: %w", err)
 	}
@@ -129,6 +148,7 @@ func (reviewLaunchHandleProjector) Apply(ctx context.Context, tx pgx.Tx, event d
 		    handle_pid = $4,
 		    handle_pgid = $5,
 		    handle_start_token = $6,
+		    handle_event_id = $7,
 		    updated_event_id = $7,
 		    updated_at = $8
 		WHERE work_item_id = $1
@@ -161,10 +181,13 @@ func (reviewLaunchResolvedProjector) Apply(ctx context.Context, tx pgx.Tx, event
 		return fmt.Errorf("review_launch_resolved: %w", err)
 	}
 	if payload.PayloadVersion == 0 {
-		payload.PayloadVersion = reviewLaunchPayloadVersion
+		payload.PayloadVersion = reviewLaunchPayloadVersionV1
 	}
-	if payload.PayloadVersion != reviewLaunchPayloadVersion {
+	if payload.PayloadVersion != reviewLaunchPayloadVersionV1 && payload.PayloadVersion != reviewLaunchPayloadVersion {
 		return fmt.Errorf("review_launch_resolved: unsupported payload_version %d", payload.PayloadVersion)
+	}
+	if payload.PayloadVersion == reviewLaunchPayloadVersionV1 && payload.Outcome == ReviewLaunchExited {
+		return fmt.Errorf("review_launch_resolved: outcome exited requires payload_version %d", reviewLaunchPayloadVersion)
 	}
 	// succeeded marks a RUNNING reviewer from a handled reservation; exited
 	// terminally confirms death/exit from succeeded; failed closes any
@@ -194,7 +217,7 @@ func (reviewLaunchResolvedProjector) Apply(ctx context.Context, tx pgx.Tx, event
 	default:
 		return fmt.Errorf("review_launch_resolved: unknown outcome %q", payload.Outcome)
 	}
-	applied, err := reviewLaunchAppliedBy(ctx, tx, event.SubjectID, payload.RoundSeq, payload.Attempt, event.ID)
+	applied, err := reviewLaunchAppliedBy(ctx, tx, event.SubjectID, payload.RoundSeq, payload.Attempt, "resolved_event_id", event.ID)
 	if err != nil {
 		return fmt.Errorf("review_launch_resolved: %w", err)
 	}
@@ -205,6 +228,7 @@ func (reviewLaunchResolvedProjector) Apply(ctx context.Context, tx pgx.Tx, event
 		UPDATE review_launch
 		SET state = $4,
 		    stage = NULLIF($5, ''),
+		    resolved_event_id = $6,
 		    updated_event_id = $6,
 		    updated_at = $7
 		WHERE work_item_id = $1
@@ -237,12 +261,12 @@ func (reviewLaunchTerminationDueProjector) Apply(ctx context.Context, tx pgx.Tx,
 		return fmt.Errorf("review_launch_termination_due: %w", err)
 	}
 	if payload.PayloadVersion == 0 {
-		payload.PayloadVersion = reviewLaunchPayloadVersion
+		payload.PayloadVersion = reviewLaunchPayloadVersionV1
 	}
-	if payload.PayloadVersion != reviewLaunchPayloadVersion {
+	if payload.PayloadVersion != reviewLaunchPayloadVersionV1 && payload.PayloadVersion != reviewLaunchPayloadVersion {
 		return fmt.Errorf("review_launch_termination_due: unsupported payload_version %d", payload.PayloadVersion)
 	}
-	applied, err := reviewLaunchAppliedBy(ctx, tx, event.SubjectID, payload.RoundSeq, payload.Attempt, event.ID)
+	applied, err := reviewLaunchAppliedBy(ctx, tx, event.SubjectID, payload.RoundSeq, payload.Attempt, "termination_event_id", event.ID)
 	if err != nil {
 		return fmt.Errorf("review_launch_termination_due: %w", err)
 	}
@@ -254,6 +278,7 @@ func (reviewLaunchTerminationDueProjector) Apply(ctx context.Context, tx pgx.Tx,
 	tag, err := tx.Exec(ctx, `
 		UPDATE review_launch
 		SET termination_due = TRUE,
+		    termination_event_id = $4,
 		    updated_event_id = $4,
 		    updated_at = $5
 		WHERE work_item_id = $1

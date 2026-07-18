@@ -463,15 +463,15 @@ func TestResolveReviewLaunchReleasesExactGenerationAndRevokes(t *testing.T) {
 	}, s.issuer); err != nil {
 		t.Fatalf("resolve succeeded: %v", err)
 	}
-	if _, err := s.svc.ReconcileReviewLaunches(ctx, s.auth, s.issuer); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	// Success completes the exact queue incarnation in the SAME transaction
+	// (round-2 race finding): the job is done the instant success commits,
+	// with no separate repair step for a reclaim to race.
 	var jobState string
 	if err := s.pool.QueryRow(ctx, `SELECT state FROM job_queue WHERE id = $1`, job.ID).Scan(&jobState); err != nil {
 		t.Fatalf("read job: %v", err)
 	}
 	if jobState != "done" {
-		t.Fatalf("job after succeeded launch = %s, want done", jobState)
+		t.Fatalf("job immediately after succeeded launch = %s, want done", jobState)
 	}
 }
 
