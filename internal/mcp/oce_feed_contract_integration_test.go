@@ -153,6 +153,21 @@ func TestMCPFeedReadAssignedLaneParityIntegration(t *testing.T) {
 	if isErr, text = feedReadForTest(t, sBroad, map[string]any{"scope": "future"}); !isErr || !strings.Contains(text, "invalid_feed_scope") {
 		t.Fatalf("invalid scope not rejected: err=%t %s", isErr, text)
 	}
+
+	// The legacy plain-snapshot branch keeps the access reduction: a token
+	// with no feed scope at all is denied there, never handed the raw log.
+	noFeed, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{
+		Name: "oce-no-feed", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeWorkItemsRead, "work_items.tree:" + fixture.tree.ID.String()},
+		Actor:  &fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create no-feed token: %v", err)
+	}
+	sNoFeed := fixture.server(t, noFeed.Secret)
+	if isErr, text = feedReadForTest(t, sNoFeed, map[string]any{"limit": 10}); !isErr || !strings.Contains(text, "insufficient_scope") {
+		t.Fatalf("plain snapshot without feed scope not denied: err=%t %s", isErr, text)
+	}
 }
 
 func TestMCPFeedReadExcludeActorParityIntegration(t *testing.T) {

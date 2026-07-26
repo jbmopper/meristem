@@ -614,7 +614,20 @@ func (s *Server) toolFeedRead() Tool {
 				return nil, fmt.Errorf("feed.read: invalid_filter: %w", err)
 			}
 			if args.Cursor == "" && args.Wait == "" {
-				items, err := s.deps.Feed.ListWithReadFilter(ctx, readFilter, args.Limit)
+				var items []feed.Item
+				if !assigned && projection == nil && len(excluded) == 0 {
+					// Preserve the legacy snapshot's byte-for-byte ordering for
+					// plain broad readers — the same compatibility branch REST
+					// keeps. The access reduction still applies, so scoped
+					// visibility and feed-scope denial are unchanged; only the
+					// contract-filtered reads go through ListWithReadFilter.
+					items, err = s.deps.Feed.List(ctx, args.Limit)
+					if err == nil {
+						items, err = s.feedAccessReduce(actor)(ctx, items)
+					}
+				} else {
+					items, err = s.deps.Feed.ListWithReadFilter(ctx, readFilter, args.Limit)
+				}
 				if err != nil {
 					if errors.Is(err, access.ErrDenied) {
 						return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read feed"))
