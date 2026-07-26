@@ -531,22 +531,27 @@ func (s *Server) toolFeedRead() Tool {
 	return Tool{
 		Name: "feed.read",
 		Description: "Read feed-visible events. Provider HTTP returns the provider_safe_feed.v1 structural projection without raw event payloads. Default: snapshot (newest first). " +
-			"Pass cursor and/or wait (Go duration, e.g. 30s) for watcher mode — same contract as GET /v1/feed (oldest-first page, next_cursor, has_more).",
+			"Pass cursor and/or wait (Go duration, e.g. 30s) for watcher mode — same contract as GET /v1/feed (oldest-first page, next_cursor, has_more). " +
+			"scope=assigned and exclude_actor translate into the same normalized filter contract REST uses; filtered cursors are identity-bound and fail closed on mismatch.",
 		InputSchema: schemaObject(nil, map[string]any{
-			"limit":      schemaInt("Max items (1-200). Defaults to 50."),
-			"projection": schemaString("Optional named feed projection."),
-			"cursor":     schemaString("Opaque cursor from a prior next_cursor or SSE id. Omit for snapshot mode."),
-			"wait":       schemaString("Long-poll cap as a Go duration (e.g. 10s). Use with watcher semantics; server-capped."),
+			"limit":         schemaInt("Max items (1-200). Defaults to 50."),
+			"projection":    schemaString("Optional named feed projection."),
+			"cursor":        schemaString("Opaque cursor from a prior next_cursor or SSE id. Omit for snapshot mode."),
+			"wait":          schemaString("Long-poll cap as a Go duration (e.g. 10s). Use with watcher semantics; server-capped."),
+			"scope":         schemaString("Optional. \"assigned\" selects the reducing assigned/addressed lane — same contract as REST scope=assigned. Assigned-only tokens are normalized onto this lane automatically."),
+			"exclude_actor": schemaStringArray("Optional actor exclusions: \"self\" or a token id, repeatable — same contract as REST exclude_actor. Malformed values fail the call closed."),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.Feed == nil {
 				return nil, errors.New("feed service not configured")
 			}
 			var args struct {
-				Limit      int    `json:"limit"`
-				Projection string `json:"projection"`
-				Cursor     string `json:"cursor"`
-				Wait       string `json:"wait"`
+				Limit        int      `json:"limit"`
+				Projection   string   `json:"projection"`
+				Cursor       string   `json:"cursor"`
+				Wait         string   `json:"wait"`
+				Scope        string   `json:"scope"`
+				ExcludeActor []string `json:"exclude_actor"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -562,21 +567,58 @@ func (s *Server) toolFeedRead() Tool {
 				}
 				projection = &item
 			}
+			var assigned bool
+			switch args.Scope {
+			case "":
+				assigned = access.RequiresAssignedFeed(actor)
+			case "assigned":
+				if !access.CanReadAssignedFeed(actor) {
+					return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read assigned feed"))
+				}
+				assigned = true
+			default:
+				return nil, fmt.Errorf("feed.read: invalid_feed_scope: scope must be assigned when present")
+			}
+			excluded := make([]uuid.UUID, 0, len(args.ExcludeActor))
+			for _, value := range args.ExcludeActor {
+				if value == "self" {
+					excluded = append(excluded, actor.ID)
+					continue
+				}
+				id, err := uuid.Parse(strings.TrimSpace(value))
+				if err != nil || id == uuid.Nil {
+					return nil, fmt.Errorf("feed.read: invalid_exclude_actor: exclude_actor must be self or a token id")
+				}
+				excluded = append(excluded, id)
+			}
+			// One contract: the identical normalized ReadFilter REST builds,
+			// with the access reduction evaluated inside each scan batch so
+			// unauthorized or filtered traffic can neither satisfy a wait nor
+			// consume a limit. No post-hoc MCP-only filtering remains.
+			readFilter := feed.ReadFilter{Projection: projectionFilterForTool(projection)}
+			if assigned {
+				readFilter.Predicates = append(readFilter.Predicates, feed.Predicate{
+					Kind:    feed.PredicateAssignedOrAddressed,
+					TokenID: actor.ID,
+				})
+			}
+			for _, id := range excluded {
+				readFilter.Predicates = append(readFilter.Predicates, feed.Predicate{
+					Kind:    feed.PredicateExcludeActor,
+					TokenID: id,
+				})
+			}
+			readFilter.Reduce = s.feedAccessReduce(actor)
+			readFilter, err := feed.NormalizeReadFilter(readFilter)
+			if err != nil {
+				return nil, fmt.Errorf("feed.read: invalid_filter: %w", err)
+			}
 			if args.Cursor == "" && args.Wait == "" {
-				var (
-					items []feed.Item
-					err   error
-				)
-				if projection != nil {
-					items, err = s.deps.Feed.ListFiltered(ctx, projection.Filter, args.Limit)
-				} else {
-					items, err = s.deps.Feed.List(ctx, args.Limit)
-				}
+				items, err := s.deps.Feed.ListWithReadFilter(ctx, readFilter, args.Limit)
 				if err != nil {
-					return nil, err
-				}
-				items, err = s.filterFeedItems(ctx, actor, items)
-				if err != nil {
+					if errors.Is(err, access.ErrDenied) {
+						return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read feed"))
+					}
 					return nil, err
 				}
 				if isProviderSafeContext(ctx) {
@@ -608,7 +650,7 @@ func (s *Server) toolFeedRead() Tool {
 				Limit:             args.Limit,
 				ProjectionName:    projectionNameForTool(projection),
 				ProjectionVersion: projectionVersionForTool(projection),
-				Filter:            projectionFilterForTool(projection),
+				ReadFilter:        &readFilter,
 			})
 			if err != nil {
 				if errors.Is(err, feed.ErrInvalidCursor) {
@@ -617,10 +659,12 @@ func (s *Server) toolFeedRead() Tool {
 				if errors.Is(err, feed.ErrCursorProjectionMismatch) {
 					return nil, fmt.Errorf("feed.read: cursor_projection_mismatch: %w", err)
 				}
-				return nil, err
-			}
-			page, err = s.filterFeedPage(ctx, actor, page)
-			if err != nil {
+				if errors.Is(err, feed.ErrCursorFilterMismatch) {
+					return nil, fmt.Errorf("feed.read: cursor_filter_mismatch: %w", err)
+				}
+				if errors.Is(err, access.ErrDenied) {
+					return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read feed"))
+				}
 				return nil, err
 			}
 			if isProviderSafeContext(ctx) {
@@ -1378,32 +1422,20 @@ func (s *Server) toolWorkItemsTransition() Tool {
 	}
 }
 
-func (s *Server) filterFeedItems(ctx context.Context, actor domain.Token, items []feed.Item) ([]feed.Item, error) {
-	if s.deps.Access == nil {
-		if access.RequiresScopedPolicy(actor) {
-			return nil, errors.New("access service not configured")
+// feedAccessReduce is MCP's instance of the shared-contract authorization
+// reducer: the same access reduction REST installs as ReadFilter.Reduce,
+// evaluated inside each scan batch. The caller maps access.ErrDenied to a
+// scoped tool error after the read returns.
+func (s *Server) feedAccessReduce(actor domain.Token) feed.BatchReducer {
+	return func(ctx context.Context, items []feed.Item) ([]feed.Item, error) {
+		if s.deps.Access == nil {
+			if access.RequiresScopedPolicy(actor) {
+				return nil, errors.New("access service not configured")
+			}
+			return items, nil
 		}
-		return items, nil
+		return s.deps.Access.FilterFeedItems(ctx, actor, items)
 	}
-	filtered, err := s.deps.Access.FilterFeedItems(ctx, actor, items)
-	if errors.Is(err, access.ErrDenied) {
-		return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read feed"))
-	}
-	return filtered, err
-}
-
-func (s *Server) filterFeedPage(ctx context.Context, actor domain.Token, page feed.Page) (feed.Page, error) {
-	if s.deps.Access == nil {
-		if access.RequiresScopedPolicy(actor) {
-			return feed.Page{}, errors.New("access service not configured")
-		}
-		return page, nil
-	}
-	filtered, err := s.deps.Access.FilterFeedPage(ctx, actor, page)
-	if errors.Is(err, access.ErrDenied) {
-		return feed.Page{}, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read feed"))
-	}
-	return filtered, err
 }
 
 func (s *Server) filterWorkItems(ctx context.Context, actor domain.Token, items []domain.WorkItem) ([]domain.WorkItem, error) {

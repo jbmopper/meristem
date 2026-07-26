@@ -106,12 +106,16 @@ func TestProviderSafeHTTPContextAllVersusTreeAndNoEventPayloadLeakage(t *testing
 		t.Fatal(err)
 	}
 	delegated := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: delegatedAuthority.Scopes}
+	// Under the shared filter contract, delegated tree-read authority is
+	// normalized onto the assigned/addressed lane exactly as REST normalizes
+	// feed.read_assigned bearers: an identity holding no assignment sees an
+	// empty lane rather than the whole tree's history. Tree browsing for
+	// providers remains available through work_items.list below.
 	delegatedFeed := providerHTTPToolText(t, s, delegated, "feed.read", map[string]any{"limit": 50})
-	if !strings.Contains(delegatedFeed, a.ID.String()) || !strings.Contains(delegatedFeed, a1.ID.String()) {
-		t.Fatalf("delegated feed missing assigned tree: %s", delegatedFeed)
-	}
-	if strings.Contains(delegatedFeed, b.ID.String()) {
-		t.Fatalf("delegated feed leaked out-of-tree B: %s", delegatedFeed)
+	for _, hidden := range []uuid.UUID{a.ID, a1.ID, b.ID} {
+		if strings.Contains(delegatedFeed, hidden.String()) {
+			t.Fatalf("delegated lane feed leaked %s without an assignment: %s", hidden, delegatedFeed)
+		}
 	}
 	assertProviderTextSafe(t, delegatedFeed)
 

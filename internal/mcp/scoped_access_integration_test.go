@@ -84,6 +84,13 @@ func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
 	if err := s.Authenticate(ctx, agentResult.Secret); err != nil {
 		t.Fatalf("authenticate scoped agent: %v", err)
 	}
+	// The agent claims A1: under the shared filter contract an assigned-only
+	// bearer's feed.read is normalized onto the assigned/addressed lane
+	// (exactly as REST normalizes it), so lane visibility comes from the
+	// claim, not from bare tree scope.
+	if _, err := workSvc.Claim(ctx, a1.ID, agentResult.Token); err != nil {
+		t.Fatalf("claim A1 as scoped agent: %v", err)
+	}
 
 	assertToolCallOK(t, s, "work_items.get", map[string]any{"id": a.ID.String()})
 	assertToolCallOK(t, s, "work_items.get", map[string]any{"id": a1.ID.String()})
@@ -148,7 +155,10 @@ func TestScopedMCPWorkItemTreeAccessIntegration(t *testing.T) {
 			t.Fatalf("assigned feed included out-of-tree work item B %s: %s", b.ID, text)
 		}
 		if !strings.Contains(text, a1.ID.String()) {
-			t.Fatalf("assigned feed did not include in-tree child transition %s: %s", a1.ID, text)
+			t.Fatalf("assigned lane omitted the claimed item %s: %s", a1.ID, text)
+		}
+		if strings.Contains(text, a.ID.String()+`"`+`,"kind":"work_item.created"`) {
+			t.Fatalf("assigned lane leaked unclaimed in-tree history: %s", text)
 		}
 	}
 
