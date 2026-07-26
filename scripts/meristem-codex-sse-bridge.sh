@@ -58,6 +58,58 @@ ACTIVE_LOOP_DELAY_PID=""
 STREAM_LAUNCH_SIGNAL=0
 NUDGE_LAUNCH_SIGNAL=0
 LANE_BLOCK_NOTIFIED=0
+LANE_BLOCKED_EXIT=78
+LANE_STATE_INVALID_EXIT=79
+CURSOR_STATE_INVALID_EXIT=80
+FILTER_IDENTITY_RETRYABLE=1
+FILTER_IDENTITY_DISPROVED=2
+FEED_FILTER_QUERY="scope=assigned&exclude_actor=self"
+FEED_FILTER_IDENTITY="assigned-exclude-self-v1"
+
+lane_block_status() {
+  local first="" second="" extra="" mode="" size=""
+
+  # Existence is the gate. Never follow a link or echo file contents: this
+  # status path is safe to call from a local supervisor without credentials.
+  [[ -L "$LANE_BLOCKED_FILE" ]] && return "$LANE_STATE_INVALID_EXIT"
+  [[ -e "$LANE_BLOCKED_FILE" ]] || return 0
+  [[ -f "$LANE_BLOCKED_FILE" ]] || return "$LANE_STATE_INVALID_EXIT"
+  mode="$(stat -f '%Lp' "$LANE_BLOCKED_FILE" 2>/dev/null || true)"
+  size="$(stat -f '%z' "$LANE_BLOCKED_FILE" 2>/dev/null || true)"
+  [[ "$mode" == "600" ]] || return "$LANE_STATE_INVALID_EXIT"
+  [[ "$size" =~ ^[0-9]+$ ]] || return "$LANE_STATE_INVALID_EXIT"
+  [[ ${#size} -le 3 ]] || return "$LANE_STATE_INVALID_EXIT"
+  (( 10#$size > 0 && 10#$size <= 256 )) || return "$LANE_STATE_INVALID_EXIT"
+
+  {
+    IFS= read -r first || return "$LANE_STATE_INVALID_EXIT"
+    IFS= read -r second || return "$LANE_STATE_INVALID_EXIT"
+    if IFS= read -r extra; then
+      return "$LANE_STATE_INVALID_EXIT"
+    fi
+  } <"$LANE_BLOCKED_FILE"
+  [[ "$first" == "version=1" ]] || return "$LANE_STATE_INVALID_EXIT"
+  [[ "$second" == "reason=configuration" || "$second" == "reason=ambiguous" ||
+     "$second" =~ ^reason=protocol-[0-9]+$ ]] || return "$LANE_STATE_INVALID_EXIT"
+  return "$LANE_BLOCKED_EXIT"
+}
+
+# A side-effect-free supervisor probe. It intentionally runs before credential,
+# binary, URL, directory, lock, queue, and log initialization.
+if [[ "$#" -gt 0 ]]; then
+  if [[ "$#" == "1" && "$1" == "--health" ]]; then
+    lane_block_status
+    exit $?
+  fi
+  printf 'meristem-codex-sse-bridge: unsupported argument\n' >&2
+  exit 64
+fi
+
+lane_block_status
+initial_lane_status=$?
+if [[ "$initial_lane_status" != "0" ]]; then
+  exit "$initial_lane_status"
+fi
 
 die() {
   printf 'meristem-codex-sse-bridge: %s\n' "$*" >&2
@@ -152,15 +204,6 @@ log_meta() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$LOG_FILE"
 }
 
-block_lane() {
-  local reason="$1" tmp
-  tmp="$LANE_BLOCKED_FILE.tmp.$$.$PROCESS_PID"
-  printf 'version=1\nreason=%s\n' "$reason" >"$tmp" || return 1
-  chmod 600 "$tmp"
-  durable_replace "$tmp" "$LANE_BLOCKED_FILE" || return 1
-  log_meta "wake_lane_blocked reason=$reason"
-}
-
 lock_owner_alive() {
   local pid_file="$1" owner
   owner="$(tr -d '\r\n' <"$pid_file" 2>/dev/null || true)"
@@ -233,6 +276,20 @@ reap_finished_wake_worker() {
     wait "$pid" 2>/dev/null || true
     WAKE_WORKER_PID=""
   fi
+}
+
+settle_wake_worker_after_lane_block() {
+  local pid="$WAKE_WORKER_PID" owner="" attempt=0
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  while (( attempt < 200 )); do
+    owner="$(tr -d '\r\n' <"$WAKE_PID_FILE" 2>/dev/null || true)"
+    if [[ "$owner" != "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  reap_finished_wake_worker
 }
 
 cleanup_bridge() {
@@ -321,13 +378,131 @@ cursor_valid() {
   [[ -n "$cursor" && ${#cursor} -le 4096 && "$cursor" != *[!A-Za-z0-9_-]* ]]
 }
 
+cursor_file_valid() {
+  local first="" extra="" mode="" size=""
+
+  [[ -L "$CURSOR_FILE" ]] && return 1
+  [[ -f "$CURSOR_FILE" ]] || return 1
+  mode="$(stat -f '%Lp' "$CURSOR_FILE" 2>/dev/null || true)"
+  size="$(stat -f '%z' "$CURSOR_FILE" 2>/dev/null || true)"
+  [[ "$mode" == "600" ]] || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  [[ ${#size} -le 4 ]] || return 1
+  (( 10#$size > 1 && 10#$size <= 4097 )) || return 1
+  {
+    IFS= read -r first || return 1
+    if IFS= read -r extra; then
+      return 1
+    fi
+  } <"$CURSOR_FILE"
+  cursor_valid "$first"
+}
+
+cursor_identity_marker_valid() {
+  local first="" second="" extra="" mode="" size=""
+
+  [[ -L "$INITIALIZED_FILE" ]] && return 1
+  [[ -f "$INITIALIZED_FILE" ]] || return 1
+  mode="$(stat -f '%Lp' "$INITIALIZED_FILE" 2>/dev/null || true)"
+  size="$(stat -f '%z' "$INITIALIZED_FILE" 2>/dev/null || true)"
+  [[ "$mode" == "600" ]] || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  [[ ${#size} -le 3 ]] || return 1
+  (( 10#$size > 0 && 10#$size <= 128 )) || return 1
+  {
+    IFS= read -r first || return 1
+    IFS= read -r second || return 1
+    if IFS= read -r extra; then
+      return 1
+    fi
+  } <"$INITIALIZED_FILE"
+  [[ "$first" == "version=2" && "$second" == "filter=$FEED_FILTER_IDENTITY" ]]
+}
+
 mark_cursor_initialized() {
   local tmp
-  [[ -e "$INITIALIZED_FILE" ]] && return 0
+  if [[ -e "$INITIALIZED_FILE" || -L "$INITIALIZED_FILE" ]]; then
+    cursor_identity_marker_valid
+    return $?
+  fi
   tmp="$INITIALIZED_FILE.tmp.$$.$PROCESS_PID"
-  printf '%s\n' 'v1' >"$tmp" || return 1
+  printf 'version=2\nfilter=%s\n' "$FEED_FILTER_IDENTITY" >"$tmp" || return 1
   chmod 600 "$tmp"
   durable_replace "$tmp" "$INITIALIZED_FILE"
+}
+
+verify_server_filter_identity() {
+  local token="$1" cursor="$2" probe_url probe_response="" probe_body="" probe_status="" error_code="" curl_rc=0
+
+  probe_url="${API%/}/v1/feed?wait=0s&limit=1&cursor=$cursor"
+  probe_response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | \
+    "$CURL_BIN" -q --noproxy '*' --proto '=http' --proto-redir '=http' --max-redirs 0 \
+      --config - --silent --show-error --output - --write-out $'\n%{http_code}' \
+      "$probe_url" 2>/dev/null)" || curl_rc=$?
+  if [[ "$curl_rc" != "0" || "$probe_response" != *$'\n'* ]]; then
+    unset probe_response probe_body token
+    return "$FILTER_IDENTITY_RETRYABLE"
+  fi
+  probe_status="${probe_response##*$'\n'}"
+  probe_body="${probe_response%$'\n'*}"
+  if [[ ! "$probe_status" =~ ^[0-9][0-9][0-9]$ ]]; then
+    unset probe_response probe_body token
+    return "$FILTER_IDENTITY_RETRYABLE"
+  fi
+  error_code="$(printf '%s' "$probe_body" | "$JQ_BIN" -r '.error.code // ""' 2>/dev/null || true)"
+  unset probe_response probe_body token
+  if [[ "$probe_status" == "400" && "$error_code" == "cursor_filter_mismatch" ]]; then
+    return 0
+  fi
+  if [[ "$probe_status" =~ ^5[0-9][0-9]$ || "$probe_status" == "408" ||
+        "$probe_status" == "425" || "$probe_status" == "429" ]]; then
+    return "$FILTER_IDENTITY_RETRYABLE"
+  fi
+  return "$FILTER_IDENTITY_DISPROVED"
+}
+
+block_lane() {
+  local reason="$1" tmp lane_rc
+  tmp="$LANE_BLOCKED_FILE.tmp.$$.$PROCESS_PID"
+  acquire_queue_lock || return 1
+  lane_block_status
+  lane_rc=$?
+  if [[ "$lane_rc" == "$LANE_BLOCKED_EXIT" ]]; then
+    release_queue_lock
+    return 0
+  fi
+  if [[ "$lane_rc" != "0" ]]; then
+    release_queue_lock
+    return 1
+  fi
+  if ! printf 'version=1\nreason=%s\n' "$reason" >"$tmp"; then
+    release_queue_lock
+    return 1
+  fi
+  chmod 600 "$tmp"
+  if ! durable_replace "$tmp" "$LANE_BLOCKED_FILE"; then
+    rm -f "$tmp"
+    release_queue_lock
+    return 1
+  fi
+  release_queue_lock
+  log_meta "wake_lane_blocked reason=$reason"
+}
+
+advance_cursor_if_lane_open() {
+  local cursor="$1" lane_rc
+  acquire_queue_lock || return 1
+  lane_block_status
+  lane_rc=$?
+  if [[ "$lane_rc" != "0" ]]; then
+    release_queue_lock
+    return "$lane_rc"
+  fi
+  if ! write_cursor "$cursor"; then
+    release_queue_lock
+    return 1
+  fi
+  release_queue_lock
 }
 
 actor_selected() {
@@ -687,16 +862,23 @@ wake_worker() {
 }
 
 ensure_wake_worker() {
+  local lane_rc
   reap_finished_wake_worker
-  [[ -s "$DELIVERY_FILE" || -s "$QUEUE_FILE" ]] || return 0
-  if [[ -e "$LANE_BLOCKED_FILE" ]]; then
+  lane_block_status
+  lane_rc=$?
+  if [[ "$lane_rc" != "0" ]]; then
     if [[ "$LANE_BLOCK_NOTIFIED" == "0" ]]; then
-      log_meta "wake_lane_remains_blocked"
+      if [[ "$lane_rc" == "$LANE_BLOCKED_EXIT" ]]; then
+        log_meta "wake_lane_remains_blocked"
+      else
+        log_meta "wake_lane_state_invalid"
+      fi
       LANE_BLOCK_NOTIFIED=1
     fi
-    return 0
+    return "$lane_rc"
   fi
   LANE_BLOCK_NOTIFIED=0
+  [[ -s "$DELIVERY_FILE" || -s "$QUEUE_FILE" ]] || return 0
   if mkdir "$WAKE_LOCK_DIR" 2>/dev/null; then
     wake_worker &
     WAKE_WORKER_PID=$!
@@ -706,8 +888,14 @@ ensure_wake_worker() {
 }
 
 queue_wake() {
-  local event_id="$1" actor="$2" kind="$3" subject_id="$4" cursor="$5" known=0
+  local event_id="$1" actor="$2" kind="$3" subject_id="$4" cursor="$5" known=0 lane_rc
   acquire_queue_lock || return 1
+  lane_block_status
+  lane_rc=$?
+  if [[ "$lane_rc" != "0" ]]; then
+    release_queue_lock
+    return "$lane_rc"
+  fi
   if event_known_locked "$event_id"; then
     known=1
   else
@@ -720,20 +908,24 @@ queue_wake() {
       return 1
     }
   fi
-  release_queue_lock
-
   if ! write_cursor "$cursor"; then
+    release_queue_lock
     log_meta "cursor_write_failed event_id=$event_id"
     return 1
   fi
+  release_queue_lock
   if [[ "$known" == "0" ]]; then
     log_meta "event_queued event_id=$event_id actor=$actor kind=$kind subject_id=$subject_id"
   fi
 }
 
 consume_stream() {
-  local token cursor url bootstrap_url bootstrap_body curl_rc=0 parser_rc=0 stream_pid=""
+  local token cursor url bootstrap_url bootstrap_body curl_rc=0 parser_rc=0 stream_pid="" lane_rc=0 probe_rc=0
   local -a curl_args
+
+  lane_block_status
+  lane_rc=$?
+  [[ "$lane_rc" == "0" ]] || return "$lane_rc"
 
   token="$(tr -d '\r\n' <"$TOKEN_FILE")"
   if [[ -z "$token" ]]; then
@@ -741,25 +933,25 @@ consume_stream() {
   fi
 
   cursor=""
-  if [[ -f "$CURSOR_FILE" ]]; then
+  if [[ -e "$CURSOR_FILE" || -L "$CURSOR_FILE" ]]; then
+    if ! cursor_file_valid || ! cursor_identity_marker_valid; then
+      unset token
+      log_meta "cursor_identity_invalid_local_state"
+      return "$CURSOR_STATE_INVALID_EXIT"
+    fi
     cursor="$(cat "$CURSOR_FILE" 2>/dev/null || true)"
     if ! cursor_valid "$cursor"; then
       unset token
-      log_meta "cursor_invalid_local_state"
-      return 1
+      log_meta "cursor_identity_invalid_local_state"
+      return "$CURSOR_STATE_INVALID_EXIT"
     fi
-    if ! mark_cursor_initialized; then
-      unset token
-      log_meta "cursor_initialization_marker_failed"
-      return 1
-    fi
-  elif [[ -e "$INITIALIZED_FILE" ]]; then
+  elif [[ -e "$INITIALIZED_FILE" || -L "$INITIALIZED_FILE" ]]; then
     unset token
     log_meta "cursor_missing_after_initialization"
-    return 1
+    return "$CURSOR_STATE_INVALID_EXIT"
   fi
   if [[ -z "$cursor" ]]; then
-    bootstrap_url="${API%/}/v1/feed?wait=0s&limit=1"
+    bootstrap_url="${API%/}/v1/feed?wait=0s&limit=1&${FEED_FILTER_QUERY}"
     if ! bootstrap_body="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | \
       "$CURL_BIN" -q --noproxy '*' --proto '=http' --proto-redir '=http' --max-redirs 0 \
         --config - --silent --show-error --fail "$bootstrap_url" 2>/dev/null)"; then
@@ -769,15 +961,57 @@ consume_stream() {
     fi
     cursor="$(printf '%s' "$bootstrap_body" | "$JQ_BIN" -r '.next_cursor // ""' 2>/dev/null || true)"
     unset bootstrap_body
-    if ! cursor_valid "$cursor" || ! write_cursor "$cursor" || ! mark_cursor_initialized; then
+    if ! cursor_valid "$cursor"; then
+      unset token
+      log_meta "cursor_bootstrap_failed"
+      return 1
+    fi
+    verify_server_filter_identity "$token" "$cursor"
+    probe_rc=$?
+    case "$probe_rc" in
+      0) ;;
+      "$FILTER_IDENTITY_RETRYABLE")
+        unset token
+        log_meta "feed_filter_identity_probe_retryable identity=$FEED_FILTER_IDENTITY"
+        return 1
+        ;;
+      *)
+        unset token
+        log_meta "feed_filter_identity_unverified identity=$FEED_FILTER_IDENTITY"
+        return "$CURSOR_STATE_INVALID_EXIT"
+        ;;
+    esac
+    advance_cursor_if_lane_open "$cursor"
+    lane_rc=$?
+    if [[ "$lane_rc" != "0" ]]; then
+      unset token
+      return "$lane_rc"
+    fi
+    if ! mark_cursor_initialized; then
       unset token
       log_meta "cursor_bootstrap_failed"
       return 1
     fi
     log_meta "cursor_bootstrapped"
+  else
+    verify_server_filter_identity "$token" "$cursor"
+    probe_rc=$?
+    case "$probe_rc" in
+      0) ;;
+      "$FILTER_IDENTITY_RETRYABLE")
+        unset token
+        log_meta "feed_filter_identity_probe_retryable identity=$FEED_FILTER_IDENTITY"
+        return 1
+        ;;
+      *)
+        unset token
+        log_meta "feed_filter_identity_unverified identity=$FEED_FILTER_IDENTITY"
+        return "$CURSOR_STATE_INVALID_EXIT"
+        ;;
+    esac
   fi
 
-  url="${API%/}/v1/feed/stream"
+  url="${API%/}/v1/feed/stream?${FEED_FILTER_QUERY}"
   curl_args=(-q --noproxy '*' --proto '=http' --proto-redir '=http' --max-redirs 0 --config - --no-buffer --silent --show-error --fail --header "Last-Event-ID: $cursor" "$url")
   if [[ -e "$STREAM_FIFO" ]]; then
     if [[ ! -p "$STREAM_FIFO" ]]; then
@@ -863,7 +1097,14 @@ consume_stream() {
         frame_has_data=1
         IFS=$'\t' read -r frame_event_id frame_actor frame_source frame_kind frame_subject <<<"$fields"
         ;;
-      :*) ensure_wake_worker ;;
+      :*)
+        ensure_wake_worker
+        lane_rc=$?
+        if [[ "$lane_rc" != "0" ]]; then
+          parser_rc="$lane_rc"
+          break
+        fi
+        ;;
       '')
         if [[ "$frame_has_id" == "1" || "$frame_has_data" == "1" ]]; then
           if [[ "$frame_has_id" != "1" || "$frame_has_data" != "1" || -z "$frame_cursor" ]]; then
@@ -877,19 +1118,23 @@ consume_stream() {
             break
           fi
           if [[ "$frame_source" == "agent" ]] && actor_selected "$frame_actor" && kind_selected "$frame_kind"; then
-            queue_wake "$frame_event_id" "$frame_actor" "$frame_kind" "$frame_subject" "$frame_cursor" || {
-              parser_rc=1
+            queue_wake "$frame_event_id" "$frame_actor" "$frame_kind" "$frame_subject" "$frame_cursor"
+            lane_rc=$?
+            if [[ "$lane_rc" != "0" ]]; then
+              parser_rc="$lane_rc"
               break
-            }
+            fi
             # Hand control back to the bridge loop so it can start the wake
             # worker as a directly owned, waitable child.
             parser_rc=10
             break
           else
-            write_cursor "$frame_cursor" || {
-              parser_rc=1
+            advance_cursor_if_lane_open "$frame_cursor"
+            lane_rc=$?
+            if [[ "$lane_rc" != "0" ]]; then
+              parser_rc="$lane_rc"
               break
-            }
+            fi
           fi
         fi
         frame_cursor=""
@@ -918,6 +1163,10 @@ consume_stream() {
   exec 8<&-
   rm -f "$STREAM_FIFO"
   log_meta "stream_disconnected curl_rc=$curl_rc parser_rc=$parser_rc"
+  if [[ "$parser_rc" == "$LANE_BLOCKED_EXIT" || "$parser_rc" == "$LANE_STATE_INVALID_EXIT" ||
+        "$parser_rc" == "$CURSOR_STATE_INVALID_EXIT" ]]; then
+    return "$parser_rc"
+  fi
   return 1
 }
 
@@ -932,10 +1181,28 @@ if [[ "$MAINTENANCE_ONLY" == "1" ]]; then
   log_meta "maintenance_completed"
   exit 0
 fi
-log_meta "bridge_started api=${API%/} actor_count=$(printf '%s' "$WAKE_ACTORS" | awk -F, '{print NF}') dry_run=$DRY_RUN"
-ensure_wake_worker
+log_meta "bridge_started api=${API%/} feed_identity=$FEED_FILTER_IDENTITY actor_count=$(printf '%s' "$WAKE_ACTORS" | awk -F, '{print NF}') dry_run=$DRY_RUN"
+bridge_rc=0
+ensure_wake_worker || bridge_rc=$?
+if [[ "$bridge_rc" == "$LANE_BLOCKED_EXIT" || "$bridge_rc" == "$LANE_STATE_INVALID_EXIT" ||
+      "$bridge_rc" == "$CURSOR_STATE_INVALID_EXIT" ]]; then
+  settle_wake_worker_after_lane_block
+  exit "$bridge_rc"
+fi
 while true; do
-  consume_stream 2>/dev/null || true
-  ensure_wake_worker
+  bridge_rc=0
+  consume_stream 2>/dev/null || bridge_rc=$?
+  if [[ "$bridge_rc" == "$LANE_BLOCKED_EXIT" || "$bridge_rc" == "$LANE_STATE_INVALID_EXIT" ||
+        "$bridge_rc" == "$CURSOR_STATE_INVALID_EXIT" ]]; then
+    settle_wake_worker_after_lane_block
+    exit "$bridge_rc"
+  fi
+  bridge_rc=0
+  ensure_wake_worker || bridge_rc=$?
+  if [[ "$bridge_rc" == "$LANE_BLOCKED_EXIT" || "$bridge_rc" == "$LANE_STATE_INVALID_EXIT" ||
+        "$bridge_rc" == "$CURSOR_STATE_INVALID_EXIT" ]]; then
+    settle_wake_worker_after_lane_block
+    exit "$bridge_rc"
+  fi
   loop_delay "$RECONNECT_SECONDS"
 done

@@ -27,8 +27,11 @@ import os
 import sys
 import time
 
-scenario, record_path, reconcile_client_id = sys.argv[1:4]
+scenario, record_path, reconcile_client_id, request_method = sys.argv[1:5]
 methods = []
+responses = []
+turn_start_count = 0
+pending_admission = None
 
 def send(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
@@ -43,13 +46,52 @@ def record():
         ) if key in os.environ
     ]
     with open(record_path, "w", encoding="utf-8") as handle:
-        json.dump({"methods": methods, "sensitive_env": sensitive}, handle)
+        json.dump({
+            "methods": methods,
+            "responses": responses,
+            "sensitive_env": sensitive,
+            "turn_start_count": turn_start_count,
+        }, handle)
+
+def send_admission_response(admission):
+    if admission["method"] == "turn/steer":
+        result = {"turnId": admission["turn_id"]}
+    else:
+        result = {"turn": {"id": admission["turn_id"]}}
+    send({"id": admission["request_id"], "result": result})
+
+def send_completion(admission):
+    send({
+        "method": "turn/completed",
+        "params": {
+            "threadId": admission["thread_id"],
+            "turn": {
+                "id": admission["turn_id"],
+                "status": "completed",
+                "items": [],
+            },
+        },
+    })
 
 for raw in sys.stdin:
     message = json.loads(raw)
     method = message.get("method")
     if method:
         methods.append(method)
+    elif "id" in message:
+        responses.append(message)
+        if pending_admission is not None:
+            if scenario == "server_request_before":
+                send_admission_response(pending_admission)
+            if scenario == "server_request_eof":
+                record()
+                break
+            send_completion(pending_admission)
+            record()
+            pending_admission = None
+        else:
+            record()
+        continue
     if method == "initialize":
         send({"id": message["id"], "result": {"secret": "RAW-SECRET-SENTINEL"}})
     elif method == "initialized":
@@ -109,10 +151,30 @@ for raw in sys.stdin:
                 },
             })
     elif method in ("turn/start", "turn/steer"):
+        turn_start_count += 1
         thread_id = message["params"]["threadId"]
         turn_id = "active-turn" if method == "turn/steer" else "started-turn"
-        if scenario == "server_request":
-            send({"id": 9001, "method": "item/permissions/request", "params": {}})
+        if scenario in (
+            "server_request_before",
+            "server_request_after",
+            "server_request_eof",
+        ):
+            pending_admission = {
+                "method": method,
+                "request_id": message["id"],
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+            }
+            if scenario != "server_request_before":
+                send_admission_response(pending_admission)
+            # Deliberately collide ids in the two JSON-RPC directions and put
+            # raw-looking data in params. The client must neither confuse the
+            # response nor reflect the params into output/diagnostics.
+            send({
+                "id": message["id"],
+                "method": request_method,
+                "params": {"secret": "RAW-SERVER-REQUEST-SECRET-SENTINEL"},
+            })
             continue
         if scenario == "request_error":
             send({
@@ -157,6 +219,47 @@ for raw in sys.stdin:
 '''
 
 
+EXPECTED_SERVER_REQUEST_RESULTS = {
+    "item/commandExecution/requestApproval": {
+        "result": {"decision": "decline"}
+    },
+    "item/fileChange/requestApproval": {"result": {"decision": "decline"}},
+    "item/tool/requestUserInput": {
+        "error": {
+            "code": -32601,
+            "message": "server request unsupported by unattended client",
+        }
+    },
+    "mcpServer/elicitation/request": {
+        "result": {"action": "decline", "content": None}
+    },
+    "item/permissions/requestApproval": {
+        "result": {"permissions": {}, "scope": "turn"}
+    },
+    "item/tool/call": {"result": {"contentItems": [], "success": False}},
+    "account/chatgptAuthTokens/refresh": {
+        "error": {
+            "code": -32601,
+            "message": "server request unsupported by unattended client",
+        }
+    },
+    "attestation/generate": {
+        "error": {
+            "code": -32601,
+            "message": "server request unsupported by unattended client",
+        }
+    },
+    "currentTime/read": {
+        "error": {
+            "code": -32601,
+            "message": "server request unsupported by unattended client",
+        }
+    },
+    "applyPatchApproval": {"result": {"decision": "denied"}},
+    "execCommandApproval": {"result": {"decision": "denied"}},
+}
+
+
 class NudgeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -196,13 +299,19 @@ class NudgeTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def command(self, scenario, reconcile_client_id="none"):
+    def command(
+        self,
+        scenario,
+        reconcile_client_id="none",
+        request_method="item/commandExecution/requestApproval",
+    ):
         return [
             sys.executable,
             str(self.fake),
             scenario,
             str(self.record),
             reconcile_client_id,
+            request_method,
         ]
 
     def marker_value(self):
@@ -351,14 +460,154 @@ class NudgeTests(unittest.TestCase):
             )
         self.assertEqual(self.marker_value()["state"], "accepted")
 
-    def test_server_request_fails_closed_after_dispatch(self):
-        with self.assertRaises(NUDGE.UnsafeServerRequest):
-            NUDGE.deliver(
+    def test_server_request_before_admission_is_denied_without_duplicate(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        method = "item/permissions/requestApproval"
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = NUDGE.deliver(
                 self.args,
-                self.command("server_request"),
+                self.command("server_request_before", request_method=method),
                 environment=self.environment,
             )
-        self.assertEqual(self.marker_value()["state"], "dispatching")
+        self.assertEqual(result, NUDGE.EXIT_OK)
+        self.assertEqual(self.marker_value()["state"], "completed")
+        record = json.loads(self.record.read_text(encoding="utf-8"))
+        self.assertEqual(record["turn_start_count"], 1)
+        self.assertEqual(record["methods"].count("turn/start"), 1)
+        self.assertEqual(
+            record["responses"],
+            [{"id": 3, **EXPECTED_SERVER_REQUEST_RESULTS[method]}],
+        )
+        emitted = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn("SECRET-SENTINEL", emitted)
+
+    def test_all_schema_server_requests_are_safely_denied_after_admission(self):
+        self.assertEqual(
+            set(EXPECTED_SERVER_REQUEST_RESULTS), set(NUDGE.SERVER_REQUEST_METHODS)
+        )
+        for method, expected in EXPECTED_SERVER_REQUEST_RESULTS.items():
+            with self.subTest(method=method):
+                if self.marker.exists():
+                    self.marker.unlink()
+                if self.record.exists():
+                    self.record.unlink()
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+                    stderr
+                ):
+                    result = NUDGE.deliver(
+                        self.args,
+                        self.command("server_request_after", request_method=method),
+                        environment=self.environment,
+                    )
+                self.assertEqual(result, NUDGE.EXIT_OK)
+                self.assertEqual(self.marker_value()["state"], "completed")
+                record = json.loads(self.record.read_text(encoding="utf-8"))
+                self.assertEqual(record["turn_start_count"], 1)
+                self.assertEqual(record["methods"].count("turn/start"), 1)
+                self.assertEqual(record["responses"], [{"id": 3, **expected}])
+                serialized = json.dumps(record["responses"], sort_keys=True)
+                self.assertNotIn("accessToken", serialized)
+                self.assertNotIn("currentTimeAt", serialized)
+                self.assertNotIn("approved", serialized)
+                emitted = stdout.getvalue() + stderr.getvalue()
+                self.assertNotIn("SECRET-SENTINEL", emitted)
+
+    def test_unknown_server_request_gets_generic_error_and_no_second_turn(self):
+        result = NUDGE.deliver(
+            self.args,
+            self.command(
+                "server_request_after", request_method="future/raw-secret-method"
+            ),
+            environment=self.environment,
+        )
+        self.assertEqual(result, NUDGE.EXIT_OK)
+        self.assertEqual(self.marker_value()["state"], "completed")
+        record = json.loads(self.record.read_text(encoding="utf-8"))
+        self.assertEqual(record["turn_start_count"], 1)
+        self.assertEqual(record["methods"].count("turn/start"), 1)
+        self.assertEqual(
+            record["responses"],
+            [
+                {
+                    "id": 3,
+                    "error": {
+                        "code": -32601,
+                        "message": "server request unsupported by unattended client",
+                    },
+                }
+            ],
+        )
+        self.assertNotIn("future/raw-secret-method", json.dumps(record["responses"]))
+
+    def test_eof_diagnostic_is_allowlisted_and_secret_silent(self):
+        method = "account/chatgptAuthTokens/refresh"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(NUDGE.TransportError) as caught:
+                NUDGE.deliver(
+                    self.args,
+                    self.command("server_request_eof", request_method=method),
+                    environment=self.environment,
+                )
+        error = caught.exception
+        self.assertEqual(error.nudge_stage, "completion")
+        self.assertEqual(error.nudge_server_request_method, method)
+        self.assertEqual(
+            NUDGE._diagnostic_payload(error, "unknown"),
+            {
+                "failure_class": "TransportError",
+                "server_request_method": method,
+                "stage": "completion",
+            },
+        )
+        self.assertEqual(self.marker_value()["state"], "accepted")
+        record = json.loads(self.record.read_text(encoding="utf-8"))
+        self.assertEqual(
+            record["responses"],
+            [{"id": 3, **EXPECTED_SERVER_REQUEST_RESULTS[method]}],
+        )
+        self.assertNotIn("SECRET-SENTINEL", stdout.getvalue() + stderr.getvalue())
+
+    def test_main_diagnostic_prints_only_allowlisted_metadata(self):
+        NUDGE.atomic_write_json(self.marker, {"state": "accepted"})
+        error = NUDGE.TransportError("RAW-SECRET-SENTINEL", 99)
+        error.nudge_stage = "completion"
+        error.nudge_server_request_method = "unknown"
+        argv = [
+            "deliver",
+            "--codex-bin",
+            sys.executable,
+            "--thread-id",
+            self.thread_id,
+            "--repo-root",
+            str(self.root),
+            "--batch-file",
+            str(self.batch),
+            "--marker-file",
+            str(self.marker),
+            "--diagnostic",
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(NUDGE, "deliver", side_effect=error), mock.patch.object(
+            NUDGE.signal, "signal"
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = NUDGE.main(argv)
+        self.assertEqual(result, NUDGE.EXIT_AMBIGUOUS)
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "failure_class": "TransportError",
+                "server_request_method": "unknown",
+                "stage": "completion",
+            },
+        )
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertNotIn("SECRET-SENTINEL", stdout.getvalue())
 
     def test_failed_completion_is_terminal_and_not_replayable(self):
         result = NUDGE.deliver(

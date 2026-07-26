@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meristem-codex-bridge-test.XXXXXX")"
 BRIDGE_PID=""
+BRIDGE_RC=""
 STOP_FORCED=0
 
 stop_bridge() {
@@ -21,6 +22,19 @@ stop_bridge() {
     fi
     wait "$BRIDGE_PID" 2>/dev/null || true
   fi
+  BRIDGE_PID=""
+}
+
+wait_for_bridge_exit() {
+  local attempt=0 rc=0
+  while [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null && (( attempt < 400 )); do
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  [[ -n "$BRIDGE_PID" ]] || return 1
+  ! kill -0 "$BRIDGE_PID" 2>/dev/null || return 1
+  wait "$BRIDGE_PID" || rc=$?
+  BRIDGE_RC="$rc"
   BRIDGE_PID=""
 }
 
@@ -64,9 +78,37 @@ printf '%s\n' \
   '  last="$arg"' \
   'done' \
   '[ "$saw_noproxy" = "1" ] || exit 96' \
+  'printf '\''%s\n'\'' "$last" >>"$FAKE_CURL_URLS_FILE"' \
   'case "$last" in' \
-  '  *"/v1/feed?"*) printf '\''%s\n'\'' '\''{"next_cursor":"cursor-0"}'\'' ;;' \
-  '  *"/v1/feed/stream")' \
+  '  *"/v1/feed?wait=0s&limit=1&cursor="*)' \
+  '    probe_count=0' \
+  '    [ -f "$FAKE_PROBE_COUNT_FILE" ] && probe_count=$(cat "$FAKE_PROBE_COUNT_FILE")' \
+  '    probe_count=$((probe_count + 1))' \
+  '    printf '\''%s\n'\'' "$probe_count" >"$FAKE_PROBE_COUNT_FILE"' \
+  '    case "$FAKE_CURL_SCENARIO" in' \
+  '      filter_unsupported)' \
+  '        printf '\''%s\n%s'\'' '\''{"items":[],"next_cursor":"cursor-0"}'\'' 200' \
+  '        ;;' \
+  '      probe_transport_then_ok)' \
+  '        if [ "$probe_count" -eq 1 ]; then exit 7; fi' \
+  '        printf '\''%s\n%s'\'' '\''{"error":{"code":"cursor_filter_mismatch","message":"filter identity changed"}}'\'' 400' \
+  '        ;;' \
+  '      probe_500_then_ok)' \
+  '        if [ "$probe_count" -eq 1 ]; then' \
+  '          printf '\''%s\n%s'\'' '\''{"error":{"code":"temporarily_unavailable","message":"retry"}}'\'' 503' \
+  '        else' \
+  '          printf '\''%s\n%s'\'' '\''{"error":{"code":"cursor_filter_mismatch","message":"filter identity changed"}}'\'' 400' \
+  '        fi' \
+  '        ;;' \
+  '      *)' \
+  '        printf '\''%s\n%s'\'' '\''{"error":{"code":"cursor_filter_mismatch","message":"filter identity changed"}}'\'' 400' \
+  '        ;;' \
+  '    esac' \
+  '    ;;' \
+  '  *"/v1/feed?wait=0s&limit=1&scope=assigned&exclude_actor=self")' \
+  '    printf '\''%s\n'\'' '\''{"next_cursor":"cursor-0"}'\''' \
+  '    ;;' \
+  '  *"/v1/feed/stream?scope=assigned&exclude_actor=self")' \
   '    count=0' \
   '    [ -f "$FAKE_CURL_COUNT_FILE" ] && count=$(cat "$FAKE_CURL_COUNT_FILE")' \
   '    count=$((count + 1))' \
@@ -107,6 +149,18 @@ printf '%s\n' \
   '      selected_then_blocking)' \
   '        if [ "$count" -gt 1 ]; then exec sleep 300; fi' \
   '        printf '\''%s\n'\'' "id: cursor-$count" '\''data: {"event_id":"event-1","actor_token_id":"claude-test","source":"agent","kind":"work_item.event_appended","subject_id":"item-1"}'\'' '\'''\''' \
+  '        ;;' \
+  '      heartbeat)' \
+  '        while true; do printf ": keepalive\n\n"; sleep 0.1; done' \
+  '        ;;' \
+  '      selected_after_block)' \
+  '        if [ "$count" -eq 1 ]; then' \
+  '          printf '\''%s\n'\'' "id: cursor-$count" '\''data: {"event_id":"event-1","actor_token_id":"claude-test","source":"agent","kind":"work_item.event_appended","subject_id":"item-1"}'\'' '\'''\''' \
+  '        else' \
+  '          while [ ! -e "$FAKE_BRIDGE_STATE_DIR/lane-blocked" ]; do sleep 0.01; done' \
+  '          printf '\''%s\n'\'' "id: cursor-$count" '\''data: {"event_id":"event-2","actor_token_id":"claude-test","source":"agent","kind":"work_item.event_appended","subject_id":"item-2"}'\'' '\'''\''' \
+  '          exec sleep 300' \
+  '        fi' \
   '        ;;' \
   '      incrementing)' \
   '        printf '\''%s\n'\'' "id: cursor-$count" "data: {\"event_id\":\"event-$count\",\"actor_token_id\":\"claude-test\",\"source\":\"agent\",\"kind\":\"work_item.event_appended\",\"subject_id\":\"item-$count\"}" '\'''\''' \
@@ -232,6 +286,8 @@ start_bridge() {
   STATE_DIR="$TMP_ROOT/$name-state"
   LOG_FILE="$TMP_ROOT/$name.log"
   COUNT_FILE="$TMP_ROOT/$name-curl-count"
+  PROBE_COUNT_FILE="$TMP_ROOT/$name-probe-count"
+  URLS_FILE="$TMP_ROOT/$name-curl-urls"
   HELPER_CALLS="$TMP_ROOT/$name-helper-calls"
   env \
     TMPDIR="$TMP_ROOT/tmp" \
@@ -255,7 +311,10 @@ start_bridge() {
     MERISTEM_WAKE_DRY_RUN="$dry_run" \
     FAKE_CURL_SCENARIO="$curl_scenario" \
     FAKE_CURL_COUNT_FILE="$COUNT_FILE" \
+    FAKE_PROBE_COUNT_FILE="$PROBE_COUNT_FILE" \
+    FAKE_CURL_URLS_FILE="$URLS_FILE" \
     FAKE_BRIDGE_PID_FILE="$STATE_DIR/bridge.lock/pid" \
+    FAKE_BRIDGE_STATE_DIR="$STATE_DIR" \
     FAKE_HELPER_SCENARIO="$helper_scenario" \
     FAKE_HELPER_CALLS="$HELPER_CALLS" \
     FAKE_WAKE_PID_FILE="$STATE_DIR/wake.lock/pid" \
@@ -267,6 +326,20 @@ start_bridge() {
     NUDGE_LAUNCH_HELPER_PID="$NUDGE_LAUNCH_HELPER_PID" \
     /bin/bash "$REPO_ROOT/scripts/meristem-codex-sse-bridge.sh" &
   BRIDGE_PID=$!
+}
+
+run_health() {
+  local name="$1" state_dir="$2" rc=0
+  if env MERISTEM_WAKE_STATE_DIR="$state_dir" \
+      /bin/bash "$REPO_ROOT/scripts/meristem-codex-sse-bridge.sh" --health \
+      >"$TMP_ROOT/$name-health.out" 2>"$TMP_ROOT/$name-health.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [[ ! -s "$TMP_ROOT/$name-health.out" ]]
+  [[ ! -s "$TMP_ROOT/$name-health.err" ]]
+  HEALTH_RC="$rc"
 }
 
 # URL userinfo cannot smuggle the bearer off loopback.
@@ -286,6 +359,119 @@ if env \
   exit 1
 fi
 
+# The supervisor probe is credential-free and side-effect-free. Absence means
+# open; only the exact durable v1 sentinel means blocked. Invalid local state is
+# fail-closed and no file contents are ever copied to output.
+HEALTH_RC=""
+OPEN_HEALTH_STATE="$TMP_ROOT/open-health-state"
+run_health open "$OPEN_HEALTH_STATE"
+[[ "$HEALTH_RC" == "0" ]]
+[[ ! -e "$OPEN_HEALTH_STATE" ]]
+
+VALID_HEALTH_STATE="$TMP_ROOT/valid-health-state"
+mkdir -p "$VALID_HEALTH_STATE"
+printf 'version=1\nreason=ambiguous\n' >"$VALID_HEALTH_STATE/lane-blocked"
+chmod 600 "$VALID_HEALTH_STATE/lane-blocked"
+run_health valid "$VALID_HEALTH_STATE"
+[[ "$HEALTH_RC" == "78" ]]
+[[ "$(find "$VALID_HEALTH_STATE" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]')" == "1" ]]
+
+MALFORMED_HEALTH_STATE="$TMP_ROOT/malformed-health-state"
+mkdir -p "$MALFORMED_HEALTH_STATE"
+printf 'SECRET_SENTINEL_CONTENT_MUST_NOT_BE_PRINTED\n' >"$MALFORMED_HEALTH_STATE/lane-blocked"
+chmod 600 "$MALFORMED_HEALTH_STATE/lane-blocked"
+run_health malformed "$MALFORMED_HEALTH_STATE"
+[[ "$HEALTH_RC" == "79" ]]
+
+OVERSIZED_HEALTH_STATE="$TMP_ROOT/oversized-health-state"
+mkdir -p "$OVERSIZED_HEALTH_STATE"
+printf '%0300d' 0 >"$OVERSIZED_HEALTH_STATE/lane-blocked"
+chmod 600 "$OVERSIZED_HEALTH_STATE/lane-blocked"
+run_health oversized "$OVERSIZED_HEALTH_STATE"
+[[ "$HEALTH_RC" == "79" ]]
+
+MODE_HEALTH_STATE="$TMP_ROOT/mode-health-state"
+mkdir -p "$MODE_HEALTH_STATE"
+printf 'version=1\nreason=configuration\n' >"$MODE_HEALTH_STATE/lane-blocked"
+chmod 644 "$MODE_HEALTH_STATE/lane-blocked"
+run_health wrong-mode "$MODE_HEALTH_STATE"
+[[ "$HEALTH_RC" == "79" ]]
+
+SYMLINK_HEALTH_STATE="$TMP_ROOT/symlink-health-state"
+mkdir -p "$SYMLINK_HEALTH_STATE"
+printf 'version=1\nreason=protocol-76\n' >"$SYMLINK_HEALTH_STATE/target"
+chmod 600 "$SYMLINK_HEALTH_STATE/target"
+ln -s "$SYMLINK_HEALTH_STATE/target" "$SYMLINK_HEALTH_STATE/lane-blocked"
+run_health symlink "$SYMLINK_HEALTH_STATE"
+[[ "$HEALTH_RC" == "79" ]]
+
+# A preexisting valid block exits before initialization, curl, or helper use.
+mkdir -p "$TMP_ROOT/preblocked-state"
+printf 'version=1\nreason=ambiguous\n' >"$TMP_ROOT/preblocked-state/lane-blocked"
+chmod 600 "$TMP_ROOT/preblocked-state/lane-blocked"
+start_bridge preblocked blocking 0 /usr/bin/python3
+wait_for_bridge_exit
+[[ "$BRIDGE_RC" == "78" ]]
+[[ ! -e "$COUNT_FILE" ]]
+[[ ! -e "$HELPER_CALLS" ]]
+[[ ! -e "$STATE_DIR/bridge.lock" ]]
+[[ ! -e "$STATE_DIR/pending.tsv" ]]
+
+# A server that accepts the filtered cursor without its filter identity has
+# ignored the query. Refuse it before persisting state or opening SSE.
+start_bridge unsupported-filter filter_unsupported 1 /usr/bin/python3
+wait_for_bridge_exit
+[[ "$BRIDGE_RC" == "80" ]]
+grep -Fxq 'http://127.0.0.1:8080/v1/feed?wait=0s&limit=1&scope=assigned&exclude_actor=self' "$URLS_FILE"
+grep -Fxq 'http://127.0.0.1:8080/v1/feed?wait=0s&limit=1&cursor=cursor-0' "$URLS_FILE"
+! grep -Fq '/v1/feed/stream' "$URLS_FILE"
+[[ ! -e "$COUNT_FILE" ]]
+[[ ! -e "$HELPER_CALLS" ]]
+[[ ! -e "$STATE_DIR/cursor" ]]
+[[ ! -e "$STATE_DIR/initialized" ]]
+
+# Transport failures and server-side outages do not invalidate a sound local
+# cursor. They rejoin the existing reconnect loop and recover normally.
+mkdir -p "$TMP_ROOT/probe-transport-state"
+printf '%s\n' cursor-persisted >"$TMP_ROOT/probe-transport-state/cursor"
+printf 'version=2\nfilter=assigned-exclude-self-v1\n' >"$TMP_ROOT/probe-transport-state/initialized"
+chmod 600 "$TMP_ROOT/probe-transport-state/cursor" "$TMP_ROOT/probe-transport-state/initialized"
+start_bridge probe-transport probe_transport_then_ok 1 /usr/bin/python3
+wait_for_log 'feed_filter_identity_probe_retryable'
+wait_for_log 'wake_dry_run events=1'
+[[ "$(tr -d '\r\n' <"$PROBE_COUNT_FILE")" -ge 2 ]]
+! grep -Fq '/v1/feed?wait=0s&limit=1&scope=assigned&exclude_actor=self' "$URLS_FILE"
+kill -0 "$BRIDGE_PID" 2>/dev/null
+stop_bridge
+[[ "$STOP_FORCED" == "0" ]]
+
+mkdir -p "$TMP_ROOT/probe-500-state"
+printf '%s\n' cursor-persisted >"$TMP_ROOT/probe-500-state/cursor"
+printf 'version=2\nfilter=assigned-exclude-self-v1\n' >"$TMP_ROOT/probe-500-state/initialized"
+chmod 600 "$TMP_ROOT/probe-500-state/cursor" "$TMP_ROOT/probe-500-state/initialized"
+start_bridge probe-500 probe_500_then_ok 1 /usr/bin/python3
+wait_for_log 'feed_filter_identity_probe_retryable'
+wait_for_log 'wake_dry_run events=1'
+[[ "$(tr -d '\r\n' <"$PROBE_COUNT_FILE")" -ge 2 ]]
+! grep -Fq '/v1/feed?wait=0s&limit=1&scope=assigned&exclude_actor=self' "$URLS_FILE"
+kill -0 "$BRIDGE_PID" 2>/dev/null
+stop_bridge
+[[ "$STOP_FORCED" == "0" ]]
+
+# A cursor from the old unfiltered bridge has no trustworthy server identity.
+# It is not silently blessed or sent back to the API.
+mkdir -p "$TMP_ROOT/legacy-cursor-state"
+printf '%s\n' cursor-legacy >"$TMP_ROOT/legacy-cursor-state/cursor"
+printf '%s\n' v1 >"$TMP_ROOT/legacy-cursor-state/initialized"
+chmod 600 "$TMP_ROOT/legacy-cursor-state/cursor" "$TMP_ROOT/legacy-cursor-state/initialized"
+start_bridge legacy-cursor blocking 1 /usr/bin/python3
+wait_for_bridge_exit
+[[ "$BRIDGE_RC" == "80" ]]
+[[ ! -e "$URLS_FILE" ]]
+[[ ! -e "$COUNT_FILE" ]]
+[[ ! -e "$HELPER_CALLS" ]]
+grep -Fxq v1 "$STATE_DIR/initialized"
+
 # Duplicate event IDs across reconnects produce one wake and advance safely.
 start_bridge dedupe selected 1 /usr/bin/python3
 wait_for_log 'wake_dry_run events=1'
@@ -297,6 +483,9 @@ done
 [[ "$(grep -Fc 'event_queued event_id=event-1' "$LOG_FILE")" == "1" ]]
 grep -Fxq 'event-1' "$STATE_DIR/seen-event-ids"
 [[ "$(tr -d '\r\n' <"$STATE_DIR/cursor")" == "cursor-2" ]]
+printf 'version=2\nfilter=assigned-exclude-self-v1\n' | cmp -s - "$STATE_DIR/initialized"
+grep -Fxq 'http://127.0.0.1:8080/v1/feed?wait=0s&limit=1&scope=assigned&exclude_actor=self' "$URLS_FILE"
+grep -Fxq 'http://127.0.0.1:8080/v1/feed/stream?scope=assigned&exclude_actor=self' "$URLS_FILE"
 [[ ! -e "$STATE_DIR/delivery.tsv" ]]
 [[ ! -e "$STATE_DIR/delivery.json" ]]
 [[ ! -s "$STATE_DIR/pending.tsv" ]]
@@ -366,13 +555,15 @@ BRIDGE_PID=""
 # Once initialization is durable, loss of the cursor fails closed instead of
 # re-bootstrapping at a newer feed tip.
 mkdir -p "$TMP_ROOT/missing-cursor-state"
-printf '%s\n' v1 >"$TMP_ROOT/missing-cursor-state/initialized"
+printf 'version=2\nfilter=assigned-exclude-self-v1\n' >"$TMP_ROOT/missing-cursor-state/initialized"
 chmod 600 "$TMP_ROOT/missing-cursor-state/initialized"
 start_bridge missing-cursor blocking 1 /usr/bin/python3
-wait_for_log 'cursor_missing_after_initialization'
+wait_for_bridge_exit
+[[ "$BRIDGE_RC" == "80" ]]
+grep -Fq 'cursor_missing_after_initialization' "$LOG_FILE"
+[[ ! -e "$URLS_FILE" ]]
 [[ ! -e "$COUNT_FILE" ]]
-stop_bridge
-[[ "$STOP_FORCED" == "0" ]]
+[[ ! -e "$HELPER_CALLS" ]]
 
 # A crash after the seen receipt is durable but before delivery unlink is
 # recovered without a second wake or reliance on PID state.
@@ -428,20 +619,35 @@ kill -0 "$BRIDGE_PID" 2>/dev/null
 stop_bridge
 [[ "$STOP_FORCED" == "0" ]]
 
-# Any marker plus an uncertain outcome is quarantined and never replayed.
-start_bridge ambiguous incrementing 0 "$FAKE_PYTHON" ambiguous
+# Any marker plus an uncertain outcome durably blocks the lane before moving
+# evidence. A frame arriving after that point cannot change cursor or pending.
+start_bridge ambiguous selected_after_block 0 "$FAKE_PYTHON" ambiguous
+wait_for_file "$STATE_DIR/lane-blocked"
+cursor_at_block="$(tr -d '\r\n' <"$STATE_DIR/cursor")"
+pending_at_block="$(cksum "$STATE_DIR/pending.tsv")"
+wait_for_bridge_exit
+[[ "$BRIDGE_RC" == "78" ]]
+[[ "$(tr -d '\r\n' <"$STATE_DIR/cursor")" == "$cursor_at_block" ]]
+[[ "$cursor_at_block" == "cursor-1" ]]
+[[ "$(cksum "$STATE_DIR/pending.tsv")" == "$pending_at_block" ]]
+! grep -Fq 'event-2' "$STATE_DIR/pending.tsv"
 wait_for_log 'delivery_quarantined reason=ambiguous'
 find "$STATE_DIR/quarantine" -name '*.ambiguous.tsv' -print -quit | grep -q .
 find "$STATE_DIR/quarantine" -name '*.ambiguous.json' -print -quit | grep -q .
 [[ -e "$STATE_DIR/lane-blocked" ]]
-for _ in $(seq 1 100); do
-  [[ -s "$STATE_DIR/pending.tsv" ]] && break
-  sleep 0.05
-done
-[[ -s "$STATE_DIR/pending.tsv" ]]
 [[ "$(tr -d '\r\n' <"$HELPER_CALLS")" == "1" ]]
-stop_bridge
-[[ "$STOP_FORCED" == "0" ]]
+
+# A durable block created while SSE is quiet is observed on the next heartbeat;
+# the owned curl child is stopped and the bridge returns the blocked status.
+start_bridge heartbeat heartbeat 1 /usr/bin/python3
+wait_for_file "$COUNT_FILE"
+printf 'version=1\nreason=ambiguous\n' >"$STATE_DIR/lane-blocked.tmp"
+chmod 600 "$STATE_DIR/lane-blocked.tmp"
+mv "$STATE_DIR/lane-blocked.tmp" "$STATE_DIR/lane-blocked"
+wait_for_bridge_exit
+[[ "$BRIDGE_RC" == "78" ]]
+[[ ! -d "$STATE_DIR/bridge.lock" ]]
+[[ ! -p "$STATE_DIR/stream.fifo" ]]
 
 # Stopping the bridge propagates through worker -> helper -> helper child and
 # waits for the chain before releasing its locks.
