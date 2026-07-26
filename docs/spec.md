@@ -96,10 +96,13 @@ existing API's `/mcp` route through public TLS, with OAuth 2.1 authorization,
 per-client attribution, resource-bound access tokens, rotating refresh tokens,
 and owner approval for each grant/authority change. It is neither the fleet's
 event-log authority nor required for peer networking. REST remains canonical.
-Sealed read profiles expose only provider-safe work-item/feed projections;
-sealed tracker-write profiles additionally expose narrowly validated,
-idempotent work-item coordination mutations. They never expose approval,
-connector, inbox, registry/policy, private payload, or execution authority.
+On every MCP transport, an exact sealed authority marker selects its sealed
+profile boundary. Sealed read profiles expose only provider-safe work-item/feed
+projections; sealed tracker-write profiles additionally expose narrowly
+validated, idempotent work-item coordination mutations. They never expose
+approval, connector, inbox, registry/policy, private payload, or execution
+authority. Missing markers retain the transport's ordinary local-token policy;
+unknown or inexact markers fail closed.
 
 `docs/network-layer-spec.md` gives the detailed registry, origin-validation,
 queue, patience, staging, and acceptance contract. In particular, Stage 1 is
@@ -297,7 +300,8 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
   allowed scope ceiling, not authority; the bound profile and owner-approved
   request select one exact effective scope within it. Profile, effective-scope,
   or ceiling mismatches fail at binding, authorization, token exchange,
-  refresh, and access.
+  refresh, and access. The shared MCP dispatcher enforces the marker's sealed
+  tool and provider-safe data profile over both HTTP and stdio.
 - Token revocation is instant; the next request fails. A panic-revoke endpoint reachable from the iPhone invalidates every non-root token.
 - Tokens are recorded on every event. Audit answers "who, via what client, when, with what authority."
 

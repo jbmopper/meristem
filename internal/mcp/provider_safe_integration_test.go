@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
@@ -181,6 +182,136 @@ func TestProviderSafeHTTPContextAllVersusTreeAndNoEventPayloadLeakage(t *testing
 
 	trackerReadiness := providerHTTPToolTextWithOptions(t, s, ownerTracker, "backlog.readiness", map[string]any{}, HTTPOptions{Profile: ProviderTrackerHTTPProfile()})
 	assertProviderTextSafe(t, trackerReadiness)
+}
+
+func TestSealedProviderReadProfileAppliesToStdioAndDeniesWritesWithoutEvents(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "stdio-profile-root",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootActor := rootResult.Token
+	workSvc := workitems.NewService(pool, writer)
+	tree, err := workSvc.Create(ctx, workitems.CreateInput{
+		Title:                      "Listener release tree",
+		Body:                       "tracker-safe listener instructions",
+		SuggestedConvergenceChecks: []string{"event:listener-safe"},
+		Actor:                      rootActor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside, err := workSvc.Create(ctx, workitems.CreateInput{
+		Title:                      "Unrelated private portfolio item",
+		Body:                       "OUTSIDE-TREE-BODY",
+		SuggestedConvergenceChecks: []string{"event:outside"},
+		Actor:                      rootActor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workSvc.AppendEvent(ctx, tree.ID, "coordination.private_test", map[string]any{
+		"message_text":      "PRIVATE-LISTENER-MESSAGE",
+		"encrypted_payload": "PRIVATE-LISTENER-ENVELOPE",
+	}, rootActor); err != nil {
+		t.Fatal(err)
+	}
+
+	authority, err := access.ReduceProviderAuthority(access.ProviderDelegatedTreeReadV1, tree.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "dedicated-codex-listener",
+		Source: domain.SourceAgent,
+		Scopes: authority.Scopes,
+		Actor:  &rootActor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Deps{
+		Auth:        authSvc,
+		Access:      access.NewService(pool),
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems:   workSvc,
+		Feed:        feed.NewService(pool),
+	}, ServerInfo{Name: "provider-stdio-test", Version: "test"}, nil)
+	if err := s.Authenticate(ctx, listenerResult.Secret); err != nil {
+		t.Fatalf("authenticate dedicated listener: %v", err)
+	}
+
+	listResp := roundtrip(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if listResp.Error != nil {
+		t.Fatalf("tools/list returned error: %+v", listResp.Error)
+	}
+	var listed struct {
+		Tools []toolDescriptor `json:"tools"`
+	}
+	if err := json.Unmarshal(listResp.Result, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if got := toolNameSet(listed.Tools); len(got) != 4 {
+		t.Fatalf("dedicated listener advertised extra tools: %v", toolNames(listed.Tools))
+	}
+
+	readiness := providerStdioToolText(t, s, "backlog.readiness", map[string]any{})
+	if !strings.Contains(readiness, tree.ID.String()) {
+		t.Fatalf("listener readiness omitted assigned tree: %s", readiness)
+	}
+	for _, forbidden := range []string{
+		outside.ID.String(),
+		"Unrelated private portfolio item",
+		"OUTSIDE-TREE-BODY",
+		"PRIVATE-LISTENER-MESSAGE",
+		"PRIVATE-LISTENER-ENVELOPE",
+		"state_reason",
+		"created_by",
+	} {
+		if strings.Contains(readiness, forbidden) {
+			t.Fatalf("listener readiness leaked %q: %s", forbidden, readiness)
+		}
+	}
+	assertProviderTextSafe(t, readiness)
+
+	before := providerTotalEventCount(t, pool)
+	denied := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"work_items.append_event","arguments":{"id":"`+tree.ID.String()+`","kind":"provider.note","payload":{"note":"must not append"},"idempotency_key":"listener-write-denied"}}}`)
+	if denied.Error == nil || denied.Error.Code != errCodeMethodNotFound {
+		t.Fatalf("listener write was not rejected at profile boundary: %+v", denied)
+	}
+	if after := providerTotalEventCount(t, pool); after != before {
+		t.Fatalf("denied listener write appended an event: before=%d after=%d", before, after)
+	}
+}
+
+func providerStdioToolText(t *testing.T, s *Server, name string, args map[string]any) string {
+	t.Helper()
+	isError, text := callToolForTest(t, s, name, args)
+	if isError {
+		t.Fatalf("%s returned tool error: %s", name, text)
+	}
+	return text
+}
+
+func providerTotalEventCount(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM events`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 // TestProviderTrackerMutationsRenderProviderSafe pins the provider-safe wire

@@ -292,8 +292,12 @@ if [[ ! -e "\$workspace_root/.git" ]]; then
 fi
 cd "\$workspace_root"
 export MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL"
-# Same per-session override contract as the Claude wrapper (3818efed).
-export MERISTEM_TOKEN="\$(cat "\${MERISTEM_TOKEN_FILE:-\$primary_repo/.meristem/codex.token}")"
+# CODEX_MERISTEM_TOKEN_FILE is the unattended app-server boundary: the stem
+# listener may pass a dedicated task credential without forwarding the
+# bridge's MERISTEM_TOKEN_FILE. Interactive sessions retain the existing
+# MERISTEM_TOKEN_FILE override and per-app fallback (3818efed).
+token_file="\${CODEX_MERISTEM_TOKEN_FILE:-\${MERISTEM_TOKEN_FILE:-\$primary_repo/.meristem/codex.token}}"
+export MERISTEM_TOKEN="\$(cat "\$token_file")"
 exec "\$meristem_bin" mcp
 EOF
   chmod 700 "$GENERATED_DIR/codex-meristem-command.sh"

@@ -164,6 +164,10 @@ A projection writer turns appended events into derived rows. It is the *only* co
   human-review-blocked work, append tracker-safe note/progress payloads, update
   blocked metadata, block, or terminalize. They never imply approval,
   connector, inbox, registry/policy, convergence-signal, or execution access.
+- The sealed provider marker is transport-independent: the shared MCP
+  dispatcher applies the same profile tool allowlist and provider-safe response
+  reducer over HTTP and stdio. Missing markers retain the transport's ordinary
+  local-token policy; unknown or inexact markers fail closed.
 - OAuth client binding/revocation requires an explicitly scoped non-root human
   token (`oauth_clients.bind` / `oauth_clients.revoke`). The root token remains
   mint/revoke-only. Unknown or inexact provider profiles fail closed.

@@ -201,6 +201,8 @@ func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, opts HTTPOptions) *rp
 	}
 	canonical := s.canonicalToolName(params.Name)
 	if !allowed[canonical] {
+		// Historical wording is retained for wire compatibility. The same
+		// fail-closed profile reducer now also applies to marked stdio actors.
 		return rpcErrorf(errCodeMethodNotFound, "tool not enabled on this HTTP MCP profile: "+params.Name)
 	}
 	// Fail-closed rendering gate. A restricted (provider-safe) route only reaches
