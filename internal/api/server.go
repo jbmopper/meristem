@@ -50,6 +50,13 @@ import (
 // EnvHTTPAddr is the listen address. Defaults to :8080 when unset.
 const EnvHTTPAddr = "MERISTEM_HTTP_ADDR"
 
+// EnvMCPAllowedOrigins configures the exact-match Origin allowlist for /mcp
+// (comma-separated). Default empty: requests without an Origin header are
+// accepted (non-browser MCP clients send none); any present Origin is
+// rejected 403 unless listed here. Per the 2026-07-28 spec there is no
+// log-only mode — validation is always enforced.
+const EnvMCPAllowedOrigins = "MERISTEM_MCP_ALLOWED_ORIGINS"
+
 // EnvNodeID is this node's stable, DNS-safe node_id (docs/network-layer-spec.md
 // §2 "Naming"). It lets the cross-node command route tell a command bound for
 // this node (execute locally) from one to be durably queued for a peer. When
@@ -100,6 +107,7 @@ type Server struct {
 	cultivarActivations   *cultivaractivation.Service
 	feed                  *feed.Service
 	mcpServer             *mcp.Server
+	mcpAllowedOrigins     map[string]bool
 	policyProfiles        *policyprofile.Service
 	projections           *projectiondefs.Service
 	registry              *registry.Service
@@ -158,6 +166,7 @@ func NewWithPolicyAndBuildGuard(pool *pgxpool.Pool, logger *slog.Logger, policy 
 		oauthRuntime:       oauthRuntime,
 		policy:             policy,
 		build:              build,
+		mcpAllowedOrigins:  parseMCPAllowedOrigins(os.Getenv(EnvMCPAllowedOrigins)),
 	}
 	if pool != nil {
 		s.writer = app.NewGuardedEventWriter(build)
@@ -487,8 +496,11 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/oauth/clients/{client_id}/actor", s.command(http.HandlerFunc(s.handleOAuthBindActor)))
 	s.mux.Handle("POST /v1/oauth/clients/{client_id}/revoke", s.command(http.HandlerFunc(s.handleOAuthRevokeClient)))
 	s.mux.Handle("POST /v1/oauth/grants/{grant_id}/revoke", s.command(http.HandlerFunc(s.handleOAuthRevokeGrant)))
-	s.mux.Handle("GET /mcp", s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP))))
-	s.mux.Handle("POST /mcp", s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP))))
+	// Origin validation wraps outermost so it runs before any credential work
+	// (2026-07-28: servers MUST validate Origin; present-and-invalid MUST 403).
+	s.mux.Handle("GET /mcp", s.mcpOriginGuard(s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP)))))
+	s.mux.Handle("POST /mcp", s.mcpOriginGuard(s.oauthAccessRoute(s.mcpProtected(http.HandlerFunc(s.handleMCP)))))
+	s.mux.Handle("DELETE /mcp", s.mcpOriginGuard(http.HandlerFunc(handleMCPDelete)))
 	s.mux.Handle("POST /v1/inbox/messages", s.commandWithAccess(s.canCaptureInbox, http.HandlerFunc(s.handleCaptureMessage)))
 	s.mux.Handle("POST /v1/signals", s.command(http.HandlerFunc(s.handleReceiveSignal)))
 	s.mux.Handle("POST /v1/crossnode/commands", s.crossnodeQueueCommand(http.HandlerFunc(s.handleCrossnodeCommand)))

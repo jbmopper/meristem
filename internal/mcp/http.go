@@ -24,6 +24,22 @@ type HTTPResponse struct {
 	Status      int
 	ContentType string
 	Body        []byte
+	// ProtocolVersion is the negotiated era version for the transport to echo
+	// in the MCP-Protocol-Version response header. Empty means the caller's
+	// historical default (2025-06-18) applies.
+	ProtocolVersion string
+}
+
+// HTTPTransportContext carries the protocol-relevant request headers into the
+// per-request era classifier. A nil context (in-process callers, pre-2026
+// tests) preserves the legacy-only behavior of the c5a99ac contract.
+type HTTPTransportContext struct {
+	ProtocolVersion    string
+	HasProtocolVersion bool
+	McpMethod          string
+	HasMcpMethod       bool
+	McpName            string
+	HasMcpName         bool
 }
 
 // HTTPOptions controls the subset of MCP behavior exposed by an HTTP route.
@@ -35,6 +51,9 @@ type HTTPOptions struct {
 	// When set it takes precedence over AllowedTools and may reject a call based
 	// on its arguments before the normal MCP dispatcher can run a handler.
 	Profile *HTTPToolProfile
+	// Transport enables 2026-07-28 per-request era classification from the
+	// request headers. Nil keeps the pre-2026 legacy-only behavior.
+	Transport *HTTPTransportContext
 }
 
 // ReadOnlyHTTPTools is the provider-safe HTTP surface. The non-nil allowlist
@@ -102,6 +121,152 @@ func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, a
 			Error:   rpcErrorf(errCodeInvalidRequest, "method is required"),
 		})
 	}
+	// 2026-07-28 per-request era classification. HTTP carries no server-side
+	// era state: every request declares its era through the version header and
+	// body metadata; a modern-shaped or modern-headed request never falls back
+	// to legacy handling.
+	if opts.Transport != nil {
+		era, meta, legacyVersion, rerr, status := s.classifyHTTPEra(msg, opts.Transport)
+		if rerr != nil {
+			if msg.isNotification() {
+				s.logClassification("http", era, transportRequestedVersion(msg, opts.Transport), "", "", "rejected_notification:"+rerr.Message)
+				return HTTPResponse{Status: http.StatusAccepted}
+			}
+			s.logClassification("http", era, transportRequestedVersion(msg, opts.Transport), "", "", "rejected:"+rerr.Message)
+			resp := jsonRPCHTTPResponse(status, rpcMessage{JSONRPC: "2.0", ID: msg.ID, Error: rerr})
+			return resp
+		}
+		if era == eraModern {
+			return s.handleModernHTTP(ctx, msg, meta, actor, opts)
+		}
+		s.logClassification("http", eraLegacy, transportRequestedVersion(msg, opts.Transport), "", "", "served:"+msg.Method)
+		resp := s.handleLegacyHTTP(ctx, msg, actor, opts)
+		resp.ProtocolVersion = legacyVersion
+		return resp
+	}
+	return s.handleLegacyHTTP(ctx, msg, actor, opts)
+}
+
+// transportRequestedVersion reports the version the request asked for, for
+// telemetry only: the header when present, an initialize proposal otherwise,
+// and the measurable "(absent)" marker for grandfathered headerless traffic.
+func transportRequestedVersion(msg rpcMessage, transport *HTTPTransportContext) string {
+	if transport.HasProtocolVersion {
+		return transport.ProtocolVersion
+	}
+	if v := requestedInitializeVersion(msg); v != "" {
+		return v
+	}
+	if msg.Method != "initialize" {
+		return "(absent)"
+	}
+	return ""
+}
+
+// classifyHTTPEra applies the consensus rules: a 2026-07-28 header requires
+// matching modern _meta; an allowlisted legacy header selects legacy
+// semantics with no server session; initialize without a modern header may
+// open legacy; anything else is rejected naming the supported versions.
+func (s *Server) classifyHTTPEra(msg rpcMessage, transport *HTTPTransportContext) (protocolEra, *modernRequestMeta, string, *rpcError, int) {
+	meta, shaped, metaErr := s.classifyModern(msg)
+	if shaped {
+		if metaErr != nil {
+			return eraModern, meta, "", metaErr, http.StatusBadRequest
+		}
+		if !transport.HasProtocolVersion {
+			return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+				"missing required header "+HeaderProtocolVersion), http.StatusBadRequest
+		}
+		if transport.ProtocolVersion != meta.ProtocolVersion {
+			return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+				HeaderProtocolVersion+" header does not match _meta "+metaProtocolVersionKey), http.StatusBadRequest
+		}
+		if !transport.HasMcpMethod || transport.McpMethod != msg.Method {
+			return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+				"Mcp-Method header is required and must match the request method"), http.StatusBadRequest
+		}
+		if msg.Method == "tools/call" {
+			var params callToolParams
+			if len(msg.Params) > 0 {
+				_ = json.Unmarshal(msg.Params, &params)
+			}
+			if !transport.HasMcpName || transport.McpName != params.Name {
+				return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+					"Mcp-Name header is required on tools/call and must match params.name"), http.StatusBadRequest
+			}
+		}
+		return eraModern, meta, "", nil, 0
+	}
+	if transport.HasProtocolVersion {
+		switch {
+		case transport.ProtocolVersion == modernProtocolVersion:
+			return eraModern, nil, "", rpcErrorf(errCodeInvalidParams,
+				"missing required _meta field "+metaProtocolVersionKey), http.StatusBadRequest
+		case s.legacyVersionSupported(transport.ProtocolVersion):
+			return eraLegacy, nil, transport.ProtocolVersion, nil, 0
+		default:
+			return eraLegacy, nil, "", unsupportedProtocolError(transport.ProtocolVersion, s.supportedVersions()), http.StatusBadRequest
+		}
+	}
+	if msg.Method == "initialize" {
+		return eraLegacy, nil, s.negotiateLegacyVersion(msg.Params), nil, 0
+	}
+	// Headerless non-initialize requests are the repo's own current clients
+	// (the provider integration surface sends no MCP-Protocol-Version on tool
+	// calls). Grandfather them onto the default legacy version exactly like
+	// the stdio bare-request rule: legacy is the compatibility era, modern
+	// strictness is never relaxed, and the telemetry tags these requests
+	// "(absent)" so the removal gate can measure headerless traffic.
+	return eraLegacy, nil, protocolVersion, nil, 0
+}
+
+// handleModernHTTP serves a classified modern request. Protocol-level errors
+// were already rejected by the classifier; from here the modern era differs
+// from legacy only in method surface, envelopes, and the 404 mapping for
+// unknown methods.
+func (s *Server) handleModernHTTP(ctx context.Context, msg rpcMessage, meta *modernRequestMeta, actor domain.Token, opts HTTPOptions) HTTPResponse {
+	s.logClassification("http", eraModern, meta.ProtocolVersion, meta.ClientName, meta.ClientVersion, "served:"+msg.Method)
+	if msg.isNotification() {
+		// The modern surface served here defines no notifications; accept and
+		// drop per Streamable HTTP semantics.
+		return HTTPResponse{Status: http.StatusAccepted, ProtocolVersion: modernProtocolVersion}
+	}
+	switch msg.Method {
+	case "server/discover":
+		return s.modernHTTPResult(msg, s.handleServerDiscover(), nil, false)
+	case "tools/list":
+		result, rerr := s.handleListToolsFiltered(actor, opts)
+		return s.modernHTTPResult(msg, result, rerr, true)
+	case "tools/call":
+		if refusal, blocked := s.buildToolCallRefusal(); blocked {
+			return s.modernHTTPResult(msg, refusal, nil, false)
+		}
+		if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
+			return s.modernHTTPResult(msg, nil, rerr, false)
+		}
+		result, rerr := s.gatedToolsCall(ctx, actor, msg.Params)
+		return s.modernHTTPResult(msg, result, rerr, false)
+	default:
+		resp := jsonRPCHTTPResponse(http.StatusNotFound, rpcMessage{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error:   rpcErrorf(errCodeMethodNotFound, "method not found in the "+modernProtocolVersion+" era: "+msg.Method),
+		})
+		resp.ProtocolVersion = modernProtocolVersion
+		return resp
+	}
+}
+
+func (s *Server) modernHTTPResult(msg rpcMessage, result any, rerr *rpcError, cacheable bool) HTTPResponse {
+	if rerr == nil {
+		result = s.modernizeResult(result, cacheable)
+	}
+	resp := s.httpRPCResult(msg, result, rerr)
+	resp.ProtocolVersion = modernProtocolVersion
+	return resp
+}
+
+func (s *Server) handleLegacyHTTP(ctx context.Context, msg rpcMessage, actor domain.Token, opts HTTPOptions) HTTPResponse {
 	// Build consistency precedes HTTP profile and argument validation. A stale
 	// shared process must report the same fail-closed tools/call result over
 	// HTTP and stdio, including for malformed or profile-disallowed calls, and

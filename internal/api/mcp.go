@@ -12,6 +12,41 @@ import (
 	"github.com/jbmopper/meristem/internal/mcp"
 )
 
+// parseMCPAllowedOrigins builds the exact-match Origin allowlist from
+// EnvMCPAllowedOrigins. Empty input yields an empty (deny-all-present) set.
+func parseMCPAllowedOrigins(raw string) map[string]bool {
+	allowed := make(map[string]bool)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			allowed[part] = true
+		}
+	}
+	return allowed
+}
+
+// mcpOriginGuard enforces 2026-07-28 Origin validation ahead of any
+// credential handling: absent Origin is accepted (non-browser MCP clients
+// send none); a present Origin must exactly match the configured allowlist or
+// the request is rejected 403. There is deliberately no log-only mode.
+func (s *Server) mcpOriginGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && !s.mcpAllowedOrigins[origin] {
+			writeAPIError(w, http.StatusForbidden, "origin_forbidden", "Origin is not allowed for /mcp")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleMCPDelete exists so DELETE gets the spec-required 405 (the modern
+// transport defines no DELETE semantics; sessions do not exist to delete).
+func handleMCPDelete(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Allow", "POST")
+	writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+}
+
 func (s *Server) mcpProtected(next http.Handler) http.Handler {
 	if s.authenticator == nil {
 		return serviceUnavailableHandler()
@@ -56,13 +91,13 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		w.Header().Set("Allow", "POST, GET")
+		w.Header().Set("Allow", "POST")
 		writeAPIError(w, http.StatusMethodNotAllowed, "mcp_sse_unavailable", "mcp server-initiated SSE is not implemented")
 		return
 	case http.MethodPost:
 		s.handleMCPPost(w, r, actor)
 	default:
-		w.Header().Set("Allow", "POST, GET")
+		w.Header().Set("Allow", "POST")
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
@@ -90,8 +125,25 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request, actor dom
 		writeAPIError(w, http.StatusForbidden, "provider_authority_denied", "bearer token does not carry one exact sealed provider authority profile")
 		return
 	}
-	resp := s.mcpServer.HandleHTTPMessageWithOptions(r.Context(), raw, actor, mcp.HTTPOptions{Profile: profile})
-	w.Header().Set(mcp.HeaderProtocolVersion, "2025-06-18")
+	protocolHeader, hasProtocolHeader := headerValue(r, mcp.HeaderProtocolVersion)
+	mcpMethod, hasMcpMethod := headerValue(r, "Mcp-Method")
+	mcpName, hasMcpName := headerValue(r, "Mcp-Name")
+	resp := s.mcpServer.HandleHTTPMessageWithOptions(r.Context(), raw, actor, mcp.HTTPOptions{
+		Profile: profile,
+		Transport: &mcp.HTTPTransportContext{
+			ProtocolVersion:    protocolHeader,
+			HasProtocolVersion: hasProtocolHeader,
+			McpMethod:          mcpMethod,
+			HasMcpMethod:       hasMcpMethod,
+			McpName:            mcpName,
+			HasMcpName:         hasMcpName,
+		},
+	})
+	responseVersion := resp.ProtocolVersion
+	if responseVersion == "" {
+		responseVersion = "2025-06-18"
+	}
+	w.Header().Set(mcp.HeaderProtocolVersion, responseVersion)
 	if resp.ContentType != "" {
 		w.Header().Set("Content-Type", resp.ContentType)
 	}
@@ -99,6 +151,16 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request, actor dom
 	if len(resp.Body) > 0 {
 		_, _ = w.Write(resp.Body)
 	}
+}
+
+// headerValue distinguishes an absent header from an empty one; the era
+// classifier needs the difference for the required-header rules.
+func headerValue(r *http.Request, name string) (string, bool) {
+	values, ok := r.Header[http.CanonicalHeaderKey(name)]
+	if !ok || len(values) == 0 {
+		return "", false
+	}
+	return values[0], true
 }
 
 func providerHTTPProfile(actor domain.Token) (*mcp.HTTPToolProfile, error) {
