@@ -513,6 +513,10 @@ func (s *Server) handleCreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		Actor:                      actor,
 	})
 	if err != nil {
+		if errors.Is(err, workitems.ErrInvalidRequest) {
+			// Pre-append validation: nothing committed, key stays usable.
+			idempotency.MarkRefusalUnconsumed(r.Context())
+		}
 		writeAPIError(w, http.StatusBadRequest, "work_item_create_failed", err.Error())
 		return
 	}
@@ -536,7 +540,7 @@ func (s *Server) handleGetWorkItem(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := s.workItems.Get(r.Context(), id)
 	if err != nil {
-		writeWorkItemError(w, err)
+		writeWorkItemError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"work_item": toWorkItemResponse(item)})
@@ -576,7 +580,7 @@ func (s *Server) handleSpawnChild(w http.ResponseWriter, r *http.Request) {
 		Actor:                      actor,
 	})
 	if err != nil {
-		writeWorkItemError(w, err)
+		writeWorkItemError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -603,7 +607,7 @@ func (s *Server) handleAppendWorkItemEvent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.workItems.AppendEvent(r.Context(), id, req.Kind, req.Payload, actor); err != nil {
-		writeWorkItemError(w, err)
+		writeWorkItemError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"work_item_id": id, "appended": true})
@@ -664,7 +668,7 @@ func (s *Server) handleUpdateWorkItemMetadata(w http.ResponseWriter, r *http.Req
 		Actor:                      actor,
 	})
 	if err != nil {
-		writeWorkItemError(w, err)
+		writeWorkItemError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"work_item": toWorkItemResponse(item)})
@@ -696,7 +700,7 @@ func (s *Server) handleTransitionWorkItem(w http.ResponseWriter, r *http.Request
 			writeAPIError(w, http.StatusConflict, "invalid_transition", err.Error())
 			return
 		}
-		writeWorkItemError(w, err)
+		writeWorkItemError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"work_item": toWorkItemResponse(item)})
@@ -1001,7 +1005,16 @@ func writeGrantError(w http.ResponseWriter, err error) {
 	writeAPIError(w, http.StatusInternalServerError, "subactor_grant_failed", "could not issue subactor grant")
 }
 
-func writeWorkItemError(w http.ResponseWriter, err error) {
+func writeWorkItemError(w http.ResponseWriter, r *http.Request, err error) {
+	// Pure refusals — the service rejected before appending anything — must
+	// not consume the caller's idempotency key: mark them so the middleware
+	// leaves the key usable with a corrected body. Everything else in this
+	// mapping stays unmarked and is conservatively recorded; in particular
+	// ErrXylemBudgetExhausted commits authoritative refusal events before
+	// returning and MUST replay rather than re-execute.
+	if errors.Is(err, workitems.ErrNotFound) || errors.Is(err, workitems.ErrInvalidRequest) {
+		idempotency.MarkRefusalUnconsumed(r.Context())
+	}
 	if errors.Is(err, workitems.ErrNotFound) {
 		writeAPIError(w, http.StatusNotFound, "work_item_not_found", "work item not found")
 		return

@@ -704,6 +704,13 @@ func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.
 			if err != nil {
 				status = mutationToolErrorStatus(err)
 				toolResult = toolErrorResult(err.Error())
+				if isPureRefusal(err) {
+					// Nothing was committed: the key must stay usable with
+					// corrected arguments. Stateful refusals (budget
+					// exhaustion that appended escalation events) stay
+					// unmarked and are recorded/replayed conservatively.
+					idempotency.MarkRefusalUnconsumed(callCtx)
+				}
 			} else if isProviderSafeContext(callCtx) {
 				// Reduce the mutation response at the boundary before it is
 				// enveloped and persisted for idempotent replay, so a
@@ -855,6 +862,55 @@ func replayableToolErr(err error) error {
 	return replayableToolError{err: err}
 }
 
+// isPureRefusal recognizes refusals that provably committed nothing —
+// pre-append validation and not-found — which may leave the idempotency key
+// unconsumed for a corrected retry. Anything else that maps below 500
+// (notably ErrXylemBudgetExhausted, which appends authoritative refusal
+// events before returning) is conservatively treated as a committed
+// conclusion and recorded.
+func isPureRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pure pureToolError
+	if errors.As(err, &pure) {
+		return true
+	}
+	if errors.Is(err, workitems.ErrInvalidRequest) || errors.Is(err, workitems.ErrNotFound) ||
+		errors.Is(err, approvals.ErrInvalidRequest) {
+		return true
+	}
+	return looksSemanticToolError(err)
+}
+
+// notFoundToolError preserves a caller-facing not-found message verbatim
+// while still identifying as workitems.ErrNotFound to errors.Is, so the
+// pure-refusal classification survives the message rewrite the tool layer
+// performs (e.g. "parent work item X not found").
+type notFoundToolError struct{ msg string }
+
+func (e notFoundToolError) Error() string { return e.msg }
+
+func (e notFoundToolError) Is(target error) bool { return target == workitems.ErrNotFound }
+
+// pureToolError marks a refusal produced strictly before any service
+// dispatch (argument validation), which therefore committed nothing and may
+// leave the idempotency key unconsumed. Only wrap errors at call sites that
+// provably precede the first service call — anything after dispatch must
+// stay unmarked so the conservative record-and-replay default applies.
+type pureToolError struct{ err error }
+
+func (e pureToolError) Error() string { return e.err.Error() }
+
+func (e pureToolError) Unwrap() error { return e.err }
+
+func pureToolErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return pureToolError{err: err}
+}
+
 func mutationToolErrorStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -863,9 +919,10 @@ func mutationToolErrorStatus(err error) int {
 		// This status is internal to the idempotency layer; MCP still carries
 		// the tool result in a successful JSON-RPC envelope. Keeping semantic
 		// refusals distinct from committed success lets the dynamic build guard
-		// replace one if the reviewed pin advances during the handler. No
-		// non-success status is pinned under the idempotency key: a refusal
-		// leaves the key unconsumed so the corrected retry can reuse it.
+		// replace one if the reviewed pin advances during the handler. Cache
+		// disposition is decided separately: refusals isPureRefusal recognizes
+		// leave the key unconsumed; all others (stateful budget refusals
+		// included) are recorded and replayed like committed conclusions.
 		return http.StatusUnprocessableEntity
 	}
 	return http.StatusInternalServerError

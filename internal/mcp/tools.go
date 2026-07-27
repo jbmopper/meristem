@@ -1526,7 +1526,9 @@ func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uu
 	}
 	if err := s.deps.Access.CanWriteWorkItem(ctx, actor, id); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return replayableToolErr(fmt.Errorf("work item %s not found", id))
+			// Pre-dispatch access refusal: nothing committed, so it keeps
+			// not-found identity for the pure-refusal classification.
+			return replayableToolErr(notFoundToolError{msg: fmt.Sprintf("work item %s not found", id)})
 		}
 		return err
 	}
@@ -1542,10 +1544,12 @@ func workItemToolErr(err error, notFound error) error {
 	}
 	switch {
 	case errors.Is(err, workitems.ErrNotFound):
+		// The rewritten message must keep identifying as ErrNotFound so the
+		// idempotency layer classifies it as a pure (key-preserving) refusal.
 		if notFound != nil {
-			return replayableToolErr(notFound)
+			return replayableToolErr(notFoundToolError{msg: notFound.Error()})
 		}
-		return replayableToolErr(fmt.Errorf("work_item_not_found: work item not found"))
+		return replayableToolErr(notFoundToolError{msg: "work_item_not_found: work item not found"})
 	case errors.Is(err, workitems.ErrInvalidRequest),
 		errors.Is(err, workitems.ErrInvalidState),
 		errors.Is(err, workitems.ErrInvalidTransition),
@@ -1811,9 +1815,13 @@ func parseUUID(raw, field string) (uuid.UUID, error) {
 	return id, nil
 }
 
+// The argument validators below run strictly before any service dispatch, so
+// their refusals are provably side-effect-free: they carry the pure marker and
+// leave the caller's idempotency key unconsumed for a corrected retry.
+
 func validateWorkItemCreateArgs(title, state string, checks []string, humanReview string) error {
 	if strings.TrimSpace(title) == "" {
-		return replayableToolErr(errors.New("workitems: title is required"))
+		return replayableToolErr(pureToolErr(errors.New("workitems: title is required")))
 	}
 	if err := validateWorkItemStateArg(state); err != nil {
 		return err
@@ -1823,10 +1831,10 @@ func validateWorkItemCreateArgs(title, state string, checks []string, humanRevie
 
 func validateWorkItemLaunchArgs(patienceBudgetSeconds int, escalationRule string) error {
 	if patienceBudgetSeconds < 0 {
-		return replayableToolErr(errors.New("workitems: patience_budget_seconds must be >= 0"))
+		return replayableToolErr(pureToolErr(errors.New("workitems: patience_budget_seconds must be >= 0")))
 	}
 	if escalationRule != "" && !domain.EscalationRule(escalationRule).Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid escalation_rule %q", escalationRule))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid escalation_rule %q", escalationRule)))
 	}
 	return nil
 }
@@ -1834,11 +1842,11 @@ func validateWorkItemLaunchArgs(patienceBudgetSeconds int, escalationRule string
 func validateWorkItemMetadataArgs(checks []string, humanReview string) error {
 	for i, check := range checks {
 		if strings.TrimSpace(check) == "" {
-			return replayableToolErr(fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i))
+			return replayableToolErr(pureToolErr(fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i)))
 		}
 	}
 	if humanReview != "" && !domain.HumanReviewStatus(humanReview).Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid human_review_status %q", humanReview))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid human_review_status %q", humanReview)))
 	}
 	return nil
 }
@@ -1849,7 +1857,7 @@ func validateWorkItemStateArg(state string) error {
 	}
 	parsed := domain.WorkItemState(state)
 	if !parsed.Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid state %q", parsed))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid state %q", parsed)))
 	}
 	return nil
 }

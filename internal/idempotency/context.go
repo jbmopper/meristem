@@ -9,9 +9,23 @@ import (
 
 type contextKey struct{}
 type recordedResponseKey struct{}
+type refusalDispositionKey struct{}
 
 type recordedResponseOverride struct {
 	body []byte
+}
+
+// refusalDisposition is the explicit cache decision for a non-success
+// response. The middleware cannot derive it from the HTTP status alone:
+// some 4xx refusals are pure (validation, not-found — nothing committed, so
+// the key must stay usable with a corrected body) while others are stateful
+// conclusions (xylem/signal budget refusals commit authoritative events
+// before returning 409) that MUST be pinned so a changed body conflicts
+// instead of re-executing. The conservative default for an unmarked 4xx is
+// therefore to record it; only a handler path that provably committed
+// nothing may mark its refusal unconsumed.
+type refusalDisposition struct {
+	unconsumed bool
 }
 
 // Request is the canonical idempotency identity for one authenticated POST.
@@ -85,4 +99,29 @@ func recordedResponse(ctx context.Context) ([]byte, bool) {
 		return nil, false
 	}
 	return override.body, true
+}
+
+func withRefusalDisposition(ctx context.Context, disposition *refusalDisposition) context.Context {
+	return context.WithValue(ctx, refusalDispositionKey{}, disposition)
+}
+
+// MarkRefusalUnconsumed declares that the 4xx response the current handler
+// is about to return is a pure, side-effect-free refusal: nothing was
+// committed, so the idempotency key must NOT be consumed and a retry with a
+// corrected body may execute. Handlers must only call this on paths where no
+// event was appended — a stateful refusal (budget exhaustion that records
+// escalation events, for example) must stay unmarked so it is recorded and
+// replayed like any committed conclusion. No-op outside an idempotent
+// mutation.
+func MarkRefusalUnconsumed(ctx context.Context) {
+	disposition, ok := ctx.Value(refusalDispositionKey{}).(*refusalDisposition)
+	if !ok || disposition == nil {
+		return
+	}
+	disposition.unconsumed = true
+}
+
+func refusalUnconsumed(ctx context.Context) bool {
+	disposition, ok := ctx.Value(refusalDispositionKey{}).(*refusalDisposition)
+	return ok && disposition != nil && disposition.unconsumed
 }

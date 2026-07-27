@@ -16,6 +16,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -367,4 +368,102 @@ func idempotencyKeyCount(t *testing.T, pool *pgxpool.Pool, tokenID uuid.UUID, sc
 		t.Fatalf("count idempotency keys: %v", err)
 	}
 	return count
+}
+
+// TestMCPStatefulRefusalConsumesKey is the MCP twin of the REST
+// TestStatefulRefusalConsumesKeyAndReplays (review finding IDEM-B1): a xylem
+// budget refusal commits xylem.exhausted + escalation before returning, so
+// its 422-class tool error must be recorded — the same key replays the
+// refusal without a second append, and changed arguments conflict.
+func TestMCPStatefulRefusalConsumesKey(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	writer := app.NewEventWriter()
+	actorRoot, err := auth.NewService(pool, writer).CreateToken(ctx, auth.CreateTokenInput{
+		Name: "mcp-stateful-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	regSvc := registry.NewService(pool, writer)
+	if _, _, err := regSvc.DefineTropism(ctx, actorRoot.Token, registry.DefineTropismInput{
+		Name: "mcp-single-child-checklist", Version: 1,
+		Reducer:     registry.ReducerRef{Identity: "all_pass_checklist", Version: 1},
+		Params:      []byte(`{"budget":{"max_attempts":3,"escalation":"hand_to_human"}}`),
+		Description: "mcp single child budget tropism",
+	}); err != nil {
+		t.Fatalf("define tropism: %v", err)
+	}
+	if _, _, err := regSvc.DefineCultivar(ctx, actorRoot.Token, registry.DefineCultivarInput{
+		Name: "mcp-single-child-worker", Version: 1,
+		Tropism: registry.TropismRef{Name: "mcp-single-child-checklist", Version: 1},
+		Profile: registry.Profile{
+			Briefing:       "briefings/mcp-single-child-worker.md",
+			ScopesTemplate: []string{"work_items.tree:{root}", "work_items.read", "work_items.write", "feed.read_assigned"},
+		},
+		Xylem:       registry.Xylem{MaxAttempts: 3, MaxWallSeconds: 1800, MaxDepth: 1, MaxChildrenPerItem: 1},
+		Phloem:      "projection:work-item-brief",
+		Description: "mcp single child budget cultivar",
+	}); err != nil {
+		t.Fatalf("define cultivar: %v", err)
+	}
+
+	workSvc := workitems.NewService(pool, writer)
+	parent, err := workSvc.Create(ctx, workitems.CreateInput{
+		Title: "mcp stateful parent", Actor: actorRoot.Token, Cultivar: "mcp-single-child-worker@1",
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems:   workSvc,
+	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	s.actor = actorRoot.Token
+
+	first := map[string]any{"idempotency_key": "mcp-first-child", "parent_id": parent.ID.String(), "title": "first child"}
+	if isError, text := callToolForTest(t, s, "work_items.spawn_child", first); isError {
+		t.Fatalf("first spawn errored: %s", text)
+	}
+
+	countEvents := func(kind string) int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE kind = $1`, kind).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", kind, err)
+		}
+		return n
+	}
+
+	overBudget := map[string]any{"idempotency_key": "mcp-stateful-409", "parent_id": parent.ID.String(), "title": "second child"}
+	isError, text := callToolForTest(t, s, "work_items.spawn_child", overBudget)
+	if !isError || !strings.Contains(text, "xylem budget exhausted") {
+		t.Fatalf("over-budget spawn should refuse with the budget error, isError=%t text=%q", isError, text)
+	}
+	if got := countEvents(string(domain.EventXylemExhausted)); got != 1 {
+		t.Fatalf("expected one xylem.exhausted after refusal, got %d", got)
+	}
+	if got := idempotencyKeyCount(t, pool, actorRoot.Token.ID, "MCP:work_items.spawn_child", "mcp-stateful-409"); got != 1 {
+		t.Fatalf("stateful refusal must consume its key, got %d rows", got)
+	}
+
+	// Same key, same args: replay the recorded refusal, append nothing new.
+	if isError, text = callToolForTest(t, s, "work_items.spawn_child", overBudget); !isError || !strings.Contains(text, "xylem budget exhausted") {
+		t.Fatalf("stateful refusal retry should replay, isError=%t text=%q", isError, text)
+	}
+	if got := countEvents(string(domain.EventXylemExhausted)); got != 1 {
+		t.Fatalf("replayed refusal appended a second xylem.exhausted: %d", got)
+	}
+
+	// Same key, changed args: conflict, still exactly one refusal set.
+	renamed := map[string]any{"idempotency_key": "mcp-stateful-409", "parent_id": parent.ID.String(), "title": "second child renamed"}
+	if isError, text = callToolForTest(t, s, "work_items.spawn_child", renamed); !isError || !strings.Contains(text, "idempotency_key_conflict") {
+		t.Fatalf("changed args under a consumed key should conflict, isError=%t text=%q", isError, text)
+	}
+	if got := countEvents(string(domain.EventXylemExhausted)); got != 1 {
+		t.Fatalf("conflicting reuse appended a second xylem.exhausted: %d", got)
+	}
 }

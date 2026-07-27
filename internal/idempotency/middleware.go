@@ -69,8 +69,10 @@ func NewMiddlewareWithGuard(pool *pgxpool.Pool, writer *events.Writer, guard fun
 // ExecuteInput describes one non-HTTP mutation guarded by the same durable
 // idempotency store as POST middleware. Run must return a JSON response body
 // for successful execution. Semantic tool/API refusals should be encoded in
-// that body with a 4xx status and a nil error; they are returned to the
-// caller but never pinned under the idempotency key.
+// that body with a 4xx status and a nil error; a refusal that provably
+// committed nothing may additionally call MarkRefusalUnconsumed on the run
+// context to leave the key usable by a corrected retry, while unmarked
+// refusals are recorded and replayed like committed conclusions.
 type ExecuteInput struct {
 	Token       domain.Token
 	Scope       string
@@ -148,6 +150,7 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	}
 
 	override := &recordedResponseOverride{}
+	disposition := &refusalDisposition{}
 	callCtx := withRequest(ctx, Request{
 		TokenID:     in.Token.ID,
 		Scope:       in.Scope,
@@ -155,6 +158,7 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 		RequestHash: in.RequestHash,
 	})
 	callCtx = withRecordedResponseOverride(callCtx, override)
+	callCtx = withRefusalDisposition(callCtx, disposition)
 	status, body, err := in.Run(callCtx)
 	if err != nil {
 		return ExecuteResult{}, err
@@ -165,12 +169,17 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	if status >= http.StatusBadRequest && m.guardBlocked() {
 		return ExecuteResult{}, m.requireGuard()
 	}
-	// Mirror Wrap: only success is pinned. A 5xx is an incomplete attempt;
-	// a 4xx is a rejection that by contract mutated nothing. Recording a
-	// rejection would consume the key — the caller's corrected retry with
-	// the same key would then hit the same-key/different-body conflict
-	// instead of executing. Rejections are re-derived on retry.
-	if status >= http.StatusBadRequest {
+	// Mirror Wrap: a 5xx is an incomplete attempt, never pinned. For 4xx the
+	// cache disposition is explicit, not status-derived: a handler that
+	// committed nothing marks its refusal unconsumed, leaving the key usable
+	// with a corrected body; every other 4xx is conservatively recorded like
+	// a conclusion, because stateful refusals append authoritative events
+	// before returning and MUST replay (and conflict on a changed body)
+	// rather than re-execute.
+	if status >= http.StatusInternalServerError {
+		return ExecuteResult{Status: status, Body: body}, nil
+	}
+	if status >= http.StatusBadRequest && refusalUnconsumed(callCtx) {
 		return ExecuteResult{Status: status, Body: body}, nil
 	}
 	recordBody := body
@@ -181,13 +190,16 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	}
 	fresh, err := m.record(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, recordBody)
 	if err != nil {
-		// Only successes reach record now. The handler was admitted only
-		// after a current-build check; if the pin advances after its domain
-		// transaction commits, do not strand the admitted response merely
-		// because the follow-on cache event is now blocked. The retry
-		// remains safe under the domain idempotency identity.
-		if m.guardBlocked() {
+		// The handler was admitted only after a current-build check. If the
+		// pin advances after its domain transaction commits, do not strand
+		// the admitted response merely because the follow-on cache event is
+		// now blocked. The retry remains safe under the domain idempotency
+		// identity.
+		if status < http.StatusBadRequest && m.guardBlocked() {
 			return ExecuteResult{Status: status, Body: body}, nil
+		}
+		if m.guardBlocked() {
+			return ExecuteResult{}, m.requireGuard()
 		}
 		return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
 	}
@@ -298,6 +310,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		rec := newRecorder()
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		override := &recordedResponseOverride{}
+		disposition := &refusalDisposition{}
 		ctx := withRequest(r.Context(), Request{
 			TokenID:     tok.ID,
 			Scope:       scope,
@@ -305,6 +318,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			RequestHash: reqHash,
 		})
 		ctx = withRecordedResponseOverride(ctx, override)
+		ctx = withRefusalDisposition(ctx, disposition)
 		r = r.WithContext(ctx)
 		next.ServeHTTP(rec, r)
 		if rec.overflow {
@@ -319,16 +333,18 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		// Non-success responses are never recorded. A 5xx means "the
-		// attempt did not complete"; a 4xx means "the request was
-		// rejected and nothing mutated". Pinning either under the key
-		// would burn it: a same-key/same-body retry would replay the
-		// failure for the cache TTL, and — worse for 4xx — a same-key
-		// retry with a *corrected* body would surface the 422
-		// same-key/different-body conflict instead of executing. The
-		// cache stores committed conclusions only; rejections are cheap
-		// to re-derive and the domain re-validates on every retry.
-		if rec.status >= http.StatusBadRequest {
+		// 5xx responses are never recorded: the attempt did not complete
+		// and a well-behaved same-key retry must re-execute. For 4xx the
+		// cache disposition is explicit, not status-derived: a handler
+		// that committed nothing marks its refusal unconsumed (validation,
+		// not-found), which keeps the key usable with a corrected body.
+		// Every unmarked 4xx is conservatively recorded like a conclusion:
+		// stateful refusals (xylem/signal budget exhaustion) append
+		// authoritative events before returning 409 and MUST replay — and
+		// conflict on a changed body — rather than re-execute and append
+		// again under one key.
+		if rec.status >= http.StatusInternalServerError ||
+			(rec.status >= http.StatusBadRequest && refusalUnconsumed(r.Context())) {
 			copyHeader(w.Header(), rec.header)
 			w.WriteHeader(rec.status)
 			_, _ = w.Write(rec.body.Bytes())
@@ -341,12 +357,11 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 		fresh, err := m.record(r.Context(), tok, scope, key, reqHash, rec.status, recordBody)
 		if err != nil {
-			// Only successes reach record now. Once the guarded pre-handler
-			// boundary admits a mutation, preserve its first response if the
-			// pin advances after the domain commit. This is load-bearing for
-			// one-time credentials such as subactor token secrets: discarding
-			// the response would leave an active unusable token.
-			if m.guardBlocked() {
+			// Once the guarded pre-handler boundary admits a mutation, preserve
+			// its first response if the pin advances after the domain commit. This
+			// is load-bearing for one-time credentials such as subactor token
+			// secrets: discarding the response would leave an active unusable token.
+			if rec.status < http.StatusBadRequest && m.guardBlocked() {
 				copyHeader(w.Header(), rec.header)
 				w.WriteHeader(rec.status)
 				_, _ = w.Write(rec.body.Bytes())

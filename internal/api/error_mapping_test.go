@@ -25,7 +25,7 @@ func TestAPIErrorMappersUseTypedDomainErrors(t *testing.T) {
 		{
 			name: "work item not found",
 			write: func(w http.ResponseWriter) {
-				writeWorkItemError(w, workitems.ErrNotFound)
+				writeWorkItemError(w, httptest.NewRequest(http.MethodPost, "/test", nil), workitems.ErrNotFound)
 			},
 			status: http.StatusNotFound,
 			code:   "work_item_not_found",
@@ -33,7 +33,7 @@ func TestAPIErrorMappersUseTypedDomainErrors(t *testing.T) {
 		{
 			name: "work item invalid state",
 			write: func(w http.ResponseWriter) {
-				writeWorkItemError(w, fmt.Errorf("%w: bogus", workitems.ErrInvalidState))
+				writeWorkItemError(w, httptest.NewRequest(http.MethodPost, "/test", nil), fmt.Errorf("%w: bogus", workitems.ErrInvalidState))
 			},
 			status: http.StatusBadRequest,
 			code:   "invalid_state",
@@ -41,7 +41,7 @@ func TestAPIErrorMappersUseTypedDomainErrors(t *testing.T) {
 		{
 			name: "work item invalid transition",
 			write: func(w http.ResponseWriter) {
-				writeWorkItemError(w, fmt.Errorf("%w: from done to running", workitems.ErrInvalidTransition))
+				writeWorkItemError(w, httptest.NewRequest(http.MethodPost, "/test", nil), fmt.Errorf("%w: from done to running", workitems.ErrInvalidTransition))
 			},
 			status: http.StatusConflict,
 			code:   "invalid_transition",
@@ -49,7 +49,7 @@ func TestAPIErrorMappersUseTypedDomainErrors(t *testing.T) {
 		{
 			name: "work item validation",
 			write: func(w http.ResponseWriter) {
-				writeWorkItemError(w, fmt.Errorf("%w: title is required", workitems.ErrInvalidRequest))
+				writeWorkItemError(w, httptest.NewRequest(http.MethodPost, "/test", nil), fmt.Errorf("%w: title is required", workitems.ErrInvalidRequest))
 			},
 			status: http.StatusBadRequest,
 			code:   "work_item_request_failed",
@@ -57,7 +57,7 @@ func TestAPIErrorMappersUseTypedDomainErrors(t *testing.T) {
 		{
 			name: "xylem budget",
 			write: func(w http.ResponseWriter) {
-				writeWorkItemError(w, fmt.Errorf("%w: max_children_per_item", workitems.ErrXylemBudgetExhausted))
+				writeWorkItemError(w, httptest.NewRequest(http.MethodPost, "/test", nil), fmt.Errorf("%w: max_children_per_item", workitems.ErrXylemBudgetExhausted))
 			},
 			status: http.StatusConflict,
 			code:   "xylem_budget_exhausted",
@@ -65,7 +65,7 @@ func TestAPIErrorMappersUseTypedDomainErrors(t *testing.T) {
 		{
 			name: "unexpected event dedupe",
 			write: func(w http.ResponseWriter) {
-				writeWorkItemError(w, fmt.Errorf("%w: kind=work_item.transitioned", workitems.ErrUnexpectedEventDedupe))
+				writeWorkItemError(w, httptest.NewRequest(http.MethodPost, "/test", nil), fmt.Errorf("%w: kind=work_item.transitioned", workitems.ErrUnexpectedEventDedupe))
 			},
 			status: http.StatusConflict,
 			code:   "unexpected_event_dedupe",

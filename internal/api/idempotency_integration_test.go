@@ -12,6 +12,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/storage"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 // TestIdempotencyAdvisoryLockSerializesConcurrentRequests fires N
@@ -202,4 +203,104 @@ func TestIdempotencyRejectionDoesNotConsumeKey(t *testing.T) {
 	if rec := post(invalid); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("post-commit different body: want 422 conflict, got %d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+// TestStatefulRefusalConsumesKeyAndReplays pins the other half of the cache
+// disposition contract (review finding IDEM-B1): a refusal that COMMITS
+// authoritative events before returning — xylem budget exhaustion appends
+// xylem.exhausted plus an escalation and blocks the parent — is a stateful
+// conclusion. It must consume its key: a same-body retry replays the recorded
+// 409 without appending a second refusal set, and a changed body under the
+// same key conflicts instead of being admitted as a new authoritative action.
+func TestStatefulRefusalConsumesKeyAndReplays(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "stateful-refusal-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	defineSingleChildCultivar(t, ctx, pool, writer, rootResult.Token)
+	workSvc := workitems.NewService(pool, writer)
+	parent, err := workSvc.Create(ctx, workitems.CreateInput{
+		Title: "stateful refusal parent", Actor: rootResult.Token, Cultivar: "single-child-worker@1",
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	server := New(pool, nil)
+	spawnPath := "/v1/work-items/" + parent.ID.String() + "/children"
+
+	first := doREST(t, server.Handler(), http.MethodPost, spawnPath, rootResult.Secret, "first-child", []byte(`{"title":"first child"}`))
+	assertRESTStatus(t, first, http.StatusCreated)
+
+	// The over-budget refusal commits one xylem.exhausted + escalation set
+	// and must be recorded under its key.
+	overBudget := []byte(`{"title":"second child"}`)
+	refused := doREST(t, server.Handler(), http.MethodPost, spawnPath, rootResult.Secret, "stateful-409", overBudget)
+	assertRESTStatus(t, refused, http.StatusConflict)
+	assertErrorCode(t, refused, "xylem_budget_exhausted")
+	assertEventCount(t, pool, domain.EventXylemExhausted, 1)
+	assertEventCount(t, pool, domain.EventEscalationRequested, 1)
+
+	// Same key, same body: replay the recorded refusal, append NOTHING new.
+	replay := doREST(t, server.Handler(), http.MethodPost, spawnPath, rootResult.Secret, "stateful-409", overBudget)
+	assertRESTStatus(t, replay, http.StatusConflict)
+	if replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("stateful refusal retry must replay, not re-execute")
+	}
+	assertEventCount(t, pool, domain.EventXylemExhausted, 1)
+	assertEventCount(t, pool, domain.EventEscalationRequested, 1)
+
+	// Same key, changed body: one logical key cannot identify a second
+	// authoritative action — conflict, and still exactly one refusal set.
+	changed := doREST(t, server.Handler(), http.MethodPost, spawnPath, rootResult.Secret, "stateful-409", []byte(`{"title":"second child renamed"}`))
+	assertRESTStatus(t, changed, http.StatusUnprocessableEntity)
+	assertErrorCode(t, changed, "idempotency_key_conflict")
+	assertEventCount(t, pool, domain.EventXylemExhausted, 1)
+	assertEventCount(t, pool, domain.EventEscalationRequested, 1)
+}
+
+// TestUnmarkedRefusalIsConservativelyRecorded pins the fail-conservative
+// default: a 4xx no handler explicitly marked as pure (here a signals
+// validation rejection, whose handler predates the disposition seam) is
+// recorded, so a changed body under the same key conflicts rather than
+// executing. If a future handler wants key-preserving validation it must
+// opt in via MarkRefusalUnconsumed, never get it by default.
+func TestUnmarkedRefusalIsConservativelyRecorded(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	tokenResult, err := auth.NewService(pool, app.NewEventWriter()).CreateToken(ctx, auth.CreateTokenInput{
+		Name: "unmarked-refusal", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	server := New(pool, nil)
+
+	invalid := []byte(`{"kind":"not-a-real-signal-kind","dedupe_key":"conservative-1"}`)
+	rec := postSignal(t, server.Handler(), tokenResult.Secret, "conservative-key", invalid)
+	assertRESTStatus(t, rec, http.StatusBadRequest)
+	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 1)
+
+	// The unmarked rejection consumed the key: same body replays...
+	replay := postSignal(t, server.Handler(), tokenResult.Secret, "conservative-key", invalid)
+	assertRESTStatus(t, replay, http.StatusBadRequest)
+	if replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("unmarked refusal retry must replay the recorded response")
+	}
+	// ...and a changed body conflicts instead of executing.
+	valid := signalRequestBody(t, "conservative-2")
+	conflict := postSignal(t, server.Handler(), tokenResult.Secret, "conservative-key", valid)
+	assertRESTStatus(t, conflict, http.StatusUnprocessableEntity)
+	assertEventCount(t, pool, domain.EventSignalReceived, 0)
 }
