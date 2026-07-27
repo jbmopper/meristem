@@ -108,10 +108,21 @@ func TestOAuthClientAdminMCPParityIntegration(t *testing.T) {
 		OAuthClientAdmin: oauth.NewClientAdminService(pool, writer),
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
-	// Root, agent, and legacy-unscoped human credentials are refused before
-	// idempotency or the domain service can append an event.
-	for name, secret := range map[string]string{"root": root.Secret, "provider": provider.Secret, "unscoped-human": unscopedHuman.Secret} {
-		if err := s.Authenticate(ctx, secret); err != nil {
+	// Root and legacy-unscoped human credentials reach the ordinary domain
+	// scope guard. The provider-marked agent is refused even earlier by its
+	// transport-independent sealed profile. Neither path may reach idempotency
+	// or the domain service and append an event.
+	denialCases := []struct {
+		name          string
+		secret        string
+		profileDenied bool
+	}{
+		{name: "root", secret: root.Secret},
+		{name: "provider", secret: provider.Secret, profileDenied: true},
+		{name: "unscoped-human", secret: unscopedHuman.Secret},
+	}
+	for _, denialCase := range denialCases {
+		if err := s.Authenticate(ctx, denialCase.secret); err != nil {
 			t.Fatal(err)
 		}
 		beforeBind := eventCount(t, pool, domain.EventOAuthClientActorBound)
@@ -120,20 +131,41 @@ func TestOAuthClientAdminMCPParityIntegration(t *testing.T) {
 			tool string
 			args map[string]any
 		}{
-			{"oauth_clients.bind_actor", map[string]any{"client_id": clientID, "actor_token_id": provider.Token.ID, "authority_profile": authority.Profile, "idempotency_key": "denied-bind-" + name}},
-			{"oauth_clients.revoke", map[string]any{"client_id": clientID, "reason": "must not run", "idempotency_key": "denied-revoke-" + name}},
+			{"oauth_clients.bind_actor", map[string]any{"client_id": clientID, "actor_token_id": provider.Token.ID, "authority_profile": authority.Profile, "idempotency_key": "denied-bind-" + denialCase.name}},
+			{"oauth_clients.revoke", map[string]any{"client_id": clientID, "reason": "must not run", "idempotency_key": "denied-revoke-" + denialCase.name}},
 		}
 		for _, call := range deniedCalls {
+			if denialCase.profileDenied {
+				request, err := json.Marshal(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      12,
+					"method":  "tools/call",
+					"params": map[string]any{
+						"name":      call.tool,
+						"arguments": call.args,
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				response := roundtrip(t, s, string(request))
+				if response.Error == nil ||
+					response.Error.Code != errCodeMethodNotFound ||
+					!strings.Contains(response.Error.Message, "not enabled on this HTTP MCP profile") {
+					t.Fatalf("%s %s profile denial: %+v", denialCase.name, call.tool, response)
+				}
+				continue
+			}
 			isError, text := callToolForTest(t, s, call.tool, call.args)
 			if !isError || !strings.Contains(text, "insufficient_scope") {
-				t.Fatalf("%s %s denial: isError=%t text=%q", name, call.tool, isError, text)
+				t.Fatalf("%s %s denial: isError=%t text=%q", denialCase.name, call.tool, isError, text)
 			}
 		}
 		if got := eventCount(t, pool, domain.EventOAuthClientActorBound); got != beforeBind {
-			t.Fatalf("%s denial appended binding event: before=%d after=%d", name, beforeBind, got)
+			t.Fatalf("%s denial appended binding event: before=%d after=%d", denialCase.name, beforeBind, got)
 		}
 		if got := eventCount(t, pool, domain.EventOAuthClientRevoked); got != beforeRevoke {
-			t.Fatalf("%s denial appended revocation event: before=%d after=%d", name, beforeRevoke, got)
+			t.Fatalf("%s denial appended revocation event: before=%d after=%d", denialCase.name, beforeRevoke, got)
 		}
 	}
 
