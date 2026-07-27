@@ -68,6 +68,27 @@ func TestMCPOriginAllowlistedAccepted(t *testing.T) {
 	}
 }
 
+func TestMCPExplicitlyEmptyOriginRejected(t *testing.T) {
+	// MCP26-B5: an explicitly present empty Origin is PRESENT, not absent,
+	// and must hit the allowlist (which can never contain the empty string).
+	s := New(nil, nil)
+	server := httptest.NewServer(s.Handler())
+	t.Cleanup(server.Close)
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header["Origin"] = []string{""}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("explicitly empty Origin status = %d, want 403", resp.StatusCode)
+	}
+}
+
 func TestMCPDeleteMethodNotAllowed(t *testing.T) {
 	resp := originRequest(t, http.MethodDelete, "")
 	if resp.StatusCode != http.StatusMethodNotAllowed {

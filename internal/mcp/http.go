@@ -128,12 +128,23 @@ func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, a
 	if opts.Transport != nil {
 		era, meta, legacyVersion, rerr, status := s.classifyHTTPEra(msg, opts.Transport)
 		if rerr != nil {
+			// A request rejected at classification still answers in its own
+			// era's voice: a modern-established era labels the error response
+			// with the modern version.
+			responseVersion := ""
+			if era == eraModern {
+				responseVersion = modernProtocolVersion
+			}
 			if msg.isNotification() {
+				// A notification the server cannot accept is an HTTP-level
+				// error with no JSON-RPC response body; 202 is reserved for
+				// accepted notifications.
 				s.logClassification("http", era, transportRequestedVersion(msg, opts.Transport), "", "", "rejected_notification:"+rerr.Message)
-				return HTTPResponse{Status: http.StatusAccepted}
+				return HTTPResponse{Status: status, ProtocolVersion: responseVersion}
 			}
 			s.logClassification("http", era, transportRequestedVersion(msg, opts.Transport), "", "", "rejected:"+rerr.Message)
 			resp := jsonRPCHTTPResponse(status, rpcMessage{JSONRPC: "2.0", ID: msg.ID, Error: rerr})
+			resp.ProtocolVersion = responseVersion
 			return resp
 		}
 		if era == eraModern {
@@ -209,15 +220,23 @@ func (s *Server) classifyHTTPEra(msg rpcMessage, transport *HTTPTransportContext
 		}
 	}
 	if msg.Method == "initialize" {
-		return eraLegacy, nil, s.negotiateLegacyVersion(msg.Params), nil, 0
+		version := s.negotiateLegacyVersion(msg.Params)
+		if version == "" {
+			return eraLegacy, nil, "", unsupportedProtocolError(legacyRequestLabel(msg), s.supportedVersions()), http.StatusBadRequest
+		}
+		return eraLegacy, nil, version, nil, 0
 	}
 	// Headerless non-initialize requests are the repo's own current clients
 	// (the provider integration surface sends no MCP-Protocol-Version on tool
-	// calls). Grandfather them onto the default legacy version exactly like
-	// the stdio bare-request rule: legacy is the compatibility era, modern
-	// strictness is never relaxed, and the telemetry tags these requests
-	// "(absent)" so the removal gate can measure headerless traffic.
-	return eraLegacy, nil, protocolVersion, nil, 0
+	// calls). Grandfather them onto the default SERVED legacy version exactly
+	// like the stdio bare-request rule: legacy is the compatibility era,
+	// modern strictness is never relaxed, narrowing is honored, and the
+	// telemetry tags these requests "(absent)" so the removal gate can
+	// measure headerless traffic. An empty served set fails closed.
+	if !s.legacyEnabled() {
+		return eraLegacy, nil, "", unsupportedProtocolError("(absent)", s.supportedVersions()), http.StatusBadRequest
+	}
+	return eraLegacy, nil, s.defaultLegacyVersion(), nil, 0
 }
 
 // handleModernHTTP serves a classified modern request. Protocol-level errors

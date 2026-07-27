@@ -231,6 +231,80 @@ func TestLegacyVersionNarrowingNeverWidens(t *testing.T) {
 	}
 }
 
+func TestLegacyNarrowingNewestOnly(t *testing.T) {
+	// MCP26-B1: with only 2025-11-25 served, every fallback must resolve to
+	// it — the disabled 2025-06-18 must be unreachable from any path.
+	t.Setenv(EnvLegacyVersions, "2025-11-25")
+	s := newTestServer(t)
+	for i, req := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
+	} {
+		result := decodeResult(t, roundtrip(t, s, req))
+		if result["protocolVersion"] != "2025-11-25" {
+			t.Errorf("request %d: negotiated %v, want 2025-11-25", i, result["protocolVersion"])
+		}
+	}
+}
+
+func TestLegacyDisabledFailsClosed(t *testing.T) {
+	// MCP26-B1: narrowing to an unknown-only set empties the served legacy
+	// versions; every legacy opening fails closed naming modern-only support,
+	// nothing locks, and modern service is unaffected.
+	t.Setenv(EnvLegacyVersions, "2025-03-26")
+	s := newTestServer(t)
+	if s.legacyEnabled() {
+		t.Fatalf("served set = %v, want empty", s.legacyVersions)
+	}
+	for i, req := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+	} {
+		resp := roundtrip(t, s, req)
+		if resp.Error == nil || resp.Error.Code != errCodeUnsupportedProtocol {
+			t.Fatalf("request %d: expected -32022, got %+v", i, resp.Error)
+		}
+		var data struct {
+			Supported []string `json:"supported"`
+		}
+		if err := json.Unmarshal(resp.Error.Data, &data); err != nil || len(data.Supported) != 1 || data.Supported[0] != "2026-07-28" {
+			t.Errorf("request %d: supported = %s, want modern-only", i, resp.Error.Data)
+		}
+	}
+	// The failed legacy openings must not have locked anything: modern entry
+	// still succeeds.
+	modern := roundtrip(t, s, modernRequest(3, "server/discover", ""))
+	if modern.Error != nil {
+		t.Fatalf("modern entry after failed legacy openings: %+v", modern.Error)
+	}
+}
+
+func TestModernMetaSchemaValidation(t *testing.T) {
+	// MCP26-B2: reserved metadata values are schema-validated. Each malformed
+	// case rejects -32602 and must not lock the era (a valid modern retry
+	// succeeds at the end).
+	s := newTestServer(t)
+	cases := map[string]string{
+		"clientCapabilities string": `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":"broken"}}}`,
+		"clientCapabilities null":   `{"jsonrpc":"2.0","id":2,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":null}}}`,
+		"clientInfo missing fields": `{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"x"}}}}`,
+		"clientInfo non-object":     `{"jsonrpc":"2.0","id":4,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":"x"}}}`,
+		"logLevel invalid":          `{"jsonrpc":"2.0","id":5,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/logLevel":"verbose"}}}`,
+	}
+	for name, req := range cases {
+		resp := roundtrip(t, s, req)
+		if resp.Error == nil || resp.Error.Code != errCodeInvalidParams {
+			t.Errorf("%s: expected -32602, got %+v", name, resp.Error)
+		}
+	}
+	valid := `{"jsonrpc":"2.0","id":9,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"x","version":"1"},"io.modelcontextprotocol/logLevel":"warning"}}}`
+	resp := roundtrip(t, s, valid)
+	if resp.Error != nil {
+		t.Fatalf("fully valid modern metadata rejected: %+v", resp.Error)
+	}
+}
+
 func TestLegacyToolCallEnvelopeUnchanged(t *testing.T) {
 	// Golden legacy shape: tools/call error results keep exactly the c5a99ac
 	// fields (content, isError) with no modern additions.

@@ -181,6 +181,87 @@ func TestHTTPBareRequestWithoutHeaderGrandfathered(t *testing.T) {
 	}
 }
 
+func TestHTTPModernErrorResponsesCarryModernVersion(t *testing.T) {
+	// MCP26-B3: an era established as modern (by header or by body metadata)
+	// labels even its error responses with the modern version.
+	s := newTestServer(t)
+	// Modern header, missing _meta.
+	resp := httpEra(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, modernTransport("tools/list", ""))
+	if resp.Status != http.StatusBadRequest || resp.ProtocolVersion != modernProtocolVersion {
+		t.Errorf("modern header without _meta: status=%d version=%q", resp.Status, resp.ProtocolVersion)
+	}
+	// Modern _meta, missing header.
+	resp = httpEra(t, s, modernRequest(2, "server/discover", ""), &HTTPTransportContext{McpMethod: "server/discover", HasMcpMethod: true})
+	if resp.Status != http.StatusBadRequest || resp.ProtocolVersion != modernProtocolVersion {
+		t.Errorf("modern _meta without header: status=%d version=%q", resp.Status, resp.ProtocolVersion)
+	}
+	// Malformed modern metadata.
+	resp = httpEra(t, s, `{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":"broken"}}}`, modernTransport("server/discover", ""))
+	if resp.Status != http.StatusBadRequest || resp.ProtocolVersion != modernProtocolVersion {
+		t.Errorf("malformed modern metadata: status=%d version=%q", resp.Status, resp.ProtocolVersion)
+	}
+}
+
+func TestHTTPRejectedModernNotificationIsHTTPError(t *testing.T) {
+	// MCP26-B4: a notification the server cannot accept is an HTTP-level
+	// error with no JSON-RPC body; 202 is reserved for accepted ones.
+	s := newTestServer(t)
+	// Malformed metadata (missing clientCapabilities), no id -> notification.
+	badMeta := `{"jsonrpc":"2.0","method":"notifications/something","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`
+	resp := httpEra(t, s, badMeta, modernTransport("notifications/something", ""))
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("rejected notification status = %d, want 400", resp.Status)
+	}
+	if len(resp.Body) != 0 {
+		t.Errorf("rejected notification must have no JSON-RPC body, got %s", resp.Body)
+	}
+	if resp.ProtocolVersion != modernProtocolVersion {
+		t.Errorf("rejected modern notification version = %q", resp.ProtocolVersion)
+	}
+	// Malformed header (missing version header on modern-shaped notification).
+	noHeader := `{"jsonrpc":"2.0","method":"notifications/something","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`
+	resp = httpEra(t, s, noHeader, &HTTPTransportContext{McpMethod: "notifications/something", HasMcpMethod: true})
+	if resp.Status != http.StatusBadRequest || len(resp.Body) != 0 {
+		t.Errorf("headerless modern notification: status=%d body=%s", resp.Status, resp.Body)
+	}
+	// An accepted modern notification still gets 202.
+	ok := modernRequestNotification("notifications/something")
+	resp = httpEra(t, s, ok, modernTransport("notifications/something", ""))
+	if resp.Status != http.StatusAccepted {
+		t.Errorf("accepted notification status = %d, want 202", resp.Status)
+	}
+}
+
+func modernRequestNotification(method string) string {
+	return `{"jsonrpc":"2.0","method":"` + method + `","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`
+}
+
+func TestHTTPHeaderlessGrandfatherHonorsNarrowing(t *testing.T) {
+	// MCP26-B1: the headerless compatibility default is the oldest SERVED
+	// version, not a hard-coded one; an empty served set fails closed.
+	t.Setenv(EnvLegacyVersions, "2025-11-25")
+	s := newTestServer(t)
+	resp := httpEra(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, &HTTPTransportContext{})
+	if resp.Status != http.StatusOK || resp.ProtocolVersion != "2025-11-25" {
+		t.Errorf("narrowed grandfather: status=%d version=%q", resp.Status, resp.ProtocolVersion)
+	}
+}
+
+func TestHTTPHeaderlessFailsClosedWhenLegacyDisabled(t *testing.T) {
+	t.Setenv(EnvLegacyVersions, "2025-03-26")
+	s := newTestServer(t)
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`,
+	} {
+		resp := httpEra(t, s, body, &HTTPTransportContext{})
+		msg := decodeHTTPBody(t, resp)
+		if resp.Status != http.StatusBadRequest || msg.Error == nil || msg.Error.Code != errCodeUnsupportedProtocol {
+			t.Errorf("legacy-disabled request: status=%d err=%+v", resp.Status, msg.Error)
+		}
+	}
+}
+
 func TestHTTPModernUnknownMethodIs404(t *testing.T) {
 	s := newTestServer(t)
 	resp := httpEra(t, s, modernRequest(1, "resources/list", ""), modernTransport("resources/list", ""))

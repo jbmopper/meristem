@@ -89,6 +89,25 @@ func (s *Server) legacyVersionSupported(version string) bool {
 	return false
 }
 
+// legacyEnabled reports whether any legacy version survives narrowing. With
+// an empty served set the legacy era is disabled entirely and every legacy
+// opening fails closed naming the (modern-only) supported set.
+func (s *Server) legacyEnabled() bool {
+	return len(s.legacyVersions) > 0
+}
+
+// defaultLegacyVersion is the version served to openings that do not name a
+// usable one (no proposal, unknown proposal, headerless compatibility). It is
+// the oldest SERVED version — 2025-06-18 on an un-narrowed server, preserving
+// the historical default — and never a version narrowing disabled. Callers
+// must check legacyEnabled first; empty-set behavior is fail-closed.
+func (s *Server) defaultLegacyVersion() string {
+	if len(s.legacyVersions) == 0 {
+		return ""
+	}
+	return s.legacyVersions[len(s.legacyVersions)-1]
+}
+
 // supportedVersions lists every protocol revision this process serves,
 // modern first. This is the server/discover advertisement and the
 // `supported` payload of every UnsupportedProtocolVersionError.
@@ -128,30 +147,55 @@ func (s *Server) classifyModern(msg rpcMessage) (meta *modernRequestMeta, shaped
 		return out, true, rpcErrorf(errCodeInvalidParams,
 			"_meta "+metaProtocolVersionKey+" must be a non-empty string")
 	}
-	if _, ok := shell.Meta[metaClientCapabilitiesKey]; !ok {
+	capsRaw, ok := shell.Meta[metaClientCapabilitiesKey]
+	if !ok {
 		return out, true, rpcErrorf(errCodeInvalidParams,
 			"missing required _meta field "+metaClientCapabilitiesKey)
+	}
+	// Reserved metadata values are schema-validated, not presence-checked:
+	// clientCapabilities must be a ClientCapabilities object.
+	var caps map[string]json.RawMessage
+	if err := json.Unmarshal(capsRaw, &caps); err != nil || caps == nil {
+		return out, true, rpcErrorf(errCodeInvalidParams,
+			"_meta "+metaClientCapabilitiesKey+" must be a ClientCapabilities object")
 	}
 	if out.ProtocolVersion != modernProtocolVersion {
 		return out, true, unsupportedProtocolError(out.ProtocolVersion, s.supportedVersions())
 	}
 	if infoRaw, ok := shell.Meta[metaClientInfoKey]; ok {
+		// clientInfo stays optional and observational, but a present value
+		// must be a valid Implementation (name and version required).
 		var info struct {
 			Name    string `json:"name"`
 			Version string `json:"version"`
 		}
-		if err := json.Unmarshal(infoRaw, &info); err == nil {
-			out.ClientName = info.Name
-			out.ClientVersion = info.Version
+		if err := json.Unmarshal(infoRaw, &info); err != nil || strings.TrimSpace(info.Name) == "" || strings.TrimSpace(info.Version) == "" {
+			return out, true, rpcErrorf(errCodeInvalidParams,
+				"_meta "+metaClientInfoKey+" must be an Implementation with name and version")
 		}
+		out.ClientName = info.Name
+		out.ClientVersion = info.Version
 	}
 	if levelRaw, ok := shell.Meta[metaLogLevelKey]; ok {
 		var level string
-		if err := json.Unmarshal(levelRaw, &level); err == nil {
-			out.LogLevel = level
+		if err := json.Unmarshal(levelRaw, &level); err != nil || !validLogLevel(level) {
+			return out, true, rpcErrorf(errCodeInvalidParams,
+				"_meta "+metaLogLevelKey+" must be a valid LoggingLevel")
 		}
+		out.LogLevel = level
 	}
 	return out, true, nil
+}
+
+// validLogLevel checks the RFC 5424 severities the MCP LoggingLevel schema
+// defines.
+func validLogLevel(level string) bool {
+	switch level {
+	case "debug", "info", "notice", "warning", "error", "critical", "alert", "emergency":
+		return true
+	default:
+		return false
+	}
 }
 
 func unsupportedProtocolError(requested string, supported []string) *rpcError {
@@ -161,20 +205,23 @@ func unsupportedProtocolError(requested string, supported []string) *rpcError {
 }
 
 // negotiateLegacyVersion applies the legacy initialize contract: answer a
-// supported version, never echo an unknown one. Per the 2025-06-18 lifecycle
-// specification a server that cannot support the requested version responds
-// with one it does support and the client decides whether to continue.
+// version from the SERVED set, never echo an unknown one and never fall back
+// to a version narrowing disabled. Per the 2025-06-18 lifecycle specification
+// a server that cannot support the requested version responds with one it
+// does support and the client decides whether to continue. The empty string
+// means legacy is disabled entirely (empty served set) and the caller must
+// fail closed.
 func (s *Server) negotiateLegacyVersion(raw json.RawMessage) string {
+	if !s.legacyEnabled() {
+		return ""
+	}
 	var params initializeParams
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &params)
 	}
 	version := params.ProtocolVersion
-	if version == "" {
-		version = protocolVersion
-	}
-	if !s.legacyVersionSupported(version) {
-		version = protocolVersion
+	if version == "" || !s.legacyVersionSupported(version) {
+		version = s.defaultLegacyVersion()
 	}
 	return version
 }

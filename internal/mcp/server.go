@@ -287,9 +287,9 @@ func (s *Server) dispatchStdio(ctx context.Context, msg rpcMessage) (any, *rpcEr
 			if metaErr == nil {
 				s.stdioEra = eraModern
 			}
-		} else {
+		} else if s.legacyEnabled() {
 			s.stdioEra = eraLegacy
-			s.stdioLegacyVersion = protocolVersion
+			s.stdioLegacyVersion = s.defaultLegacyVersion()
 			if msg.Method == "initialize" {
 				s.stdioLegacyVersion = s.negotiateLegacyVersion(msg.Params)
 			}
@@ -325,12 +325,28 @@ func (s *Server) dispatchStdio(ctx context.Context, msg rpcMessage) (any, *rpcEr
 			"missing required _meta field "+metaProtocolVersionKey+" (this connection is locked to the "+modernProtocolVersion+" era)")
 	}
 
+	// Legacy is disabled (empty served set): fail closed naming the
+	// modern-only supported versions; nothing was or will be locked.
+	if locked == eraNone {
+		s.logClassification("stdio", eraLegacy, requestedInitializeVersion(msg), "", "", "rejected:legacy_disabled")
+		return nil, unsupportedProtocolError(legacyRequestLabel(msg), s.supportedVersions())
+	}
+
 	if msg.Method == "initialize" {
 		s.stdioEraMu.Lock()
 		s.stdioLegacyVersion = s.negotiateLegacyVersion(msg.Params)
 		s.stdioEraMu.Unlock()
 	}
 	return s.dispatchWithActor(ctx, msg, s.actorToken())
+}
+
+// legacyRequestLabel names what a rejected legacy opening asked for, for the
+// UnsupportedProtocolVersionError data payload.
+func legacyRequestLabel(msg rpcMessage) string {
+	if v := requestedInitializeVersion(msg); v != "" {
+		return v
+	}
+	return "(none)"
 }
 
 // requestedInitializeVersion extracts the proposed legacy version for
@@ -443,8 +459,13 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 		}
 	}
 	// Answer a supported legacy version, never echo an unknown one; see
-	// negotiateLegacyVersion for the 2025-06-18 lifecycle contract.
+	// negotiateLegacyVersion for the 2025-06-18 lifecycle contract. An empty
+	// negotiation means the served legacy set is empty: fail closed naming
+	// the (modern-only) supported versions, on every transport path.
 	version := s.negotiateLegacyVersion(raw)
+	if version == "" {
+		return nil, unsupportedProtocolError(legacyRequestLabel(rpcMessage{Method: "initialize", Params: raw}), s.supportedVersions())
+	}
 	instructions, buildBlock, serverVersion := s.instructionsAndBuild()
 	return map[string]any{
 		"protocolVersion": version,

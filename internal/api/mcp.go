@@ -31,8 +31,11 @@ func parseMCPAllowedOrigins(raw string) map[string]bool {
 // the request is rejected 403. There is deliberately no log-only mode.
 func (s *Server) mcpOriginGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" && !s.mcpAllowedOrigins[origin] {
+		// Presence, not value, is the gate: an explicitly empty Origin header
+		// is PRESENT and must match the allowlist (it never can — the parser
+		// drops empty entries), so only truly absent Origin passes freely.
+		origin, present := headerValue(r, "Origin")
+		if present && !s.mcpAllowedOrigins[origin] {
 			writeAPIError(w, http.StatusForbidden, "origin_forbidden", "Origin is not allowed for /mcp")
 			return
 		}
