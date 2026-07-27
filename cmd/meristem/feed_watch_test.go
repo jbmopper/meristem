@@ -1,9 +1,10 @@
 package main
 
 // Watch-ergonomics behavior of `meristem feed --watch`: lens flags become
-// query params, the cursor file is durable and torn-write-proof, and the
-// --exec wake hook has redelivery semantics (a failed hook must never
-// advance the cursor past the undelivered event).
+// query params, the cursor file is bootstrapped/durable/torn-write-proof,
+// the --exec wake hook has redelivery semantics (a failed hook must never
+// advance the cursor past the undelivered event), and the reconnect loop
+// classifies server rejections instead of retrying everything.
 
 import (
 	"context"
@@ -20,6 +21,7 @@ import (
 
 func TestBuildFeedQueryTranslatesLensFlags(t *testing.T) {
 	q := buildFeedQuery(feedQueryFlags{
+		projection:    "owner-attention",
 		scope:         "assigned",
 		listenFor:     "self",
 		actors:        []string{"self", "9a1c2b3d-0000-4000-8000-000000000001"},
@@ -30,6 +32,7 @@ func TestBuildFeedQueryTranslatesLensFlags(t *testing.T) {
 		tree:          "9a1c2b3d-0000-4000-8000-000000000003",
 	})
 	want := url.Values{
+		"projection":     {"owner-attention"},
 		"scope":          {"assigned"},
 		"listen_for":     {"self"},
 		"actor":          {"self", "9a1c2b3d-0000-4000-8000-000000000001"},
@@ -83,15 +86,6 @@ func TestCursorFileRoundTripAndFreshStart(t *testing.T) {
 		t.Fatalf("round trip: got %q err=%v", got, err)
 	}
 
-	// Clearing writes an empty cursor, which loads as a fresh start.
-	if err := saveCursorFile(path, ""); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
-	got, err = loadCursorFile(path)
-	if err != nil || got != "" {
-		t.Fatalf("cleared cursor: got %q err=%v", got, err)
-	}
-
 	// No temp debris left behind by the atomic write.
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
@@ -104,45 +98,104 @@ func TestCursorFileRoundTripAndFreshStart(t *testing.T) {
 	}
 }
 
-// sseTestServer serves a fixed set of SSE frames to every connection and
-// records the Last-Event-ID and query each connection arrived with.
-func sseWatchTestServer(t *testing.T, frames []string, connections chan<- *http.Request) *httptest.Server {
+func TestClassifyWatchError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want watchErrorClass
+	}{
+		{"transport", fmt.Errorf("feed: stream connect: connection refused"), watchErrTransient},
+		{"stream closed", fmt.Errorf("feed: stream closed by server"), watchErrTransient},
+		{"http 500", fmt.Errorf("wrap: %w", &apiRequestError{Status: 500, Code: "feed_read_failed"}), watchErrTransient},
+		{"invalid cursor", fmt.Errorf("wrap: %w", &apiRequestError{Status: 400, Code: "invalid_cursor"}), watchErrCursorIdentity},
+		{"filter mismatch", fmt.Errorf("wrap: %w", &apiRequestError{Status: 400, Code: "cursor_filter_mismatch"}), watchErrCursorIdentity},
+		{"projection mismatch", fmt.Errorf("wrap: %w", &apiRequestError{Status: 400, Code: "cursor_projection_mismatch"}), watchErrCursorIdentity},
+		{"invalid filter", fmt.Errorf("wrap: %w", &apiRequestError{Status: 400, Code: "invalid_feed_predicate"}), watchErrPermanent},
+		{"auth denied", fmt.Errorf("wrap: %w", &apiRequestError{Status: 403, Code: "insufficient_scope"}), watchErrPermanent},
+		{"unauthenticated", fmt.Errorf("wrap: %w", &apiRequestError{Status: 401, Code: "missing_authenticated_token"}), watchErrPermanent},
+	} {
+		if got := classifyWatchError(tc.err); got != tc.want {
+			t.Fatalf("%s: classified %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// watchFakeServer speaks both surfaces the durable watcher uses: the page
+// endpoint (/v1/feed) for cursor bootstrap and the SSE stream
+// (/v1/feed/stream). Behavior is driven by the stream func; the page always
+// mints bootCursor. All requests are recorded for assertions (non-blocking,
+// so runaway loops cannot deadlock server shutdown).
+func watchFakeServer(t *testing.T, bootCursor string, stream func(w http.ResponseWriter, r *http.Request), requests chan<- *http.Request) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if connections != nil {
-			connections <- r.Clone(context.Background())
+		if requests != nil {
+			select {
+			case requests <- r.Clone(context.Background()):
+			default:
+			}
 		}
-		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		for _, frame := range frames {
-			fmt.Fprint(w, frame)
+		if r.URL.Path == "/v1/feed" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"items":[],"next_cursor":%q,"has_more":false}`, bootCursor)
+			return
 		}
+		stream(w, r)
 	}))
+}
+
+func serveSSE(w http.ResponseWriter, frames ...string) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	for _, frame := range frames {
+		fmt.Fprint(w, frame)
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func sseFrameFor(id, kind, marker string) string {
 	return fmt.Sprintf("id: %s\nevent: feed\ndata: {\"kind\":%q,\"subject_id\":\"s\",\"payload\":{\"marker\":%q}}\n\n", id, kind, marker)
 }
 
-func TestWatchWakeHookDeliversEventAndPersistsCursor(t *testing.T) {
-	hookOut := filepath.Join(t.TempDir(), "delivered")
-	cursorFile := filepath.Join(t.TempDir(), "cursor")
-	connections := make(chan *http.Request, 4)
-	srv := sseWatchTestServer(t, []string{
-		sseFrameFor("cursor-1", "work_item.event_appended", "wake-me"),
-	}, connections)
-	defer srv.Close()
-
-	client := &feedClient{
+func watchClientFor(srv *httptest.Server, lens url.Values) *feedClient {
+	return &feedClient{
 		baseURL:    srv.URL,
 		token:      "test-token",
-		query:      url.Values{"kind": {"work_item.event_appended"}},
+		query:      lens,
 		http:       &http.Client{Timeout: 5 * time.Second},
 		streamHTTP: &http.Client{Timeout: 0},
 	}
+}
 
-	// One connection serves one frame then closes; cancel after the reconnect
-	// window so the loop exits via ctx instead of reconnecting forever.
+// waitForFileContent polls until want appears via read, or fails at the
+// deadline. Used for assertions on asynchronously-written files.
+func waitForFileContent(t *testing.T, what string, read func() string, want string) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		got := read()
+		if strings.Contains(got, want) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("%s never reached %q; last value %q", what, want, got)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func TestWatchBootstrapsCursorThenDeliversAndPersists(t *testing.T) {
+	hookOut := filepath.Join(t.TempDir(), "delivered")
+	cursorFile := filepath.Join(t.TempDir(), "cursor")
+	requests := make(chan *http.Request, 8)
+	srv := watchFakeServer(t, "boot-cursor", func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w, sseFrameFor("cursor-1", "work_item.event_appended", "wake-me"))
+	}, requests)
+	defer srv.Close()
+
+	client := watchClientFor(srv, url.Values{"kind": {"work_item.event_appended"}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -155,31 +208,34 @@ func TestWatchWakeHookDeliversEventAndPersistsCursor(t *testing.T) {
 		}, os.Stderr)
 	}()
 
-	first := <-connections
-	if got := first.URL.Query().Get("kind"); got != "work_item.event_appended" {
-		t.Fatalf("stream connection missing lens param, query=%s", first.URL.RawQuery)
+	// First request is the bootstrap page read; it must carry the lens.
+	boot := <-requests
+	if boot.URL.Path != "/v1/feed" || boot.URL.Query().Get("kind") != "work_item.event_appended" {
+		t.Fatalf("expected lens-carrying bootstrap page read, got %s?%s", boot.URL.Path, boot.URL.RawQuery)
 	}
-	if got := first.Header.Get("Last-Event-ID"); got != "" {
-		t.Fatalf("fresh watcher sent Last-Event-ID %q", got)
+	// The stream then resumes from the minted cursor — no from-now gap.
+	stream := <-requests
+	if stream.URL.Path != "/v1/feed/stream" {
+		t.Fatalf("expected stream connect after bootstrap, got %s", stream.URL.Path)
+	}
+	if got := stream.Header.Get("Last-Event-ID"); got != "boot-cursor" {
+		t.Fatalf("stream did not resume from the bootstrap cursor: %q", got)
+	}
+	if got := stream.URL.Query().Get("kind"); got != "work_item.event_appended" {
+		t.Fatalf("stream connection missing lens param, query=%s", stream.URL.RawQuery)
 	}
 
-	deadline := time.After(3 * time.Second)
-	for {
+	waitForFileContent(t, "wake hook output", func() string {
 		data, _ := os.ReadFile(hookOut)
-		if strings.Contains(string(data), "wake-me") {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("wake hook never received the event; hook file: %q", string(data))
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
+		return string(data)
+	}, "wake-me")
 
-	// The cursor persisted only after successful delivery.
-	if cursor, err := loadCursorFile(cursorFile); err != nil || cursor != "cursor-1" {
-		t.Fatalf("persisted cursor = %q err=%v, want cursor-1", cursor, err)
-	}
+	// The cursor advance is asynchronous relative to the hook write; wait
+	// for it instead of asserting immediately (WE-T1).
+	waitForFileContent(t, "cursor file", func() string {
+		cursor, _ := loadCursorFile(cursorFile)
+		return cursor
+	}, "cursor-1")
 
 	cancel()
 	if err := <-done; err != nil {
@@ -192,19 +248,13 @@ func TestWatchFailingWakeHookStopsWithoutAdvancingCursor(t *testing.T) {
 	if err := saveCursorFile(cursorFile, "cursor-before"); err != nil {
 		t.Fatalf("seed cursor: %v", err)
 	}
-	connections := make(chan *http.Request, 4)
-	srv := sseWatchTestServer(t, []string{
-		sseFrameFor("cursor-after", "work_item.event_appended", "will-fail"),
-	}, connections)
+	requests := make(chan *http.Request, 8)
+	srv := watchFakeServer(t, "unused-boot", func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w, sseFrameFor("cursor-after", "work_item.event_appended", "will-fail"))
+	}, requests)
 	defer srv.Close()
 
-	client := &feedClient{
-		baseURL:    srv.URL,
-		token:      "test-token",
-		http:       &http.Client{Timeout: 5 * time.Second},
-		streamHTTP: &http.Client{Timeout: 0},
-	}
-
+	client := watchClientFor(srv, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := runFeedWatch(ctx, nil, client, watchOptions{
@@ -216,102 +266,138 @@ func TestWatchFailingWakeHookStopsWithoutAdvancingCursor(t *testing.T) {
 		t.Fatalf("failing hook should stop the watcher loudly, got err=%v", err)
 	}
 
-	// The watcher resumed from the seeded cursor and must not have advanced
-	// past the undelivered event — redelivery is the contract.
-	first := <-connections
-	if got := first.Header.Get("Last-Event-ID"); got != "cursor-before" {
-		t.Fatalf("watcher resumed from %q, want seeded cursor-before", got)
+	// A seeded cursor skips bootstrap; the one connection is the stream,
+	// resuming from the seed. The failed delivery must not advance it.
+	first := <-requests
+	if first.URL.Path != "/v1/feed/stream" || first.Header.Get("Last-Event-ID") != "cursor-before" {
+		t.Fatalf("expected stream resume from seeded cursor, got %s Last-Event-ID=%q", first.URL.Path, first.Header.Get("Last-Event-ID"))
 	}
 	if cursor, loadErr := loadCursorFile(cursorFile); loadErr != nil || cursor != "cursor-before" {
 		t.Fatalf("failed delivery advanced the cursor to %q (err=%v)", cursor, loadErr)
 	}
 }
 
-func TestWatchRejectedCursorRebootstrapsAndClearsFile(t *testing.T) {
+func TestWatchCursorMismatchWithoutOptInExitsAndPreservesCursor(t *testing.T) {
 	cursorFile := filepath.Join(t.TempDir(), "cursor")
 	if err := saveCursorFile(cursorFile, "stale-identity-cursor"); err != nil {
 		t.Fatalf("seed cursor: %v", err)
 	}
-	connections := make(chan *http.Request, 8)
-	var rejected bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case connections <- r.Clone(context.Background()):
-		default:
-		}
-		// Only the stale filter identity is rejected — a real server accepts
-		// cursors minted under the current identity. Accepted streams are
-		// held open until the client goes away, like real SSE, so the
-		// watcher does not churn through reconnects.
-		if r.Header.Get("Last-Event-ID") == "stale-identity-cursor" {
-			rejected = true
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error":{"code":"cursor_filter_mismatch","message":"cursor was issued under a different filter identity; reconnect without Last-Event-ID"}}`)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		if r.Header.Get("Last-Event-ID") == "" {
-			fmt.Fprint(w, sseFrameFor("fresh-cursor", "work_item.event_appended", "post-rebootstrap"))
-		}
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	}))
+	srv := watchFakeServer(t, "unused-boot", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"code":"cursor_filter_mismatch","message":"cursor was issued under a different filter identity"}}`)
+	}, nil)
 	defer srv.Close()
 
-	client := &feedClient{
-		baseURL:    srv.URL,
-		token:      "test-token",
-		http:       &http.Client{Timeout: 5 * time.Second},
-		streamHTTP: &http.Client{Timeout: 0},
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runFeedWatch(ctx, nil, watchClientFor(srv, nil), watchOptions{
+		retryBackoff: 10 * time.Millisecond,
+		cursorFile:   cursorFile,
+	}, os.Stderr)
+	if err == nil || !strings.Contains(err.Error(), "cursor_filter_mismatch") || !strings.Contains(err.Error(), "--reset-cursor-on-mismatch") {
+		t.Fatalf("mismatch without opt-in should exit loudly naming the flag, got err=%v", err)
 	}
+	if cursor, loadErr := loadCursorFile(cursorFile); loadErr != nil || cursor != "stale-identity-cursor" {
+		t.Fatalf("mismatch without opt-in must preserve the cursor file, got %q err=%v", cursor, loadErr)
+	}
+}
+
+func TestWatchCursorMismatchWithOptInRemintsAndResumes(t *testing.T) {
+	cursorFile := filepath.Join(t.TempDir(), "cursor")
+	if err := saveCursorFile(cursorFile, "stale-identity-cursor"); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	requests := make(chan *http.Request, 8)
+	srv := watchFakeServer(t, "fresh-boot-cursor", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Last-Event-ID") == "stale-identity-cursor" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"code":"cursor_filter_mismatch","message":"cursor was issued under a different filter identity"}}`)
+			return
+		}
+		// Post-reset stream: accepted, delivers one frame, then holds open
+		// like real SSE so the watcher does not churn reconnects.
+		serveSSE(w, sseFrameFor("post-reset-cursor", "work_item.event_appended", "post-reset"))
+		<-r.Context().Done()
+	}, requests)
+	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- runFeedWatch(ctx, nil, client, watchOptions{
-			retryBackoff: 10 * time.Millisecond,
-			cursorFile:   cursorFile,
+		done <- runFeedWatch(ctx, nil, watchClientFor(srv, nil), watchOptions{
+			retryBackoff:          10 * time.Millisecond,
+			cursorFile:            cursorFile,
+			resetCursorOnMismatch: true,
 		}, os.Stderr)
 	}()
 
-	// First connection carries the stale cursor and is rejected; the second
-	// must arrive with no Last-Event-ID (re-bootstrap from now).
-	first := <-connections
-	if first.Header.Get("Last-Event-ID") != "stale-identity-cursor" {
-		t.Fatalf("first connection did not resume from the persisted cursor")
+	// stale stream reject -> page re-mint -> stream resume from fresh cursor.
+	stale := <-requests
+	if stale.URL.Path != "/v1/feed/stream" || stale.Header.Get("Last-Event-ID") != "stale-identity-cursor" {
+		t.Fatalf("expected stale stream attempt first, got %s %q", stale.URL.Path, stale.Header.Get("Last-Event-ID"))
 	}
-	second := <-connections
-	if got := second.Header.Get("Last-Event-ID"); got != "" {
-		t.Fatalf("re-bootstrap still sent Last-Event-ID %q", got)
+	remint := <-requests
+	if remint.URL.Path != "/v1/feed" {
+		t.Fatalf("expected page re-mint after opted-in reset, got %s", remint.URL.Path)
 	}
-	if !rejected {
-		t.Fatalf("server never exercised the rejection path")
+	resumed := <-requests
+	if resumed.URL.Path != "/v1/feed/stream" || resumed.Header.Get("Last-Event-ID") != "fresh-boot-cursor" {
+		t.Fatalf("expected stream resume from re-minted cursor, got %s %q", resumed.URL.Path, resumed.Header.Get("Last-Event-ID"))
 	}
 
-	// The fresh frame's cursor eventually replaces the cleared file.
-	deadline := time.After(3 * time.Second)
-	for {
-		cursor, err := loadCursorFile(cursorFile)
-		if err != nil {
-			t.Fatalf("load cursor: %v", err)
-		}
-		if cursor == "fresh-cursor" {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("cursor file was not replaced after re-bootstrap, still %q", cursor)
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
+	waitForFileContent(t, "cursor file", func() string {
+		cursor, _ := loadCursorFile(cursorFile)
+		return cursor
+	}, "post-reset-cursor")
 
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("watch exited with error: %v", err)
+	}
+}
+
+func TestWatchPermanentRequestErrorsExitWithoutRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"invalid filter", http.StatusBadRequest, "invalid_feed_predicate"},
+		{"auth denied", http.StatusForbidden, "insufficient_scope"},
+		{"unauthenticated", http.StatusUnauthorized, "missing_authenticated_token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cursorFile := filepath.Join(t.TempDir(), "cursor")
+			if err := saveCursorFile(cursorFile, "cursor-keep"); err != nil {
+				t.Fatalf("seed cursor: %v", err)
+			}
+			var hits int
+			srv := watchFakeServer(t, "unused-boot", func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				fmt.Fprintf(w, `{"error":{"code":%q,"message":"permanent"}}`, tc.code)
+			}, nil)
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := runFeedWatch(ctx, nil, watchClientFor(srv, nil), watchOptions{
+				retryBackoff: time.Millisecond,
+				cursorFile:   cursorFile,
+			}, os.Stderr)
+			if err == nil || !strings.Contains(err.Error(), tc.code) {
+				t.Fatalf("permanent error should exit loudly with the code, got err=%v", err)
+			}
+			if hits != 1 {
+				t.Fatalf("permanent error was retried: %d stream attempts", hits)
+			}
+			if cursor, loadErr := loadCursorFile(cursorFile); loadErr != nil || cursor != "cursor-keep" {
+				t.Fatalf("permanent error must not touch the cursor file, got %q err=%v", cursor, loadErr)
+			}
+		})
 	}
 }

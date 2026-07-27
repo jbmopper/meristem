@@ -427,9 +427,13 @@ func requestedContentPredicates(w http.ResponseWriter, r *http.Request, actor do
 	if kinds := q["exclude_kind"]; len(kinds) > 0 {
 		predicates = append(predicates, feed.Predicate{Kind: feed.PredicateKindExclude, EventKinds: kinds})
 	}
+	// All actor values fold into ONE union predicate: separate AND-ed
+	// single-author inclusions would select nothing, which is never what a
+	// caller repeating the param means.
+	var actorSet []uuid.UUID
 	for _, value := range q["actor"] {
 		if value == "self" {
-			predicates = append(predicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: actor.ID})
+			actorSet = append(actorSet, actor.ID)
 			continue
 		}
 		id, err := uuid.Parse(strings.TrimSpace(value))
@@ -437,7 +441,10 @@ func requestedContentPredicates(w http.ResponseWriter, r *http.Request, actor do
 			writeAPIError(w, http.StatusBadRequest, "invalid_feed_actor", "actor must be self or a token id")
 			return nil, false
 		}
-		predicates = append(predicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: id})
+		actorSet = append(actorSet, id)
+	}
+	if len(actorSet) > 0 {
+		predicates = append(predicates, feed.Predicate{Kind: feed.PredicateActor, TokenIDs: actorSet})
 	}
 	for _, param := range []struct {
 		name string

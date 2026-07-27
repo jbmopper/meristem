@@ -322,6 +322,16 @@ func TestMCPFeedReadContentPredicateParityIntegration(t *testing.T) {
 		t.Fatalf("actors filter broken: err=%t %s", isErr, text)
 	}
 
+	// Two actors are a UNION — REST parity for the repeated actor param.
+	isErr, text = feedReadForTest(t, s, map[string]any{"limit": 100,
+		"actors": []string{fixture.actorA.Token.ID.String(), fixture.actorB.Token.ID.String()}})
+	if isErr || !strings.Contains(text, "oce-content-by-alpha") || !strings.Contains(text, "oce-content-by-beta") {
+		t.Fatalf("actors union broken: err=%t %s", isErr, text)
+	}
+	if strings.Contains(text, "oce-content-outside-note") {
+		t.Fatalf("actors union leaked a root-authored event: %s", text)
+	}
+
 	// work_item_tree: subtree anchoring keeps tree events, drops outside.
 	isErr, text = feedReadForTest(t, s, map[string]any{"limit": 100, "work_item_tree": fixture.tree.ID.String()})
 	if isErr || !strings.Contains(text, "oce-content-by-alpha") || strings.Contains(text, "oce-content-outside-note") {

@@ -33,10 +33,12 @@ const (
 	// exclude_actor=self can never echo the caller's own directed writes.
 	PredicateExcludeActor PredicateKind = "exclude_actor"
 
-	// PredicateActor keeps only events authored by TokenID — the inclusion
-	// counterpart of exclude_actor, for watching one agent's activity. Like
+	// PredicateActor keeps only events authored by any of TokenIDs — the
+	// inclusion counterpart of exclude_actor, for watching a set of agents'
+	// activity. The set matches as a union: AND-ing single-author inclusions
+	// would select nothing, so multi-author selection is one predicate. Like
 	// kind predicates it is a content filter: items the assigned lane matched
-	// as addressed survive it, so lensing to one author cannot swallow a
+	// as addressed survive it, so lensing to authors cannot swallow a
 	// system-authored release or handback directed at the reader.
 	PredicateActor PredicateKind = "actor"
 
@@ -70,16 +72,26 @@ var (
 // explicit identity, never a name or a value inferred from prose. Each
 // PredicateKind uses exactly one field group — token identity, work-item
 // identity, or event kinds — and normalization rejects any other shape.
+//
+// PredicateActor is the one set-valued token predicate: TokenIDs holds the
+// authors whose events are kept, matched as a union (any-of). It is a set
+// because two AND-ed single-author inclusions would select nothing — the
+// only useful multi-author inclusion is the union, so the contract encodes
+// it directly. Normalization folds a legacy single TokenID into TokenIDs.
+// AssignedOrAddressed and ExcludeActor remain single-identity: composing
+// them as separate predicates already means what callers want.
 type Predicate struct {
 	Kind       PredicateKind
 	TokenID    uuid.UUID
+	TokenIDs   []uuid.UUID
 	WorkItemID uuid.UUID
 	EventKinds []string
 }
 
 // canonicalKey is the normalized predicate's identity: dedupe, deterministic
-// ordering, and the filter fingerprint all derive from it. EventKinds must be
-// canonicalized (trimmed, sorted, deduped) before this is meaningful.
+// ordering, and the filter fingerprint all derive from it. EventKinds and
+// TokenIDs must be canonicalized (trimmed/sorted/deduped) before this is
+// meaningful.
 func (p Predicate) canonicalKey() string {
 	// JSON encoding is unambiguous under arbitrary kind strings — delimiter
 	// characters inside EventKinds entries cannot collide across sets.
@@ -88,7 +100,11 @@ func (p Predicate) canonicalKey() string {
 		// nil and empty are one identity; encode both as [].
 		kinds = []string{}
 	}
-	raw, err := json.Marshal([]any{string(p.Kind), p.TokenID.String(), p.WorkItemID.String(), kinds})
+	tokens := make([]string, 0, len(p.TokenIDs))
+	for _, id := range p.TokenIDs {
+		tokens = append(tokens, id.String())
+	}
+	raw, err := json.Marshal([]any{string(p.Kind), p.TokenID.String(), tokens, p.WorkItemID.String(), kinds})
 	if err != nil {
 		// Marshaling strings cannot fail; keep the contract total anyway.
 		return string(p.Kind) + "|" + p.TokenID.String() + "|" + p.WorkItemID.String()
@@ -136,26 +152,49 @@ func NormalizeReadFilter(in ReadFilter) (ReadFilter, error) {
 
 func normalizePredicate(p Predicate) (Predicate, error) {
 	switch p.Kind {
-	case PredicateAssignedOrAddressed, PredicateActor, PredicateExcludeActor:
+	case PredicateAssignedOrAddressed, PredicateExcludeActor:
 		if p.TokenID == uuid.Nil {
 			return Predicate{}, fmt.Errorf("%w: %s requires token identity", ErrInvalidPredicate, p.Kind)
 		}
-		if p.WorkItemID != uuid.Nil || len(p.EventKinds) != 0 {
-			return Predicate{}, fmt.Errorf("%w: %s accepts only token identity", ErrInvalidPredicate, p.Kind)
+		if p.WorkItemID != uuid.Nil || len(p.EventKinds) != 0 || len(p.TokenIDs) != 0 {
+			return Predicate{}, fmt.Errorf("%w: %s accepts only a single token identity", ErrInvalidPredicate, p.Kind)
 		}
 		// A non-nil empty slice is semantically identical to nil; collapse it
 		// so canonical identity and dedupe cannot split on representation.
+		p.EventKinds = nil
+	case PredicateActor:
+		// Fold the legacy single-identity field into the set so both
+		// representations share one canonical identity.
+		if p.TokenID != uuid.Nil {
+			p.TokenIDs = append(p.TokenIDs, p.TokenID)
+			p.TokenID = uuid.Nil
+		}
+		if p.WorkItemID != uuid.Nil || len(p.EventKinds) != 0 {
+			return Predicate{}, fmt.Errorf("%w: %s accepts only token identities", ErrInvalidPredicate, p.Kind)
+		}
+		if len(p.TokenIDs) == 0 {
+			return Predicate{}, fmt.Errorf("%w: %s requires at least one token identity", ErrInvalidPredicate, p.Kind)
+		}
+		for _, id := range p.TokenIDs {
+			if id == uuid.Nil {
+				return Predicate{}, fmt.Errorf("%w: %s contains a nil token identity", ErrInvalidPredicate, p.Kind)
+			}
+		}
+		slices.SortFunc(p.TokenIDs, func(a, b uuid.UUID) int {
+			return strings.Compare(a.String(), b.String())
+		})
+		p.TokenIDs = slices.Compact(p.TokenIDs)
 		p.EventKinds = nil
 	case PredicateWorkItem, PredicateWorkItemTree:
 		if p.WorkItemID == uuid.Nil {
 			return Predicate{}, fmt.Errorf("%w: %s requires work item identity", ErrInvalidPredicate, p.Kind)
 		}
-		if p.TokenID != uuid.Nil || len(p.EventKinds) != 0 {
+		if p.TokenID != uuid.Nil || len(p.EventKinds) != 0 || len(p.TokenIDs) != 0 {
 			return Predicate{}, fmt.Errorf("%w: %s accepts only work item identity", ErrInvalidPredicate, p.Kind)
 		}
 		p.EventKinds = nil
 	case PredicateKindInclude, PredicateKindExclude:
-		if p.TokenID != uuid.Nil || p.WorkItemID != uuid.Nil {
+		if p.TokenID != uuid.Nil || p.WorkItemID != uuid.Nil || len(p.TokenIDs) != 0 {
 			return Predicate{}, fmt.Errorf("%w: %s accepts only event kinds", ErrInvalidPredicate, p.Kind)
 		}
 		kinds := make([]string, 0, len(p.EventKinds))
@@ -368,7 +407,7 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 			}
 		case PredicateActor:
 			for i, item := range items {
-				if matches[i] && protectedBy[i] == uuid.Nil && (item.ActorTokenID == nil || *item.ActorTokenID != predicate.TokenID) {
+				if matches[i] && protectedBy[i] == uuid.Nil && (item.ActorTokenID == nil || !slices.Contains(predicate.TokenIDs, *item.ActorTokenID)) {
 					matches[i] = false
 				}
 			}

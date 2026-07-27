@@ -628,16 +628,22 @@ func (s *Server) toolFeedRead() Tool {
 			if len(args.ExcludeKinds) > 0 {
 				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateKindExclude, EventKinds: args.ExcludeKinds})
 			}
+			// All actors entries fold into ONE union predicate — same
+			// contract as the REST actor param, same fingerprint identity.
+			var actorSet []uuid.UUID
 			for _, value := range args.Actors {
 				if value == "self" {
-					contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: actor.ID})
+					actorSet = append(actorSet, actor.ID)
 					continue
 				}
 				id, err := uuid.Parse(strings.TrimSpace(value))
 				if err != nil || id == uuid.Nil {
 					return nil, fmt.Errorf("feed.read: invalid_feed_actor: actors entries must be self or a token id")
 				}
-				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: id})
+				actorSet = append(actorSet, id)
+			}
+			if len(actorSet) > 0 {
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateActor, TokenIDs: actorSet})
 			}
 			for _, ref := range []struct {
 				name  string

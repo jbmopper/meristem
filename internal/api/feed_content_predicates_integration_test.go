@@ -98,6 +98,25 @@ func TestFeedContentPredicateParamsIntegration(t *testing.T) {
 		t.Fatalf("actor filter leaked another author's event")
 	}
 
+	// Repeated actor params are a UNION, not an AND that selects nothing:
+	// both authors' events come back, other authors' stay out.
+	if err := fixture.work.AppendEvent(fixture.ctx, fixture.assignedA.ID, "agent.assigned_feed_test",
+		map[string]any{"marker": "actor-union-note-a"}, fixture.actorA.Token); err != nil {
+		t.Fatalf("append as actor A: %v", err)
+	}
+	rec = doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?limit=100&actor="+fixture.actorA.Token.ID.String()+"&actor="+fixture.actorB.Token.ID.String(),
+		broad.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	for _, visible := range []string{"actor-union-note-a", "actor-filter-note-b"} {
+		if !strings.Contains(rec.Body.String(), visible) {
+			t.Fatalf("actor union omitted %q: %s", visible, rec.Body.String())
+		}
+	}
+	if strings.Contains(rec.Body.String(), "kind-filter-note-a") {
+		t.Fatalf("actor union leaked a root-authored event")
+	}
+
 	// work_item: exact anchoring; work_item_tree: subtree anchoring.
 	appendAssignedFeedNote(t, fixture, fixture.outside.ID, "outside-tree-note", uuid.Nil)
 	rec = doREST(t, fixture.server.Handler(), http.MethodGet,
