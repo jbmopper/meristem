@@ -872,15 +872,16 @@ func isPureRefusal(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Only explicit typed identities classify as pure — never message text.
+	// A textual fallback would let any error whose message happens to match
+	// a validation-looking pattern skip recording, defeating the
+	// fail-conservative default for unclassified refusals.
 	var pure pureToolError
 	if errors.As(err, &pure) {
 		return true
 	}
-	if errors.Is(err, workitems.ErrInvalidRequest) || errors.Is(err, workitems.ErrNotFound) ||
-		errors.Is(err, approvals.ErrInvalidRequest) {
-		return true
-	}
-	return looksSemanticToolError(err)
+	return errors.Is(err, workitems.ErrInvalidRequest) || errors.Is(err, workitems.ErrNotFound) ||
+		errors.Is(err, approvals.ErrInvalidRequest)
 }
 
 // notFoundToolError preserves a caller-facing not-found message verbatim

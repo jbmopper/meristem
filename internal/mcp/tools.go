@@ -1230,7 +1230,7 @@ func (s *Server) toolApprovalsDecide() Tool {
 				return nil, err
 			}
 			if !access.ToolVisible(actor, "approvals.decide") {
-				return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot decide approvals"))
+				return nil, replayableToolErr(pureToolErr(fmt.Errorf("insufficient_scope: token cannot decide approvals")))
 			}
 			result, err := s.deps.Approvals.Decide(ctx, approvals.DecisionInput{
 				ApprovalID: id,
@@ -1277,7 +1277,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 				return nil, err
 			}
 			if strings.TrimSpace(args.Kind) == "" {
-				return nil, replayableToolErr(errors.New("workitems: event kind is required"))
+				return nil, replayableToolErr(pureToolErr(errors.New("workitems: event kind is required")))
 			}
 			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
 				return nil, err
@@ -1285,7 +1285,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 			var payload any
 			if len(args.Payload) > 0 {
 				if err := json.Unmarshal(args.Payload, &payload); err != nil {
-					return nil, replayableToolErr(fmt.Errorf("payload: %w", err))
+					return nil, replayableToolErr(pureToolErr(fmt.Errorf("payload: %w", err)))
 				}
 			}
 			if err := s.deps.WorkItems.AppendEvent(ctx, id, args.Kind, payload, actor); err != nil {
@@ -1510,7 +1510,8 @@ func (s *Server) canCreateWorkItem(ctx context.Context, actor domain.Token) erro
 	}
 	if err := s.deps.Access.CanCreateWorkItem(ctx, actor); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return replayableToolErr(fmt.Errorf("insufficient_scope: token cannot create top-level work_items"))
+			// Pre-dispatch access refusal: nothing committed.
+			return replayableToolErr(pureToolErr(fmt.Errorf("insufficient_scope: token cannot create top-level work_items")))
 		}
 		return err
 	}
@@ -1802,7 +1803,8 @@ func decodeArgs(raw json.RawMessage, out any) error {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
-		return fmt.Errorf("invalid arguments: %w", err)
+		// Argument decoding precedes every dispatch: a pure refusal.
+		return pureToolErr(fmt.Errorf("invalid arguments: %w", err))
 	}
 	return nil
 }
@@ -1810,7 +1812,8 @@ func decodeArgs(raw json.RawMessage, out any) error {
 func parseUUID(raw, field string) (uuid.UUID, error) {
 	id, err := uuid.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("%s must be a valid uuid", field)
+		// Identity parsing precedes every dispatch: a pure refusal.
+		return uuid.Nil, pureToolErr(fmt.Errorf("%s must be a valid uuid", field))
 	}
 	return id, nil
 }

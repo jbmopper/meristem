@@ -467,3 +467,60 @@ func TestMCPStatefulRefusalConsumesKey(t *testing.T) {
 		t.Fatalf("conflicting reuse appended a second xylem.exhausted: %d", got)
 	}
 }
+
+// TestMCPUnmarkedSemanticLookingRefusalIsRecorded pins review finding
+// IDEM-B2: cache disposition depends only on the explicit typed pure
+// markers, never on message text. An unmarked replayable refusal whose text
+// LOOKS like validation ("payload: ...") must be conservatively recorded —
+// same args replay it, changed args conflict — because for all the
+// middleware knows it committed state before refusing.
+func TestMCPUnmarkedSemanticLookingRefusalIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	actor := createMCPTestActor(t, ctx, pool, writer, "mcp-unmarked-semantic")
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	s.actor = actor
+
+	calls := 0
+	addTestMutationTool(s, Tool{
+		Name:    "test.unmarked_semantic",
+		Mutates: true,
+		Handler: func(context.Context, domain.Token, json.RawMessage) (any, error) {
+			calls++
+			// The review's probe: semantic-looking text, no pure marker.
+			return nil, replayableToolErr(errors.New("payload: stateful refusal after commit"))
+		},
+	})
+
+	args := map[string]any{"idempotency_key": "unmarked-semantic", "note": "a"}
+	if isError, text := callToolForTest(t, s, "test.unmarked_semantic", args); !isError || text != "payload: stateful refusal after commit" {
+		t.Fatalf("first call should return the refusal, isError=%t text=%q", isError, text)
+	}
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:test.unmarked_semantic", "unmarked-semantic"); got != 1 {
+		t.Fatalf("unmarked semantic-looking refusal must be recorded, got %d rows", got)
+	}
+
+	// Same args: replayed from the cache, handler NOT re-executed.
+	if isError, text := callToolForTest(t, s, "test.unmarked_semantic", args); !isError || text != "payload: stateful refusal after commit" {
+		t.Fatalf("retry should replay the refusal, isError=%t text=%q", isError, text)
+	}
+	if calls != 1 {
+		t.Fatalf("recorded refusal was re-executed: %d handler calls", calls)
+	}
+
+	// Changed args under the consumed key: conflict, not execution.
+	changed := map[string]any{"idempotency_key": "unmarked-semantic", "note": "b"}
+	if isError, text := callToolForTest(t, s, "test.unmarked_semantic", changed); !isError || !strings.Contains(text, "idempotency_key_conflict") {
+		t.Fatalf("changed args should conflict, isError=%t text=%q", isError, text)
+	}
+	if calls != 1 {
+		t.Fatalf("conflicting reuse re-executed the handler: %d calls", calls)
+	}
+}
