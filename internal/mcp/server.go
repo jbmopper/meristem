@@ -860,11 +860,12 @@ func mutationToolErrorStatus(err error) int {
 		return http.StatusOK
 	}
 	if isReplayableToolError(err) || looksSemanticToolError(err) {
-		// This status is internal to the idempotency record; MCP still carries
+		// This status is internal to the idempotency layer; MCP still carries
 		// the tool result in a successful JSON-RPC envelope. Keeping semantic
 		// refusals distinct from committed success lets the dynamic build guard
-		// replace one if the reviewed pin advances during the handler, while
-		// statuses below 500 remain replayable under the same idempotency key.
+		// replace one if the reviewed pin advances during the handler. No
+		// non-success status is pinned under the idempotency key: a refusal
+		// leaves the key unconsumed so the corrected retry can reuse it.
 		return http.StatusUnprocessableEntity
 	}
 	return http.StatusInternalServerError

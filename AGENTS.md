@@ -127,7 +127,7 @@ A projection writer turns appended events into derived rows. It is the *only* co
 ## How to write an HTTP handler
 
 - Pull the authenticated `*Token` from `r.Context()`. Never inspect headers or the request body for identity.
-- Every POST handler runs behind the idempotency middleware. The handler does not see the `Idempotency-Key`; the middleware ensures the handler runs at most once per unique `(token, METHOD+PATH, key, body-hash)` in the 24-hour window and caches the response.
+- Every POST handler runs behind the idempotency middleware. The handler does not see the `Idempotency-Key`; the middleware ensures a *successful* handler run happens at most once per unique `(token, METHOD+PATH, key, body-hash)` in the 24-hour window and caches that response. Non-success responses (4xx rejections, 5xx failures) are never cached and do not consume the key: a rejected request re-executes on retry, and the same key remains usable with a corrected body. A handler must therefore never commit state and then return 4xx.
 - The handler appends events. It does not write to projection tables directly. Within the same transaction, the projection writers fire and produce the derived rows. The handler reads the resulting projection (e.g. `work_items.id`) only after the transaction commits, for inclusion in the response.
 - Request and response bodies are JSON. Set `Content-Type: application/json; charset=utf-8`.
 - Error response shape:

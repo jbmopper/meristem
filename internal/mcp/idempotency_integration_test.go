@@ -227,7 +227,7 @@ func TestMCPMutationInfrastructureNotFoundErrorIsNotCached(t *testing.T) {
 	}
 }
 
-func TestMCPMutationSemanticToolErrorIsCached(t *testing.T) {
+func TestMCPMutationSemanticToolErrorDoesNotConsumeKey(t *testing.T) {
 	ctx := context.Background()
 	pool := newMCPIntegrationPool(t)
 	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
@@ -242,18 +242,39 @@ func TestMCPMutationSemanticToolErrorIsCached(t *testing.T) {
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 	s.actor = actor
 
-	args := map[string]any{"idempotency_key": "semantic-replay", "title": ""}
+	// The rejection re-derives on every same-body retry instead of pinning.
+	invalid := map[string]any{"idempotency_key": "semantic-keep-key", "title": ""}
 	for i := 0; i < 2; i++ {
-		if isError, text := callToolForTest(t, s, "work_items.create", args); !isError || text != "workitems: title is required" {
-			t.Fatalf("call %d should replay semantic tool error, isError=%t text=%q", i+1, isError, text)
+		if isError, text := callToolForTest(t, s, "work_items.create", invalid); !isError || text != "workitems: title is required" {
+			t.Fatalf("call %d should return the semantic tool error, isError=%t text=%q", i+1, isError, text)
 		}
 	}
-	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.create", "semantic-replay"); got != 1 {
-		t.Fatalf("semantic error should record one idempotency row, got %d", got)
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.create", "semantic-keep-key"); got != 0 {
+		t.Fatalf("semantic error must not record an idempotency row, got %d", got)
+	}
+
+	// The defect scenario: the corrected body reuses the SAME key and must
+	// execute, not surface a same-key/different-body conflict.
+	corrected := map[string]any{"idempotency_key": "semantic-keep-key", "title": "recovered after rejection"}
+	if isError, text := callToolForTest(t, s, "work_items.create", corrected); isError {
+		t.Fatalf("corrected retry under the same key should execute, got tool error: %q", text)
+	}
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.create", "semantic-keep-key"); got != 1 {
+		t.Fatalf("corrected retry should record one idempotency row, got %d", got)
+	}
+
+	// The committed conclusion still replays byte-for-byte...
+	_, first := callToolForTest(t, s, "work_items.create", corrected)
+	if isError, text := callToolForTest(t, s, "work_items.create", corrected); isError || text != first {
+		t.Fatalf("committed success should replay identically, isError=%t text=%q want=%q", isError, text, first)
+	}
+	// ...and the original invalid body now conflicts with the recorded one.
+	if isError, text := callToolForTest(t, s, "work_items.create", invalid); !isError || !strings.Contains(text, "idempotency_key_conflict") {
+		t.Fatalf("invalid body after commit should conflict, isError=%t text=%q", isError, text)
 	}
 }
 
-func TestMCPMutationSemanticWorkItemNotFoundIsCached(t *testing.T) {
+func TestMCPMutationSemanticWorkItemNotFoundDoesNotConsumeKey(t *testing.T) {
 	ctx := context.Background()
 	pool := newMCPIntegrationPool(t)
 	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
@@ -268,20 +289,42 @@ func TestMCPMutationSemanticWorkItemNotFoundIsCached(t *testing.T) {
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 	s.actor = actor
 
+	// The fleet's recurring shape of this defect: a fabricated/mistyped item
+	// UUID rejects as not-found, and the corrected retry must be able to
+	// reuse the burned key.
 	missingID := uuid.New()
 	args := map[string]any{
-		"idempotency_key": "semantic-not-found-replay",
+		"idempotency_key": "semantic-not-found-keep-key",
 		"id":              missingID.String(),
-		"to":              string(domain.WorkItemRunning),
+		"to":              string(domain.WorkItemTriaged),
 	}
 	want := "work item " + missingID.String() + " not found"
 	for i := 0; i < 2; i++ {
 		if isError, text := callToolForTest(t, s, "work_items.transition", args); !isError || text != want {
-			t.Fatalf("call %d should replay semantic not-found tool error, isError=%t text=%q", i+1, isError, text)
+			t.Fatalf("call %d should return the semantic not-found tool error, isError=%t text=%q", i+1, isError, text)
 		}
 	}
-	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.transition", "semantic-not-found-replay"); got != 1 {
-		t.Fatalf("semantic not-found error should record one idempotency row, got %d", got)
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.transition", "semantic-not-found-keep-key"); got != 0 {
+		t.Fatalf("semantic not-found error must not record an idempotency row, got %d", got)
+	}
+
+	item, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "real transition target",
+		Actor: actor,
+	})
+	if err != nil {
+		t.Fatalf("create work item: %v", err)
+	}
+	corrected := map[string]any{
+		"idempotency_key": "semantic-not-found-keep-key",
+		"id":              item.ID.String(),
+		"to":              string(domain.WorkItemTriaged),
+	}
+	if isError, text := callToolForTest(t, s, "work_items.transition", corrected); isError {
+		t.Fatalf("corrected transition under the same key should execute, got tool error: %q", text)
+	}
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:work_items.transition", "semantic-not-found-keep-key"); got != 1 {
+		t.Fatalf("corrected transition should record one idempotency row, got %d", got)
 	}
 }
 

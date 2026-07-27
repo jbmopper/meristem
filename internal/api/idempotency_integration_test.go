@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -129,4 +130,76 @@ func TestIdempotencyAdvisoryLockRejectsConflictingBodies(t *testing.T) {
 	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 1)
 	assertTableCount(t, pool, "signals", 1)
 	assertTableCount(t, pool, "work_items", 1)
+}
+
+// TestIdempotencyRejectionDoesNotConsumeKey pins the REST half of the
+// key-consumption contract: a 4xx rejection is never recorded, so the
+// same key retried with a corrected body executes instead of surfacing
+// the same-key/different-body 422 conflict.
+func TestIdempotencyRejectionDoesNotConsumeKey(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	tokenResult, err := auth.NewService(pool, app.NewEventWriter()).CreateToken(ctx, auth.CreateTokenInput{
+		Name:   "idempotency-rejection",
+		IsRoot: true,
+		Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	server := New(pool, nil)
+	const sharedKey = "rejection-keep-key"
+	invalid := []byte(`{"title": ""}`)
+	corrected := []byte(`{"title": "recovered after rejection"}`)
+
+	post := func(body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/work-items", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tokenResult.Secret)
+		req.Header.Set("Idempotency-Key", sharedKey)
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		rec := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A rejection re-derives on every same-body retry and records nothing.
+	for i := 0; i < 2; i++ {
+		if rec := post(invalid); rec.Code != http.StatusBadRequest {
+			t.Fatalf("invalid call %d: want 400, got %d body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 0)
+	assertTableCount(t, pool, "work_items", 0)
+
+	// The corrected body reuses the SAME key and must execute.
+	first := post(corrected)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("corrected retry: want 201, got %d body=%s", first.Code, first.Body.String())
+	}
+	if first.Header().Get("Idempotency-Replayed") == "true" {
+		t.Fatalf("corrected retry must execute fresh, not replay")
+	}
+	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 1)
+	assertTableCount(t, pool, "work_items", 1)
+
+	// The committed conclusion replays byte-for-byte under the same key...
+	replay := post(corrected)
+	if replay.Code != http.StatusCreated || replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("replay: want 201 replayed, got %d replayed=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"))
+	}
+	if !bytes.Equal(replay.Body.Bytes(), first.Body.Bytes()) {
+		t.Fatalf("replay bytes diverged:\nfirst=%s\nreplay=%s", first.Body.String(), replay.Body.String())
+	}
+	assertTableCount(t, pool, "work_items", 1)
+
+	// ...and only now does a different body conflict.
+	if rec := post(invalid); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("post-commit different body: want 422 conflict, got %d body=%s", rec.Code, rec.Body.String())
+	}
 }

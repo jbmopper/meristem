@@ -68,8 +68,9 @@ func NewMiddlewareWithGuard(pool *pgxpool.Pool, writer *events.Writer, guard fun
 
 // ExecuteInput describes one non-HTTP mutation guarded by the same durable
 // idempotency store as POST middleware. Run must return a JSON response body
-// for successful execution; semantic tool/API errors that should be replayed
-// should be encoded in that body and returned with a nil error.
+// for successful execution. Semantic tool/API refusals should be encoded in
+// that body with a 4xx status and a nil error; they are returned to the
+// caller but never pinned under the idempotency key.
 type ExecuteInput struct {
 	Token       domain.Token
 	Scope       string
@@ -164,9 +165,12 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	if status >= http.StatusBadRequest && m.guardBlocked() {
 		return ExecuteResult{}, m.requireGuard()
 	}
-	// Mirror Wrap: a 5xx is an incomplete attempt, not a conclusion, and
-	// must not be pinned under the key for the cache TTL.
-	if status >= http.StatusInternalServerError {
+	// Mirror Wrap: only success is pinned. A 5xx is an incomplete attempt;
+	// a 4xx is a rejection that by contract mutated nothing. Recording a
+	// rejection would consume the key — the caller's corrected retry with
+	// the same key would then hit the same-key/different-body conflict
+	// instead of executing. Rejections are re-derived on retry.
+	if status >= http.StatusBadRequest {
 		return ExecuteResult{Status: status, Body: body}, nil
 	}
 	recordBody := body
@@ -177,15 +181,13 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	}
 	fresh, err := m.record(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, recordBody)
 	if err != nil {
-		// The handler was admitted only after a current-build check. If the pin
-		// advances after its domain transaction commits, do not strand the
-		// admitted response merely because the follow-on cache event is now
-		// blocked. The retry remains safe under the domain idempotency identity.
-		if status < http.StatusBadRequest && m.guardBlocked() {
-			return ExecuteResult{Status: status, Body: body}, nil
-		}
+		// Only successes reach record now. The handler was admitted only
+		// after a current-build check; if the pin advances after its domain
+		// transaction commits, do not strand the admitted response merely
+		// because the follow-on cache event is now blocked. The retry
+		// remains safe under the domain idempotency identity.
 		if m.guardBlocked() {
-			return ExecuteResult{}, m.requireGuard()
+			return ExecuteResult{Status: status, Body: body}, nil
 		}
 		return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
 	}
@@ -317,13 +319,16 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		// 5xx responses are never recorded: they mean "the attempt did
-		// not complete", and pinning one under the key would make every
-		// well-behaved retry (same key, same body) replay the failure
-		// for the cache TTL instead of re-executing. The client's
-		// contract — retry with the same key until a non-5xx answer —
-		// only works if the cache stores conclusions, not accidents.
-		if rec.status >= http.StatusInternalServerError {
+		// Non-success responses are never recorded. A 5xx means "the
+		// attempt did not complete"; a 4xx means "the request was
+		// rejected and nothing mutated". Pinning either under the key
+		// would burn it: a same-key/same-body retry would replay the
+		// failure for the cache TTL, and — worse for 4xx — a same-key
+		// retry with a *corrected* body would surface the 422
+		// same-key/different-body conflict instead of executing. The
+		// cache stores committed conclusions only; rejections are cheap
+		// to re-derive and the domain re-validates on every retry.
+		if rec.status >= http.StatusBadRequest {
 			copyHeader(w.Header(), rec.header)
 			w.WriteHeader(rec.status)
 			_, _ = w.Write(rec.body.Bytes())
@@ -336,11 +341,12 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 		fresh, err := m.record(r.Context(), tok, scope, key, reqHash, rec.status, recordBody)
 		if err != nil {
-			// Once the guarded pre-handler boundary admits a mutation, preserve
-			// its first response if the pin advances after the domain commit. This
-			// is load-bearing for one-time credentials such as subactor token
-			// secrets: discarding the response would leave an active unusable token.
-			if rec.status < http.StatusBadRequest && m.guardBlocked() {
+			// Only successes reach record now. Once the guarded pre-handler
+			// boundary admits a mutation, preserve its first response if the
+			// pin advances after the domain commit. This is load-bearing for
+			// one-time credentials such as subactor token secrets: discarding
+			// the response would leave an active unusable token.
+			if m.guardBlocked() {
 				copyHeader(w.Header(), rec.header)
 				w.WriteHeader(rec.status)
 				_, _ = w.Write(rec.body.Bytes())
