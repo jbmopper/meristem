@@ -524,3 +524,101 @@ func TestMCPUnmarkedSemanticLookingRefusalIsRecorded(t *testing.T) {
 		t.Fatalf("conflicting reuse re-executed the handler: %d calls", calls)
 	}
 }
+
+// TestMCPStatefulRefusalRecordSurvivesPinAdvance pins review finding
+// IDEM-B4 on the Execute path: a stateful refusal that committed
+// authoritative events while admitted/current must get its idempotency
+// record durably written even when the reviewed pin advances before the
+// record — otherwise, after cutover, the same key with changed arguments
+// executes again and appends a second authoritative event set. The stale
+// process still refuses outward with build_pin.
+func TestMCPStatefulRefusalRecordSurvivesPinAdvance(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	status := currentMCPBuildStatus()
+	provider := buildguard.ProviderFunc(func() buildguard.Status { return status })
+	writer := app.NewGuardedEventWriter(provider)
+	actor := createMCPTestActor(t, ctx, pool, writer, "mcp-cutover-stateful")
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddlewareWithGuard(pool, writer, func() error {
+			return buildguard.RequireNonBlocking(provider)
+		}),
+	}, ServerInfo{Name: "meristem-test", Version: "test", BuildStatus: provider}, nil)
+	s.actor = actor
+
+	subject := uuid.New()
+	calls := 0
+	addTestMutationTool(s, Tool{
+		Name:    "test.cutover_stateful",
+		Mutates: true,
+		Handler: func(callCtx context.Context, _ domain.Token, _ json.RawMessage) (any, error) {
+			calls++
+			// Commit an authoritative event while the build is current...
+			tx, err := pool.Begin(callCtx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer func() { _ = tx.Rollback(callCtx) }()
+			actorID := actor.ID
+			if _, _, err := writer.Append(callCtx, tx, events.Spec{
+				SubjectKind: domain.SubjectWorkItem, SubjectID: subject,
+				Kind: domain.EventWorkItemEventAppended, Source: domain.SourceAgent,
+				ActorTokenID: &actorID,
+				Payload:      map[string]any{"inner_kind": "test.cutover_refusal", "inner": map[string]any{"attempt": calls}},
+			}); err != nil {
+				t.Fatalf("append while current: %v", err)
+			}
+			if err := tx.Commit(callCtx); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			// ...then the pin advances before the refusal returns.
+			status = mismatchedMCPBuildStatus()
+			return nil, replayableToolErr(errors.New("stateful refusal after commit"))
+		},
+	})
+
+	countEvents := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE subject_id = $1`, subject).Scan(&n); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		return n
+	}
+
+	args := map[string]any{"idempotency_key": "cutover-stateful", "note": "a"}
+	isError, text := callToolForTest(t, s, "test.cutover_stateful", args)
+	if !isError || !strings.Contains(text, "build_pin") {
+		t.Fatalf("stale process should refuse outward with build_pin, isError=%t text=%q", isError, text)
+	}
+	if got := countEvents(); got != 1 {
+		t.Fatalf("expected exactly one committed event, got %d", got)
+	}
+	// The heart of IDEM-B4: the record survived the pin advance.
+	if got := idempotencyKeyCount(t, pool, actor.ID, "MCP:test.cutover_stateful", "cutover-stateful"); got != 1 {
+		t.Fatalf("admitted stateful refusal must be recorded across the pin advance, got %d rows", got)
+	}
+
+	// A current build returns: same key+args replays the recorded refusal
+	// without re-executing; changed args conflict; still one event set.
+	status = currentMCPBuildStatus()
+	if isError, text = callToolForTest(t, s, "test.cutover_stateful", args); !isError || !strings.Contains(text, "stateful refusal after commit") {
+		t.Fatalf("post-cutover same-args retry should replay the refusal, isError=%t text=%q", isError, text)
+	}
+	if calls != 1 {
+		t.Fatalf("recorded refusal was re-executed after cutover: %d calls", calls)
+	}
+	changed := map[string]any{"idempotency_key": "cutover-stateful", "note": "b"}
+	if isError, text = callToolForTest(t, s, "test.cutover_stateful", changed); !isError || !strings.Contains(text, "idempotency_key_conflict") {
+		t.Fatalf("post-cutover changed args should conflict, isError=%t text=%q", isError, text)
+	}
+	if got := countEvents(); got != 1 {
+		t.Fatalf("cutover allowed a second authoritative event set: %d", got)
+	}
+	if calls != 1 {
+		t.Fatalf("conflicting reuse re-executed the handler: %d calls", calls)
+	}
+}

@@ -5,12 +5,18 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
@@ -303,4 +309,119 @@ func TestUnmarkedRefusalIsConservativelyRecorded(t *testing.T) {
 	conflict := postSignal(t, server.Handler(), tokenResult.Secret, "conservative-key", valid)
 	assertRESTStatus(t, conflict, http.StatusUnprocessableEntity)
 	assertEventCount(t, pool, domain.EventSignalReceived, 0)
+}
+
+// TestWrapStatefulRefusalRecordSurvivesPinAdvance is the HTTP-middleware twin
+// of the MCP IDEM-B4 regression: a handler commits an authoritative event
+// while admitted/current, the pin advances, and the handler returns an
+// unmarked 409. The idempotency record must be durably written across the
+// advance (admission-fenced record append), the stale process refuses
+// outward with build_pin, and once a current build returns the key replays
+// and conflicts instead of admitting a second authoritative action.
+func TestWrapStatefulRefusalRecordSurvivesPinAdvance(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	current := buildguard.Status{
+		State: buildguard.StateCurrent, CompiledCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ExpectedCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CompiledMetadata: buildguard.CompiledValid,
+		Reason: "current",
+	}
+	mismatched := buildguard.Status{
+		State: buildguard.StateMismatch, CompiledCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ExpectedCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", CompiledMetadata: buildguard.CompiledValid,
+		Reason: "advanced",
+	}
+	status := current
+	provider := buildguard.ProviderFunc(func() buildguard.Status { return status })
+	writer := app.NewGuardedEventWriter(provider)
+
+	authSvc := auth.NewService(pool, writer)
+	tokenResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "wrap-cutover", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	middleware := idempotency.NewMiddlewareWithGuard(pool, writer, func() error {
+		return buildguard.RequireNonBlocking(provider)
+	})
+
+	subject := uuid.New()
+	calls := 0
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		tx, err := pool.Begin(r.Context())
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(r.Context()) }()
+		actorID := tokenResult.Token.ID
+		if _, _, err := writer.Append(r.Context(), tx, events.Spec{
+			SubjectKind: domain.SubjectWorkItem, SubjectID: subject,
+			Kind: domain.EventWorkItemEventAppended, Source: domain.SourceHuman,
+			ActorTokenID: &actorID,
+			Payload:      map[string]any{"inner_kind": "test.wrap_cutover_refusal", "inner": map[string]any{"attempt": calls}},
+		}); err != nil {
+			t.Fatalf("append while current: %v", err)
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		status = mismatched
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"stateful_refusal","message":"refused after commit"}}`))
+	})
+	handler := middleware.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner.ServeHTTP(w, r)
+	}))
+
+	do := func(key, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/test-stateful", bytes.NewReader([]byte(body)))
+		req = req.WithContext(auth.WithToken(req.Context(), tokenResult.Token))
+		req.Header.Set("Idempotency-Key", key)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	countEvents := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE subject_id = $1`, subject).Scan(&n); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		return n
+	}
+
+	first := do("wrap-cutover", `{"note":"a"}`)
+	if first.Code != http.StatusServiceUnavailable || !strings.Contains(first.Body.String(), "build_pin") {
+		t.Fatalf("stale process should refuse outward with build_pin, got %d body=%s", first.Code, first.Body.String())
+	}
+	if got := countEvents(); got != 1 {
+		t.Fatalf("expected one committed event, got %d", got)
+	}
+	assertEventCount(t, pool, domain.EventIdempotencyRecorded, 1)
+
+	// Current build restored: same body replays, changed body conflicts,
+	// no second authoritative event set, handler never re-runs.
+	status = current
+	replay := do("wrap-cutover", `{"note":"a"}`)
+	if replay.Code != http.StatusConflict || replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("post-cutover same-body retry should replay the 409, got %d replayed=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"))
+	}
+	changed := do("wrap-cutover", `{"note":"b"}`)
+	if changed.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("post-cutover changed body should conflict, got %d body=%s", changed.Code, changed.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("handler re-executed across cutover: %d calls", calls)
+	}
+	if got := countEvents(); got != 1 {
+		t.Fatalf("cutover allowed a second authoritative event set: %d", got)
+	}
 }

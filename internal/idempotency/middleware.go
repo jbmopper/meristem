@@ -166,9 +166,6 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	if status == 0 {
 		status = http.StatusOK
 	}
-	if status >= http.StatusBadRequest && m.guardBlocked() {
-		return ExecuteResult{}, m.requireGuard()
-	}
 	// Mirror Wrap: a 5xx is an incomplete attempt, never pinned. For 4xx the
 	// cache disposition is explicit, not status-derived: a handler that
 	// committed nothing marks its refusal unconsumed, leaving the key usable
@@ -180,6 +177,31 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 		return ExecuteResult{Status: status, Body: body}, nil
 	}
 	if status >= http.StatusBadRequest && refusalUnconsumed(callCtx) {
+		// Pure refusal: nothing committed, nothing to complete — the pin
+		// advancing only means the stale process must not answer.
+		if m.guardBlocked() {
+			return ExecuteResult{}, m.requireGuard()
+		}
+		return ExecuteResult{Status: status, Body: body}, nil
+	}
+	if status >= http.StatusBadRequest {
+		// Unmarked refusal: the handler may have committed authoritative
+		// events while admitted/current. Its idempotency record is the
+		// COMPLETION of that admitted mutation, so it must be durably
+		// written even if the pin advanced after the commit — dropping it
+		// would let the same key admit a second authoritative action after
+		// cutover (IDEM-B4). The admission fence is scoped to exactly this
+		// record append; the stale process still refuses outward below.
+		if _, err := m.record(events.WithAdmissionFence(callCtx), in.Token, in.Scope, in.Key, in.RequestHash, status, body); err != nil {
+			return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
+		}
+		if m.guardBlocked() {
+			return ExecuteResult{}, m.requireGuard()
+		}
+		cached, err = m.lookup(callCtx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+		if err == nil && cached.found {
+			return ExecuteResult{Status: cached.status, Body: cached.body}, nil
+		}
 		return ExecuteResult{Status: status, Body: body}, nil
 	}
 	recordBody := body
@@ -194,12 +216,9 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 		// pin advances after its domain transaction commits, do not strand
 		// the admitted response merely because the follow-on cache event is
 		// now blocked. The retry remains safe under the domain idempotency
-		// identity.
-		if status < http.StatusBadRequest && m.guardBlocked() {
-			return ExecuteResult{Status: status, Body: body}, nil
-		}
+		// identity: re-execution converges on the same event rows.
 		if m.guardBlocked() {
-			return ExecuteResult{}, m.requireGuard()
+			return ExecuteResult{Status: status, Body: body}, nil
 		}
 		return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
 	}
@@ -329,10 +348,6 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 				"response exceeds the deterministic API buffering limit")
 			return
 		}
-		if rec.status >= http.StatusBadRequest && m.writeGuardError(w) {
-			return
-		}
-
 		// 5xx responses are never recorded: the attempt did not complete
 		// and a well-behaved same-key retry must re-execute. For 4xx the
 		// cache disposition is explicit, not status-derived: a handler
@@ -345,6 +360,37 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		// again under one key.
 		if rec.status >= http.StatusInternalServerError ||
 			(rec.status >= http.StatusBadRequest && refusalUnconsumed(r.Context())) {
+			if m.writeGuardError(w) {
+				return
+			}
+			copyHeader(w.Header(), rec.header)
+			w.WriteHeader(rec.status)
+			_, _ = w.Write(rec.body.Bytes())
+			return
+		}
+		if rec.status >= http.StatusBadRequest {
+			// Unmarked refusal: the handler may have committed authoritative
+			// events while admitted/current. Its idempotency record is the
+			// COMPLETION of that admitted mutation and must be durably
+			// written even if the pin advanced after the commit — dropping
+			// it would let the same key admit a second authoritative action
+			// after cutover (IDEM-B4). The admission fence covers exactly
+			// this record append; a stale process still refuses outward
+			// after the record is durable.
+			if _, err := m.record(events.WithAdmissionFence(r.Context()), tok, scope, key, reqHash, rec.status, rec.body.Bytes()); err != nil {
+				writeError(w, http.StatusInternalServerError, "idempotency_record_failed", "could not record idempotency key")
+				return
+			}
+			if m.writeGuardError(w) {
+				return
+			}
+			cached, err = m.lookup(r.Context(), tok.ID, scope, key, reqHash)
+			if err == nil && cached.found {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(cached.status)
+				_, _ = w.Write(cached.body)
+				return
+			}
 			copyHeader(w.Header(), rec.header)
 			w.WriteHeader(rec.status)
 			_, _ = w.Write(rec.body.Bytes())
@@ -361,7 +407,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			// its first response if the pin advances after the domain commit. This
 			// is load-bearing for one-time credentials such as subactor token
 			// secrets: discarding the response would leave an active unusable token.
-			if rec.status < http.StatusBadRequest && m.guardBlocked() {
+			if m.guardBlocked() {
 				copyHeader(w.Header(), rec.header)
 				w.WriteHeader(rec.status)
 				_, _ = w.Write(rec.body.Bytes())

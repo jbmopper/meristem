@@ -150,6 +150,27 @@ func NewWriterWithPreAppend(registry *projections.Registry, preAppend func() err
 	return &Writer{registry: registry, preAppend: preAppend}
 }
 
+type admissionFenceKey struct{}
+
+// WithAdmissionFence marks ctx so this writer skips its preAppend runtime
+// check for appends carried by ctx. It exists for exactly one caller: the
+// idempotency middleware's record path, which must durably complete the
+// record of an ALREADY-ADMITTED stateful conclusion even if the reviewed
+// build pin advanced after the handler committed its authoritative events —
+// dropping that record would let the same key admit a second authoritative
+// action after cutover. The fenced append is the completion of work admitted
+// under a current build, not new work under a stale one. Do not use this
+// anywhere else; any wider use reopens the stale-write window the preAppend
+// hook closes.
+func WithAdmissionFence(ctx context.Context) context.Context {
+	return context.WithValue(ctx, admissionFenceKey{}, true)
+}
+
+func admissionFenced(ctx context.Context) bool {
+	fenced, ok := ctx.Value(admissionFenceKey{}).(bool)
+	return ok && fenced
+}
+
 // Append inserts the event derived from spec into `events`, then — on a
 // fresh insert only — fires every projector registered for spec.Kind in the
 // same transaction.
@@ -164,7 +185,7 @@ func NewWriterWithPreAppend(registry *projections.Registry, preAppend func() err
 // be the unit of failure: this function never commits or rolls back; the
 // caller decides.
 func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID, fresh bool, err error) {
-	if w.preAppend != nil {
+	if w.preAppend != nil && !admissionFenced(ctx) {
 		if err := w.preAppend(); err != nil {
 			return uuid.Nil, false, fmt.Errorf("events: pre-append check: %w", err)
 		}
@@ -191,7 +212,7 @@ func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID
 	// Recheck at the transaction seam. Canonicalization and marshaling above
 	// can be non-trivial for a large payload; a runtime invariant may change
 	// after the cheap early check but before the authoritative insert.
-	if w.preAppend != nil {
+	if w.preAppend != nil && !admissionFenced(ctx) {
 		if err := w.preAppend(); err != nil {
 			return uuid.Nil, false, fmt.Errorf("events: pre-append check: %w", err)
 		}
