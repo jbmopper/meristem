@@ -192,7 +192,7 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 		// would let the same key admit a second authoritative action after
 		// cutover (IDEM-B4). The admission fence is scoped to exactly this
 		// record append; the stale process still refuses outward below.
-		if _, err := m.record(events.WithAdmissionFence(callCtx), in.Token, in.Scope, in.Key, in.RequestHash, status, body); err != nil {
+		if _, err := m.recordAdmitted(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, body); err != nil {
 			return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
 		}
 		if m.guardBlocked() {
@@ -377,7 +377,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			// after cutover (IDEM-B4). The admission fence covers exactly
 			// this record append; a stale process still refuses outward
 			// after the record is durable.
-			if _, err := m.record(events.WithAdmissionFence(r.Context()), tok, scope, key, reqHash, rec.status, rec.body.Bytes()); err != nil {
+			if _, err := m.recordAdmitted(r.Context(), tok, scope, key, reqHash, rec.status, rec.body.Bytes()); err != nil {
 				writeError(w, http.StatusInternalServerError, "idempotency_record_failed", "could not record idempotency key")
 				return
 			}
@@ -629,7 +629,19 @@ func (m *Middleware) lookup(ctx context.Context, tokenID uuid.UUID, scope, key s
 // the canonical cached bytes (belt-and-suspenders for lock-key
 // collision, out-of-band writers, or session-lock loss across a
 // connection bounce).
+// recordAdmitted persists the idempotency record of an already-admitted
+// stateful conclusion through the writer's enforced admitted-record path, so
+// the record survives a reviewed-pin advance that happened after the
+// handler's commit. Only the unmarked-4xx completion paths call this.
+func (m *Middleware) recordAdmitted(ctx context.Context, tok domain.Token, scope, key string, reqHash []byte, status int, body []byte) (bool, error) {
+	return m.recordWith(ctx, tok, scope, key, reqHash, status, body, m.writer.AppendAdmittedIdempotencyRecord)
+}
+
 func (m *Middleware) record(ctx context.Context, tok domain.Token, scope, key string, reqHash []byte, status int, body []byte) (bool, error) {
+	return m.recordWith(ctx, tok, scope, key, reqHash, status, body, m.writer.Append)
+}
+
+func (m *Middleware) recordWith(ctx context.Context, tok domain.Token, scope, key string, reqHash []byte, status int, body []byte, appendFn func(context.Context, pgx.Tx, events.Spec) (uuid.UUID, bool, error)) (bool, error) {
 	var decoded any
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
@@ -642,7 +654,7 @@ func (m *Middleware) record(ctx context.Context, tok domain.Token, scope, key st
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, fresh, err := m.writer.Append(ctx, tx, events.Spec{
+	_, fresh, err := appendFn(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectIdempotencyKey,
 		SubjectID:    subjectID,
 		Kind:         domain.EventIdempotencyRecorded,

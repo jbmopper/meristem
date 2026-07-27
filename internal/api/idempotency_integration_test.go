@@ -425,3 +425,76 @@ func TestWrapStatefulRefusalRecordSurvivesPinAdvance(t *testing.T) {
 		t.Fatalf("cutover allowed a second authoritative event set: %d", got)
 	}
 }
+
+// TestAdmittedRecordAppendIsRestricted pins review finding IDEM-B5: the
+// admitted-record path is an enforced narrow completion fence, not a generic
+// guard bypass. Under an already-mismatched pin, the idempotency completion
+// event is the ONLY spec it admits; an arbitrary event pushed through the
+// same method is rejected outright, and the ordinary Append path keeps the
+// full pre-append refusal.
+func TestAdmittedRecordAppendIsRestricted(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	tokenResult, err := auth.NewService(pool, app.NewEventWriter()).CreateToken(ctx, auth.CreateTokenInput{
+		Name: "restricted-fence", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	mismatched := buildguard.Status{
+		State: buildguard.StateMismatch, CompiledCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ExpectedCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", CompiledMetadata: buildguard.CompiledValid,
+		Reason: "stale",
+	}
+	provider := buildguard.ProviderFunc(func() buildguard.Status { return mismatched })
+	writer := app.NewGuardedEventWriter(provider)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	subject := uuid.New()
+	arbitrary := events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: subject,
+		Kind: domain.EventWorkItemEventAppended, Source: domain.SourceSystem,
+		Payload: map[string]any{"inner_kind": "review_probe.arbitrary_stale_write"},
+	}
+
+	// The review's probe: an arbitrary stale event through the admitted path
+	// must be rejected by the fence itself, not admitted.
+	if _, _, err := writer.AppendAdmittedIdempotencyRecord(ctx, tx, arbitrary); err == nil || !strings.Contains(err.Error(), "restricted") {
+		t.Fatalf("arbitrary event through the admitted path must be rejected, got err=%v", err)
+	}
+
+	// The ordinary path keeps the full pre-append refusal under a stale pin.
+	if _, _, err := writer.Append(ctx, tx, arbitrary); err == nil || !strings.Contains(err.Error(), "pre-append check") {
+		t.Fatalf("ordinary append under a stale pin must be refused, got err=%v", err)
+	}
+
+	// The one admitted spec — the idempotency completion event — succeeds
+	// across the stale pin (the IDEM-B4 property, here at the writer seam;
+	// the end-to-end REST/MCP cutover tests exercise it through the
+	// middleware).
+	record := events.Spec{
+		SubjectKind: domain.SubjectIdempotencyKey, SubjectID: uuid.New(),
+		Kind: domain.EventIdempotencyRecorded, Source: domain.SourceSystem,
+		Payload: map[string]any{
+			"token_id":        tokenResult.Token.ID.String(),
+			"scope":           "TEST restricted-fence",
+			"key":             "k",
+			"request_hash":    "aGFzaA==",
+			"response_status": 409,
+			"response_body":   map[string]any{"error": map[string]any{"code": "stateful_refusal"}},
+		},
+	}
+	if _, _, err := writer.AppendAdmittedIdempotencyRecord(ctx, tx, record); err != nil {
+		t.Fatalf("admitted idempotency completion must succeed across the stale pin: %v", err)
+	}
+}

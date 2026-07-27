@@ -150,25 +150,23 @@ func NewWriterWithPreAppend(registry *projections.Registry, preAppend func() err
 	return &Writer{registry: registry, preAppend: preAppend}
 }
 
-type admissionFenceKey struct{}
-
-// WithAdmissionFence marks ctx so this writer skips its preAppend runtime
-// check for appends carried by ctx. It exists for exactly one caller: the
-// idempotency middleware's record path, which must durably complete the
-// record of an ALREADY-ADMITTED stateful conclusion even if the reviewed
-// build pin advanced after the handler committed its authoritative events —
-// dropping that record would let the same key admit a second authoritative
-// action after cutover. The fenced append is the completion of work admitted
-// under a current build, not new work under a stale one. Do not use this
-// anywhere else; any wider use reopens the stale-write window the preAppend
-// hook closes.
-func WithAdmissionFence(ctx context.Context) context.Context {
-	return context.WithValue(ctx, admissionFenceKey{}, true)
-}
-
-func admissionFenced(ctx context.Context) bool {
-	fenced, ok := ctx.Value(admissionFenceKey{}).(bool)
-	return ok && fenced
+// AppendAdmittedIdempotencyRecord appends the idempotency completion event of
+// an ALREADY-ADMITTED mutation, skipping the preAppend runtime check for this
+// one append. It exists for exactly one caller — the idempotency middleware's
+// record path: a stateful conclusion that committed its authoritative events
+// while the reviewed build was current must get its record durably written
+// even if the pin advanced afterwards, or the same key could admit a second
+// authoritative action after cutover. The fence is ENFORCED, not advisory:
+// any spec other than the idempotency-recorded completion event is rejected
+// outright, so this method can never become a bypass for unrelated stale
+// writes, and every ordinary append keeps the full preAppend check.
+func (w *Writer) AppendAdmittedIdempotencyRecord(ctx context.Context, tx pgx.Tx, spec Spec) (uuid.UUID, bool, error) {
+	if spec.SubjectKind != domain.SubjectIdempotencyKey || spec.Kind != domain.EventIdempotencyRecorded {
+		return uuid.Nil, false, fmt.Errorf(
+			"events: admitted-record append is restricted to %s/%s, got %s/%s",
+			domain.SubjectIdempotencyKey, domain.EventIdempotencyRecorded, spec.SubjectKind, spec.Kind)
+	}
+	return w.append(ctx, tx, spec, true)
 }
 
 // Append inserts the event derived from spec into `events`, then — on a
@@ -185,7 +183,14 @@ func admissionFenced(ctx context.Context) bool {
 // be the unit of failure: this function never commits or rolls back; the
 // caller decides.
 func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID, fresh bool, err error) {
-	if w.preAppend != nil && !admissionFenced(ctx) {
+	return w.append(ctx, tx, spec, false)
+}
+
+// append is the shared implementation. admitted=true is reachable only
+// through AppendAdmittedIdempotencyRecord, which enforces the completion
+// event's identity before skipping the preAppend runtime check.
+func (w *Writer) append(ctx context.Context, tx pgx.Tx, spec Spec, admitted bool) (id uuid.UUID, fresh bool, err error) {
+	if w.preAppend != nil && !admitted {
 		if err := w.preAppend(); err != nil {
 			return uuid.Nil, false, fmt.Errorf("events: pre-append check: %w", err)
 		}
@@ -212,7 +217,7 @@ func (w *Writer) Append(ctx context.Context, tx pgx.Tx, spec Spec) (id uuid.UUID
 	// Recheck at the transaction seam. Canonicalization and marshaling above
 	// can be non-trivial for a large payload; a runtime invariant may change
 	// after the cheap early check but before the authoritative insert.
-	if w.preAppend != nil && !admissionFenced(ctx) {
+	if w.preAppend != nil && !admitted {
 		if err := w.preAppend(); err != nil {
 			return uuid.Nil, false, fmt.Errorf("events: pre-append check: %w", err)
 		}
