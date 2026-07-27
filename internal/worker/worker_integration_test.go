@@ -2121,10 +2121,16 @@ func TestScanOnceToleratesMalformedEventAppendedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create item A: %v", err)
 	}
-	// Valid free-form append: prose inner, a benign non-signal.
-	if err := service.AppendEvent(ctx, itemA.ID, "human_response_recorded", "free prose, not an object", systemTok.Token); err != nil {
-		t.Fatalf("append prose inner: %v", err)
+	// Legacy prose inner, a benign non-signal. The write boundary now rejects
+	// prose payloads, so simulate the pre-boundary history with a raw write;
+	// the service-level rejection itself is pinned right here.
+	if err := service.AppendEvent(ctx, itemA.ID, "human_response_recorded", "free prose, not an object", systemTok.Token); err == nil {
+		t.Fatal("prose payload append was not rejected at the write boundary")
 	}
+	appendRawWorkItemEvent(t, ctx, pool, writer, systemTok.Token, itemA.ID, map[string]any{
+		"inner_kind": "human_response_recorded",
+		"inner":      "free prose, not an object",
+	})
 	// Envelope-level malformed history: a raw payload that is not an
 	// event_appended envelope at all (predates envelope-shaped writers).
 	appendRawWorkItemEvent(t, ctx, pool, writer, systemTok.Token, itemA.ID, "legacy raw payload, no envelope")
@@ -2141,9 +2147,13 @@ func TestScanOnceToleratesMalformedEventAppendedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create item B: %v", err)
 	}
-	if err := service.AppendEvent(ctx, itemB.ID, "checklist.item:event:provider.progress", `{"pass": true}`, systemTok.Token); err != nil {
-		t.Fatalf("append string-encoded object inner: %v", err)
+	if err := service.AppendEvent(ctx, itemB.ID, "checklist.item:event:provider.progress", `{"pass": true}`, systemTok.Token); err == nil {
+		t.Fatal("double-encoded payload append was not rejected at the write boundary")
 	}
+	appendRawWorkItemEvent(t, ctx, pool, writer, systemTok.Token, itemB.ID, map[string]any{
+		"inner_kind": "checklist.item:event:provider.progress",
+		"inner":      `{"pass": true}`,
+	})
 
 	// A breached captured item proves the pass behind convergence still runs.
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)

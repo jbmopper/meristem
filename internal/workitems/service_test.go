@@ -180,6 +180,40 @@ func TestAppendEvent_RejectsBlankKind(t *testing.T) {
 	}
 }
 
+func TestAppendEvent_RejectsDoubleWrappedEnvelopeBeforeTransaction(t *testing.T) {
+	s := NewService(nil, nil)
+	tests := []struct {
+		name    string
+		kind    string
+		payload any
+		want    string
+	}{
+		{
+			name:    "reserved outer event kind",
+			kind:    domain.EventWorkItemEventAppended,
+			payload: map[string]any{"note": "already wrapped"},
+			want:    "transport envelope",
+		},
+		{
+			name: "envelope-shaped payload under another kind",
+			kind: "coordination.review",
+			payload: map[string]any{
+				"inner_kind": "review.verdict_recorded",
+				"inner":      map[string]any{"verdict": "accepted"},
+			},
+			want: "inner_kind/inner wrapper",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.AppendEvent(context.Background(), uuid.New(), tc.kind, tc.payload, testActor())
+			if err == nil || !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("AppendEvent error = %v, want ErrInvalidRequest containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestAppendEvent_RejectsReservedOrMalformedReviewVerdictBeforeTransaction(t *testing.T) {
 	s := NewService(nil, nil)
 	tests := []struct {

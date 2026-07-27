@@ -359,10 +359,52 @@ func convergenceChecksRequired(current domain.WorkItem, to domain.WorkItemState)
 	}
 }
 
+// validateAppendPayloadShape enforces the object contract for appended event
+// payloads at the one seam REST and MCP share. It also rejects an already
+// wrapped {inner_kind, inner} envelope: AppendEvent owns that outer shape.
+// Write-side rejection keeps client-side marshaling bugs from minting
+// malformed non-signals;
+// historical string inners stay readable through the reducer's legacy
+// recovery, which tolerates exactly what this boundary no longer admits.
+// The string-of-JSON case gets its own message because it is always a
+// double-encoding bug, never intent.
+func validateAppendPayloadShape(payload any) error {
+	switch v := payload.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		if len(v) == 2 {
+			_, hasInnerKind := v["inner_kind"]
+			_, hasInner := v["inner"]
+			if hasInnerKind && hasInner {
+				return fmt.Errorf("%w: payload is already a work_item.event_appended envelope; send the logical event kind and its payload object without the inner_kind/inner wrapper", ErrInvalidRequest)
+			}
+		}
+		return nil
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			var parsed any
+			if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+				return fmt.Errorf("%w: payload arrived as JSON-encoded text (double-encoded); send the JSON object itself, not its string form", ErrInvalidRequest)
+			}
+		}
+		return fmt.Errorf("%w: payload must be a JSON object when present; got a string", ErrInvalidRequest)
+	default:
+		return fmt.Errorf("%w: payload must be a JSON object when present; got %T", ErrInvalidRequest, payload)
+	}
+}
+
 func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind string, payload any, actor domain.Token) error {
 	innerKind = strings.TrimSpace(innerKind)
 	if innerKind == "" {
 		return fmt.Errorf("%w: event kind is required", ErrInvalidRequest)
+	}
+	if innerKind == domain.EventWorkItemEventAppended {
+		return fmt.Errorf("%w: event kind %q is the transport envelope; send the logical inner event kind instead", ErrInvalidRequest, innerKind)
+	}
+	if err := validateAppendPayloadShape(payload); err != nil {
+		return err
 	}
 	if innerKind == ReviewVerdictCheckKind {
 		return fmt.Errorf("%w: event kind %q is reserved; append %q and let the deterministic reducer derive the check", ErrInvalidRequest, innerKind, ReviewVerdictInnerKind)

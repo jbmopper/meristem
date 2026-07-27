@@ -556,6 +556,19 @@ func (s *Server) toolFeedRead() Tool {
 				// subscription/listen surface will advertise routed listening.
 				ListenFor    string   `json:"listen_for"`
 				ExcludeActor []string `json:"exclude_actor"`
+				// Content predicates — same normalized contract as the REST
+				// kind / exclude_kind / actor / work_item / work_item_tree
+				// query params, so the fingerprinted cursor identity is
+				// portable across surfaces. Handler-compatible only, like
+				// listen_for, until the modern surface advertises them.
+				Kinds        []string `json:"kinds"`
+				ExcludeKinds []string `json:"exclude_kinds"`
+				Actors       []string `json:"actors"`
+				WorkItem     string   `json:"work_item"`
+				WorkItemTree string   `json:"work_item_tree"`
+				// bootstrap=head mints an identity-bound cursor at the
+				// current head without consuming events — REST parity.
+				Bootstrap string `json:"bootstrap"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -611,6 +624,47 @@ func (s *Server) toolFeedRead() Tool {
 				}
 				excluded = append(excluded, id)
 			}
+			var contentPredicates []feed.Predicate
+			if len(args.Kinds) > 0 {
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateKindInclude, EventKinds: args.Kinds})
+			}
+			if len(args.ExcludeKinds) > 0 {
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateKindExclude, EventKinds: args.ExcludeKinds})
+			}
+			// All actors entries fold into ONE union predicate — same
+			// contract as the REST actor param, same fingerprint identity.
+			var actorSet []uuid.UUID
+			for _, value := range args.Actors {
+				if value == "self" {
+					actorSet = append(actorSet, actor.ID)
+					continue
+				}
+				id, err := uuid.Parse(strings.TrimSpace(value))
+				if err != nil || id == uuid.Nil {
+					return nil, fmt.Errorf("feed.read: invalid_feed_actor: actors entries must be self or a token id")
+				}
+				actorSet = append(actorSet, id)
+			}
+			if len(actorSet) > 0 {
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateActor, TokenIDs: actorSet})
+			}
+			for _, ref := range []struct {
+				name  string
+				value string
+				kind  feed.PredicateKind
+			}{
+				{"work_item", args.WorkItem, feed.PredicateWorkItem},
+				{"work_item_tree", args.WorkItemTree, feed.PredicateWorkItemTree},
+			} {
+				if strings.TrimSpace(ref.value) == "" {
+					continue
+				}
+				id, err := uuid.Parse(strings.TrimSpace(ref.value))
+				if err != nil || id == uuid.Nil {
+					return nil, fmt.Errorf("feed.read: invalid_feed_work_item: %s must be a work item id", ref.name)
+				}
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: ref.kind, WorkItemID: id})
+			}
 			// One contract: the identical normalized ReadFilter REST builds,
 			// with the access reduction evaluated inside each scan batch so
 			// unauthorized or filtered traffic can neither satisfy a wait nor
@@ -628,14 +682,36 @@ func (s *Server) toolFeedRead() Tool {
 					TokenID: id,
 				})
 			}
+			readFilter.Predicates = append(readFilter.Predicates, contentPredicates...)
 			readFilter.Reduce = s.feedAccessReduce(actor)
 			readFilter, err := feed.NormalizeReadFilter(readFilter)
 			if err != nil {
 				return nil, fmt.Errorf("feed.read: invalid_filter: %w", err)
 			}
+			if args.Bootstrap != "" {
+				if args.Bootstrap != "head" {
+					return nil, fmt.Errorf("feed.read: invalid_bootstrap: bootstrap must be head when present")
+				}
+				if args.Cursor != "" || args.Wait != "" {
+					return nil, fmt.Errorf("feed.read: invalid_bootstrap: bootstrap cannot be combined with cursor or wait")
+				}
+				bootCursor, err := s.deps.Feed.BootstrapCursorForIdentity(ctx,
+					projectionNameForTool(projection), projectionVersionForTool(projection), readFilter.FingerprintHash())
+				if err != nil {
+					return nil, err
+				}
+				if isProviderSafeContext(ctx) {
+					return providerSafeFeedPage{page: feed.Page{Items: []feed.Item{}, NextCursor: bootCursor}}, nil
+				}
+				return map[string]any{
+					"items":       []feed.Item{},
+					"next_cursor": bootCursor,
+					"has_more":    false,
+				}, nil
+			}
 			if args.Cursor == "" && args.Wait == "" {
 				var items []feed.Item
-				if assignedRecipient == uuid.Nil && projection == nil && len(excluded) == 0 {
+				if assignedRecipient == uuid.Nil && projection == nil && len(excluded) == 0 && len(contentPredicates) == 0 {
 					// Preserve the legacy snapshot's byte-for-byte ordering for
 					// plain broad readers — the same compatibility branch REST
 					// keeps. The access reduction still applies, so scoped
@@ -1230,7 +1306,7 @@ func (s *Server) toolApprovalsDecide() Tool {
 				return nil, err
 			}
 			if !access.ToolVisible(actor, "approvals.decide") {
-				return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot decide approvals"))
+				return nil, replayableToolErr(pureToolErr(fmt.Errorf("insufficient_scope: token cannot decide approvals")))
 			}
 			result, err := s.deps.Approvals.Decide(ctx, approvals.DecisionInput{
 				ApprovalID: id,
@@ -1258,7 +1334,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 		InputSchema: schemaObject([]string{"id", "kind"}, map[string]any{
 			"id":      schemaString("Work item uuid."),
 			"kind":    schemaString("Inner event kind (e.g. agent.tool_used). Required."),
-			"payload": schemaAny("Arbitrary JSON payload describing the event."),
+			"payload": schemaObjectAny("JSON OBJECT payload describing the event. Must be the object itself - a JSON-encoded string of the object is rejected as double-encoded."),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
@@ -1277,7 +1353,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 				return nil, err
 			}
 			if strings.TrimSpace(args.Kind) == "" {
-				return nil, replayableToolErr(errors.New("workitems: event kind is required"))
+				return nil, replayableToolErr(pureToolErr(errors.New("workitems: event kind is required")))
 			}
 			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
 				return nil, err
@@ -1285,7 +1361,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 			var payload any
 			if len(args.Payload) > 0 {
 				if err := json.Unmarshal(args.Payload, &payload); err != nil {
-					return nil, replayableToolErr(fmt.Errorf("payload: %w", err))
+					return nil, replayableToolErr(pureToolErr(fmt.Errorf("payload: %w", err)))
 				}
 			}
 			if err := s.deps.WorkItems.AppendEvent(ctx, id, args.Kind, payload, actor); err != nil {
@@ -1510,7 +1586,8 @@ func (s *Server) canCreateWorkItem(ctx context.Context, actor domain.Token) erro
 	}
 	if err := s.deps.Access.CanCreateWorkItem(ctx, actor); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return replayableToolErr(fmt.Errorf("insufficient_scope: token cannot create top-level work_items"))
+			// Pre-dispatch access refusal: nothing committed.
+			return replayableToolErr(pureToolErr(fmt.Errorf("insufficient_scope: token cannot create top-level work_items")))
 		}
 		return err
 	}
@@ -1526,7 +1603,9 @@ func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uu
 	}
 	if err := s.deps.Access.CanWriteWorkItem(ctx, actor, id); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return replayableToolErr(fmt.Errorf("work item %s not found", id))
+			// Pre-dispatch access refusal: nothing committed, so it keeps
+			// not-found identity for the pure-refusal classification.
+			return replayableToolErr(notFoundToolError{msg: fmt.Sprintf("work item %s not found", id)})
 		}
 		return err
 	}
@@ -1542,10 +1621,12 @@ func workItemToolErr(err error, notFound error) error {
 	}
 	switch {
 	case errors.Is(err, workitems.ErrNotFound):
+		// The rewritten message must keep identifying as ErrNotFound so the
+		// idempotency layer classifies it as a pure (key-preserving) refusal.
 		if notFound != nil {
-			return replayableToolErr(notFound)
+			return replayableToolErr(notFoundToolError{msg: notFound.Error()})
 		}
-		return replayableToolErr(fmt.Errorf("work_item_not_found: work item not found"))
+		return replayableToolErr(notFoundToolError{msg: "work_item_not_found: work item not found"})
 	case errors.Is(err, workitems.ErrInvalidRequest),
 		errors.Is(err, workitems.ErrInvalidState),
 		errors.Is(err, workitems.ErrInvalidTransition),
@@ -1798,7 +1879,8 @@ func decodeArgs(raw json.RawMessage, out any) error {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
-		return fmt.Errorf("invalid arguments: %w", err)
+		// Argument decoding precedes every dispatch: a pure refusal.
+		return pureToolErr(fmt.Errorf("invalid arguments: %w", err))
 	}
 	return nil
 }
@@ -1806,14 +1888,19 @@ func decodeArgs(raw json.RawMessage, out any) error {
 func parseUUID(raw, field string) (uuid.UUID, error) {
 	id, err := uuid.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("%s must be a valid uuid", field)
+		// Identity parsing precedes every dispatch: a pure refusal.
+		return uuid.Nil, pureToolErr(fmt.Errorf("%s must be a valid uuid", field))
 	}
 	return id, nil
 }
 
+// The argument validators below run strictly before any service dispatch, so
+// their refusals are provably side-effect-free: they carry the pure marker and
+// leave the caller's idempotency key unconsumed for a corrected retry.
+
 func validateWorkItemCreateArgs(title, state string, checks []string, humanReview string) error {
 	if strings.TrimSpace(title) == "" {
-		return replayableToolErr(errors.New("workitems: title is required"))
+		return replayableToolErr(pureToolErr(errors.New("workitems: title is required")))
 	}
 	if err := validateWorkItemStateArg(state); err != nil {
 		return err
@@ -1823,10 +1910,10 @@ func validateWorkItemCreateArgs(title, state string, checks []string, humanRevie
 
 func validateWorkItemLaunchArgs(patienceBudgetSeconds int, escalationRule string) error {
 	if patienceBudgetSeconds < 0 {
-		return replayableToolErr(errors.New("workitems: patience_budget_seconds must be >= 0"))
+		return replayableToolErr(pureToolErr(errors.New("workitems: patience_budget_seconds must be >= 0")))
 	}
 	if escalationRule != "" && !domain.EscalationRule(escalationRule).Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid escalation_rule %q", escalationRule))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid escalation_rule %q", escalationRule)))
 	}
 	return nil
 }
@@ -1834,11 +1921,11 @@ func validateWorkItemLaunchArgs(patienceBudgetSeconds int, escalationRule string
 func validateWorkItemMetadataArgs(checks []string, humanReview string) error {
 	for i, check := range checks {
 		if strings.TrimSpace(check) == "" {
-			return replayableToolErr(fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i))
+			return replayableToolErr(pureToolErr(fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i)))
 		}
 	}
 	if humanReview != "" && !domain.HumanReviewStatus(humanReview).Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid human_review_status %q", humanReview))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid human_review_status %q", humanReview)))
 	}
 	return nil
 }
@@ -1849,7 +1936,7 @@ func validateWorkItemStateArg(state string) error {
 	}
 	parsed := domain.WorkItemState(state)
 	if !parsed.Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid state %q", parsed))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid state %q", parsed)))
 	}
 	return nil
 }
@@ -1921,6 +2008,14 @@ func schemaBool(description string) map[string]any {
 
 func schemaAny(description string) map[string]any {
 	return map[string]any{"description": description}
+}
+
+// schemaObjectAny types a parameter as a JSON object without constraining its
+// properties. Typeless parameters get marshaled as strings by some MCP
+// clients, which is exactly the double-encoding defect the append seam now
+// rejects - the declared type keeps conformant clients shape-faithful.
+func schemaObjectAny(description string) map[string]any {
+	return map[string]any{"type": "object", "description": description}
 }
 
 func (s *Server) toolPolicyProfileSwitch() Tool {
