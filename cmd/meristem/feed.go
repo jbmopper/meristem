@@ -48,6 +48,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -75,6 +77,25 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 	// The healthy --watch path holds one long-lived connection and never
 	// touches this; only network blips and server restarts reach it.
 	retryBackoff := fs.Duration("interval", 2*time.Second, "reconnect backoff when the SSE stream drops in --watch mode")
+
+	// Channel lens flags: translated into query params the server folds into
+	// the same normalized filter contract every surface shares. The server
+	// owns validation (fail-closed); the CLI just carries the request.
+	projection := fs.String("projection", "", "named feed projection (activity, owner-attention, dispatch, ...); part of the cursor identity")
+	scope := fs.String("scope", "", "feed scope; \"assigned\" selects the assigned/addressed lane")
+	listenFor := fs.String("listen-for", "", "delegated lane: \"self\" or a token id whose assigned/addressed lane to read")
+	actors := fs.String("actor", "", "comma-separated author filter: \"self\" or token ids; only their events are delivered")
+	excludeActors := fs.String("exclude-actor", "", "comma-separated author exclusions: \"self\" or token ids")
+	kinds := fs.String("kind", "", "comma-separated event kinds to include")
+	excludeKinds := fs.String("exclude-kind", "", "comma-separated event kinds to exclude")
+	workItem := fs.String("work-item", "", "only events anchored to this work item id")
+	tree := fs.String("tree", "", "only events anchored to the subtree rooted at this work item id")
+
+	// Watch-ergonomics flags: durable resume and the wake hook.
+	cursorFile := fs.String("cursor-file", "", "persist the last delivered cursor here and resume from it on restart; bootstrapped at the current head under this lens before the first stream connect")
+	execCmd := fs.String("exec", "", "run this command (via sh -c) for each delivered event; event JSON on stdin. A failing command stops the watcher without advancing the cursor, so the event is redelivered")
+	ndjson := fs.Bool("ndjson", false, "print raw event envelopes as NDJSON instead of the human-readable rendering")
+	resetOnMismatch := fs.Bool("reset-cursor-on-mismatch", false, "when the server rejects the persisted cursor's identity (filter/projection changed), clear it and restart from now instead of exiting; queued history under the old identity is deliberately abandoned")
 	if err := fs.Parse(args); err != nil {
 		feedUsage(os.Stderr)
 		return err
@@ -88,6 +109,18 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 		fmt.Fprintf(os.Stderr, "feed: using token from %s\n", source)
 	}
 
+	query := buildFeedQuery(feedQueryFlags{
+		projection:    *projection,
+		scope:         *scope,
+		listenFor:     *listenFor,
+		actors:        splitCommaList(*actors),
+		excludeActors: splitCommaList(*excludeActors),
+		kinds:         splitCommaList(*kinds),
+		excludeKinds:  splitCommaList(*excludeKinds),
+		workItem:      *workItem,
+		tree:          *tree,
+	})
+
 	// Two clients with different timeout disciplines:
 	//   - snapshot HTTP: bounded 30s; a snapshot read should complete fast.
 	//   - stream HTTP: NO Timeout; SSE connections are designed to be long-
@@ -97,6 +130,7 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 	client := &feedClient{
 		baseURL:    strings.TrimRight(*api, "/"),
 		token:      token,
+		query:      query,
 		http:       &http.Client{Timeout: 30 * time.Second},
 		streamHTTP: &http.Client{Timeout: 0},
 	}
@@ -111,9 +145,81 @@ func runFeed(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 
 	return runFeedWatch(ctx, logger, client, watchOptions{
-		mentions:     parseMentions(*mentions),
-		retryBackoff: *retryBackoff,
+		mentions:              parseMentions(*mentions),
+		retryBackoff:          *retryBackoff,
+		cursorFile:            *cursorFile,
+		execCmd:               *execCmd,
+		ndjson:                *ndjson,
+		resetCursorOnMismatch: *resetOnMismatch,
 	}, os.Stdout)
+}
+
+// feedQueryFlags is the CLI-side shape of the channel lens before it becomes
+// query params. Kept as a struct so tests can exercise the translation
+// without a flag.FlagSet.
+type feedQueryFlags struct {
+	projection    string
+	scope         string
+	listenFor     string
+	actors        []string
+	excludeActors []string
+	kinds         []string
+	excludeKinds  []string
+	workItem      string
+	tree          string
+}
+
+// buildFeedQuery translates lens flags into the query params GET /v1/feed and
+// /v1/feed/stream accept. Values are passed through verbatim — the server is
+// the authority on identity shape and kind vocabulary and fails closed on
+// anything malformed — but structurally empty values are dropped here so an
+// unset flag adds nothing to the filter identity.
+func buildFeedQuery(f feedQueryFlags) url.Values {
+	q := url.Values{}
+	if p := strings.TrimSpace(f.projection); p != "" {
+		q.Set("projection", p)
+	}
+	if s := strings.TrimSpace(f.scope); s != "" {
+		q.Set("scope", s)
+	}
+	if lf := strings.TrimSpace(f.listenFor); lf != "" {
+		q.Set("listen_for", lf)
+	}
+	for _, a := range f.actors {
+		q.Add("actor", a)
+	}
+	for _, a := range f.excludeActors {
+		q.Add("exclude_actor", a)
+	}
+	for _, k := range f.kinds {
+		q.Add("kind", k)
+	}
+	for _, k := range f.excludeKinds {
+		q.Add("exclude_kind", k)
+	}
+	if wi := strings.TrimSpace(f.workItem); wi != "" {
+		q.Set("work_item", wi)
+	}
+	if t := strings.TrimSpace(f.tree); t != "" {
+		q.Set("work_item_tree", t)
+	}
+	return q
+}
+
+// splitCommaList splits a comma-separated flag value, trimming whitespace and
+// dropping empty entries so "a,,b" and "a, b" both mean [a b].
+func splitCommaList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func parseMentions(raw string) []string {
@@ -133,6 +239,27 @@ func parseMentions(raw string) []string {
 type watchOptions struct {
 	mentions     []string
 	retryBackoff time.Duration
+	// cursorFile, when set, makes the watch durable: the cursor of the last
+	// successfully delivered event is persisted there and a restarted watcher
+	// resumes from it instead of "from now". A missing/empty file is
+	// bootstrapped BEFORE the first stream connect by minting an
+	// identity-bound cursor at the current head through the page surface, so
+	// an event landing between watcher start and stream connect (or across a
+	// crash before the first delivery) is never silently skipped.
+	cursorFile string
+	// execCmd, when set, is the wake hook: run via sh -c for each delivered
+	// event with the event JSON on stdin. Delivery means the command exited
+	// zero; a failure stops the watcher WITHOUT advancing the cursor, so the
+	// event is redelivered on the next connection rather than dropped.
+	execCmd string
+	ndjson  bool
+	// resetCursorOnMismatch opts into recovering from a cursor identity
+	// rejection (the persisted cursor was minted under a different filter or
+	// projection) by clearing the cursor and restarting from now. Off by
+	// default: silently abandoning queued history is a data-loss decision
+	// the operator must make explicitly; without it the watcher exits loudly
+	// and leaves the cursor file untouched.
+	resetCursorOnMismatch bool
 }
 
 // runFeedWatch consumes /v1/feed/stream over SSE. Sequence:
@@ -160,6 +287,32 @@ type watchOptions struct {
 // past them so reconnects don't redeliver).
 func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, opts watchOptions, out io.Writer) error {
 	var lastID string
+	if opts.cursorFile != "" {
+		saved, err := loadCursorFile(opts.cursorFile)
+		if err != nil {
+			return fmt.Errorf("feed --watch: read cursor file: %w", err)
+		}
+		if saved != "" {
+			lastID = saved
+		} else {
+			// Fresh durable watcher: mint the identity-bound head cursor
+			// via the server's atomic bootstrap and persist it BEFORE
+			// opening the stream. From here on, every event after this
+			// point is either delivered or still ahead of the durable
+			// cursor — a crash or a slow first connect cannot silently
+			// skip a wake. Transient mint failures retry like the stream.
+			lastID, err = mintCursorWithRetry(ctx, logger, client, opts.retryBackoff)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil
+				}
+				return fmt.Errorf("feed --watch: bootstrap cursor: %w", err)
+			}
+			if err := saveCursorFile(opts.cursorFile, lastID); err != nil {
+				return fmt.Errorf("feed --watch: persist bootstrap cursor: %w", err)
+			}
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -169,7 +322,25 @@ func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, 
 
 		newLastID, err := client.consumeStream(ctx, lastID, func(ev sseEvent) error {
 			if matchesMentions(ev.Item, opts.mentions) {
-				fmt.Fprintln(out, formatItem(ev.Item))
+				if opts.ndjson {
+					if err := printNDJSON(out, ev.Item); err != nil {
+						return err
+					}
+				} else {
+					fmt.Fprintln(out, formatItem(ev.Item))
+				}
+				if opts.execCmd != "" {
+					if err := runWakeHook(ctx, opts.execCmd, ev); err != nil {
+						return fmt.Errorf("wake hook failed (event will be redelivered): %w", err)
+					}
+				}
+			}
+			// Delivery succeeded (or the event was filtered out); the cursor
+			// may durably advance past it.
+			if opts.cursorFile != "" && ev.ID != "" {
+				if err := saveCursorFile(opts.cursorFile, ev.ID); err != nil {
+					return fmt.Errorf("persist cursor: %w", err)
+				}
 			}
 			return nil
 		})
@@ -184,16 +355,71 @@ func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, 
 			return nil
 		}
 
-		if isInvalidCursorErr(err) {
+		if isWakeHookErr(err) {
+			// The hook is the point of the watch; if it cannot run, exit
+			// loudly instead of spinning delivery attempts forever. The
+			// cursor was not advanced past the failed event.
+			return err
+		}
+
+		switch classifyWatchError(err) {
+		case watchErrCursorIdentity:
+			// The cursor was minted under a different filter or projection
+			// identity, or the server no longer recognizes it.
+			//
+			// Ephemeral watcher (no cursor file): there is no durability
+			// contract to protect — recover by restarting from now, exactly
+			// as a human tailing a terminal expects.
+			if opts.cursorFile == "" {
+				if logger != nil {
+					logger.Warn("feed --watch: server rejected resume cursor, restarting from now",
+						slog.String("last_id", lastID),
+						slog.String("error", err.Error()))
+				}
+				lastID = ""
+				break
+			}
+			// Durable watcher: resetting means abandoning whatever queued
+			// history the old identity still held — a data-loss decision
+			// the operator must opt into. Without the opt-in, exit loudly
+			// and leave the cursor file untouched for inspection.
+			if !opts.resetCursorOnMismatch {
+				return fmt.Errorf("feed --watch: server rejected the resume cursor (%w); rerun with --reset-cursor-on-mismatch to discard it and restart from now", err)
+			}
 			if logger != nil {
-				logger.Warn("feed --watch: server rejected resume cursor, restarting from now",
-					slog.String("last_id", lastID))
+				logger.Warn("feed --watch: server rejected resume cursor, resetting and restarting from now",
+					slog.String("last_id", lastID),
+					slog.String("error", err.Error()))
 			}
 			lastID = ""
-		} else if logger != nil {
-			logger.Warn("feed --watch: stream ended, reconnecting",
-				slog.String("error", err.Error()),
-				slog.String("backoff", opts.retryBackoff.String()))
+			if opts.cursorFile != "" {
+				// Re-mint under the current identity rather than leaving the
+				// file empty: the durable no-silent-skip property resumes
+				// immediately at the reset point instead of lapsing until
+				// the first post-reset delivery. Transient failures retry.
+				fresh, mintErr := mintCursorWithRetry(ctx, logger, client, opts.retryBackoff)
+				if mintErr != nil {
+					return fmt.Errorf("feed --watch: re-bootstrap cursor after reset: %w", mintErr)
+				}
+				lastID = fresh
+				if err := saveCursorFile(opts.cursorFile, fresh); err != nil {
+					return fmt.Errorf("persist re-bootstrapped cursor: %w", err)
+				}
+			}
+		case watchErrPermanent:
+			// Config or auth is wrong (unknown kind, malformed id,
+			// insufficient scope, bad token). Retrying cannot fix it and
+			// each retry would just hammer the server; the cursor file is
+			// left exactly as it was.
+			return fmt.Errorf("feed --watch: %w", err)
+		default:
+			// Transient: network blip, server restart, 5xx, stream close.
+			// Keep the cursor and reconnect after backoff.
+			if logger != nil {
+				logger.Warn("feed --watch: stream ended, reconnecting",
+					slog.String("error", err.Error()),
+					slog.String("backoff", opts.retryBackoff.String()))
+			}
 		}
 
 		select {
@@ -202,6 +428,151 @@ func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, 
 		case <-time.After(opts.retryBackoff):
 		}
 	}
+}
+
+// watchErrorClass is the reconnect-loop decision for one stream failure.
+type watchErrorClass int
+
+const (
+	watchErrTransient watchErrorClass = iota
+	watchErrCursorIdentity
+	watchErrPermanent
+)
+
+// classifyWatchError sorts a stream error into the three behaviors the loop
+// supports. Only API responses carry a decidable class; anything without a
+// typed apiRequestError (transport errors, stream teardown) is transient.
+func classifyWatchError(err error) watchErrorClass {
+	var apiErr *apiRequestError
+	if !errors.As(err, &apiErr) {
+		return watchErrTransient
+	}
+	switch apiErr.Code {
+	case "invalid_cursor", "cursor_filter_mismatch", "cursor_projection_mismatch":
+		return watchErrCursorIdentity
+	}
+	switch apiErr.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		// Retryable by definition; treating them as permanent would kill a
+		// healthy watcher during a load spike.
+		return watchErrTransient
+	}
+	if apiErr.Status >= 400 && apiErr.Status < 500 {
+		return watchErrPermanent
+	}
+	return watchErrTransient
+}
+
+// mintCursorWithRetry runs the bootstrap mint under the same error policy as
+// the stream loop: transient failures (network, 5xx, 408/429) back off and
+// retry until ctx cancels; permanent config/auth errors and cursor-identity
+// errors exit immediately. Without this, one 503 during startup would kill a
+// durable watcher that the reconnect loop was built to keep alive.
+func mintCursorWithRetry(ctx context.Context, logger *slog.Logger, client *feedClient, backoff time.Duration) (string, error) {
+	for {
+		cursor, err := client.mintCursor(ctx)
+		if err == nil {
+			return cursor, nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if classifyWatchError(err) != watchErrTransient {
+			return "", err
+		}
+		if logger != nil {
+			logger.Warn("feed --watch: bootstrap mint failed, retrying",
+				slog.String("error", err.Error()),
+				slog.String("backoff", backoff.String()))
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
+}
+
+// printNDJSON emits the full wire envelope of one event as a single JSON
+// line, for machine consumers piping the watch into another program.
+func printNDJSON(out io.Writer, it feedItem) error {
+	encoded, err := json.Marshal(it)
+	if err != nil {
+		return fmt.Errorf("encode event: %w", err)
+	}
+	_, err = fmt.Fprintln(out, string(encoded))
+	return err
+}
+
+// wakeHookError distinguishes a failing --exec hook from transport errors so
+// the reconnect loop can exit instead of hammering a broken hook.
+type wakeHookError struct{ err error }
+
+func (e wakeHookError) Error() string { return e.err.Error() }
+func (e wakeHookError) Unwrap() error { return e.err }
+
+func isWakeHookErr(err error) bool {
+	var hookErr wakeHookError
+	return errors.As(err, &hookErr)
+}
+
+// runWakeHook executes the --exec command for one delivered event. The full
+// event envelope arrives on stdin; the cursor, kind, and subject are also
+// exposed as MERISTEM_EVENT_* env vars for hooks that don't want to parse
+// JSON. The hook's stdout/stderr pass through so wake targets can log.
+func runWakeHook(ctx context.Context, command string, ev sseEvent) error {
+	encoded, err := json.Marshal(ev.Item)
+	if err != nil {
+		return wakeHookError{fmt.Errorf("encode event for hook: %w", err)}
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Stdin = bytes.NewReader(encoded)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(),
+		"MERISTEM_EVENT_CURSOR="+ev.ID,
+		"MERISTEM_EVENT_KIND="+ev.Item.Kind,
+		"MERISTEM_EVENT_SUBJECT_ID="+ev.Item.SubjectID,
+	)
+	if err := cmd.Run(); err != nil {
+		return wakeHookError{err}
+	}
+	return nil
+}
+
+// loadCursorFile reads the persisted cursor. A missing file is a fresh
+// watcher, not an error.
+func loadCursorFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// saveCursorFile persists the cursor atomically (temp file + rename in the
+// same directory) so a crash mid-write can never leave a torn cursor that a
+// restarted watcher would send as Last-Event-ID.
+func saveCursorFile(path, cursor string) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".cursor-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.WriteString(cursor + "\n"); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // matchesMentions is the client-side filter for --mentions. The empty
@@ -269,12 +640,37 @@ func matchesMentionsInPayload(probe map[string]any, mentions []string) bool {
 	return false
 }
 
-func isInvalidCursorErr(err error) bool {
-	if err == nil {
-		return false
+// apiRequestError is a non-200 API response with its decoded error envelope,
+// so the reconnect loop can classify on the server's error CODE instead of
+// string-matching status text (which conflated "invalid filter" and
+// "rejected cursor" — every 400 looked recoverable).
+type apiRequestError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *apiRequestError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("api %d %s: %s", e.Status, e.Code, e.Message)
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "invalid_cursor") || strings.Contains(msg, "400")
+	return fmt.Sprintf("api %d: %s", e.Status, e.Message)
+}
+
+// newAPIRequestError decodes the standard {"error":{code,message}} envelope;
+// a body that isn't the envelope still yields a typed error with the raw
+// text as the message.
+func newAPIRequestError(status int, body []byte) *apiRequestError {
+	var envelope struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error.Code != "" {
+		return &apiRequestError{Status: status, Code: envelope.Error.Code, Message: envelope.Error.Message}
+	}
+	return &apiRequestError{Status: status, Message: strings.TrimSpace(string(body))}
 }
 
 func printItems(out io.Writer, items []feedItem) {
@@ -307,10 +703,27 @@ type feedItem struct {
 // ctx cancellation can end it). Splitting them keeps the snapshot path
 // safe from a hung server while letting the stream live indefinitely.
 type feedClient struct {
-	baseURL    string
-	token      string
+	baseURL string
+	token   string
+	// query carries the channel-lens params (scope, listen_for, actor,
+	// exclude_actor, kind, exclude_kind, work_item, work_item_tree) applied
+	// identically to snapshot and stream requests, so a cursor minted by one
+	// is valid for the other — same filter, same fingerprint identity.
+	query      url.Values
 	http       *http.Client
 	streamHTTP *http.Client
+}
+
+// lensQuery clones the shared lens params so per-request additions (limit)
+// cannot leak between calls.
+func (c *feedClient) lensQuery() url.Values {
+	q := url.Values{}
+	for key, values := range c.query {
+		for _, v := range values {
+			q.Add(key, v)
+		}
+	}
+	return q
 }
 
 func (c *feedClient) fetch(ctx context.Context, limit int) ([]feedItem, error) {
@@ -318,7 +731,7 @@ func (c *feedClient) fetch(ctx context.Context, limit int) ([]feedItem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("feed: parse api URL: %w", err)
 	}
-	q := u.Query()
+	q := c.lensQuery()
 	q.Set("limit", fmt.Sprintf("%d", limit))
 	u.RawQuery = q.Encode()
 
@@ -345,6 +758,51 @@ func (c *feedClient) fetch(ctx context.Context, limit int) ([]feedItem, error) {
 		return nil, fmt.Errorf("feed: decode response: %w", err)
 	}
 	return envelope.Items, nil
+}
+
+// mintCursor asks the server's bootstrap=head mode for an identity-bound
+// cursor at the current head, under exactly the lens (query params) this
+// client streams with — same normalized filter, same fingerprint, so the
+// stream accepts it as a resume point. bootstrap=head is atomic on the
+// server (one MAX(seq) read, no events returned), so no event can be
+// consumed-and-discarded by the mint itself: everything after the minted
+// point is the stream's to deliver.
+func (c *feedClient) mintCursor(ctx context.Context) (string, error) {
+	u, err := url.Parse(c.baseURL + "/v1/feed")
+	if err != nil {
+		return "", fmt.Errorf("feed: parse api URL: %w", err)
+	}
+	q := c.lensQuery()
+	q.Set("bootstrap", "head")
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("feed: mint cursor: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("feed: mint cursor read: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", newAPIRequestError(resp.StatusCode, body)
+	}
+	var page struct {
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil {
+		return "", fmt.Errorf("feed: mint cursor decode: %w", err)
+	}
+	if page.NextCursor == "" {
+		return "", fmt.Errorf("feed: mint cursor: server returned no next_cursor")
+	}
+	return page.NextCursor, nil
 }
 
 // sseEvent is one frame from /v1/feed/stream after parsing.
@@ -380,6 +838,9 @@ func (c *feedClient) consumeStream(ctx context.Context, lastID string, onEvent f
 	if err != nil {
 		return lastID, fmt.Errorf("feed: parse api URL: %w", err)
 	}
+	if lens := c.lensQuery(); len(lens) > 0 {
+		u.RawQuery = lens.Encode()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return lastID, err
@@ -397,7 +858,7 @@ func (c *feedClient) consumeStream(ctx context.Context, lastID string, onEvent f
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return lastID, fmt.Errorf("feed: stream %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return lastID, fmt.Errorf("feed: stream rejected: %w", newAPIRequestError(resp.StatusCode, body))
 	}
 
 	// Buffer sized for an event payload comfortably larger than typical
@@ -425,11 +886,15 @@ func (c *feedClient) consumeStream(ctx context.Context, lastID string, onEvent f
 			if !ok {
 				continue
 			}
-			if ev.ID != "" {
-				lastID = ev.ID
-			}
+			// Advance the resume cursor only after the handler accepts the
+			// event. If delivery fails (e.g. the wake hook errored), the
+			// reconnect resumes at the previous cursor and the server
+			// redelivers this event instead of dropping it.
 			if err := onEvent(ev); err != nil {
 				return lastID, err
+			}
+			if ev.ID != "" {
+				lastID = ev.ID
 			}
 			continue
 		}
@@ -751,6 +1216,42 @@ Flags:
                        (default 2s); only network blips and server restarts
                        reach this — the healthy path holds one connection
   --api=URL            meristem API base URL (default http://127.0.0.1:8080)
+
+Channel lens flags (server-side filtering; all surfaces share one normalized
+filter contract, and cursors are bound to the full lens identity —
+projection, version, and predicate fingerprint):
+  --projection=NAME    named feed projection (activity, owner-attention, ...)
+  --scope=assigned     read the assigned/addressed lane instead of the broad feed
+  --listen-for=ID      delegated lane: self or a token id (requires feed.listen_for scope)
+  --actor=A,B          only events authored by any of these token ids (or
+                       self) — multiple values are a union, not an AND
+  --exclude-actor=A,B  drop events authored by these token ids (or self);
+                       events addressed to the reader always survive
+  --kind=K1,K2         only these event kinds (unknown kinds fail closed)
+  --exclude-kind=K1    drop these event kinds; addressed wakes always survive
+  --work-item=ID       only events anchored to this work item
+  --tree=ID            only events anchored to this work item's subtree
+
+Watch ergonomics (with --watch):
+  --cursor-file=PATH   durable watch. A missing/empty file is bootstrapped
+                       with an identity-bound cursor at the current head
+                       BEFORE the first stream connect, then the cursor of
+                       each delivered event is persisted — a crash or slow
+                       connect can never silently skip an event. A restarted
+                       watcher resumes exactly.
+  --exec=CMD           wake hook: run CMD (sh -c) per delivered event, event
+                       JSON on stdin, MERISTEM_EVENT_{CURSOR,KIND,SUBJECT_ID}
+                       in env. Non-zero exit stops the watcher WITHOUT
+                       advancing the cursor, so the event is redelivered.
+  --ndjson             print raw event envelopes as NDJSON (machine consumers)
+  --reset-cursor-on-mismatch
+                       if the server rejects the persisted cursor's identity
+                       (the lens changed), discard it, re-mint at the current
+                       head, and continue. Without this flag the watcher
+                       exits loudly and preserves the cursor file — resetting
+                       abandons queued history and is an explicit decision.
+                       Config/auth errors (unknown kind, bad token, missing
+                       scope) always exit immediately; they are never retried.
 
 Output is one line per event, in arrival order (oldest-first by events.seq).
 Format:

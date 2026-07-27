@@ -291,3 +291,127 @@ func TestMCPFeedReadCursorIdentityAndLossProofReconnectIntegration(t *testing.T)
 		t.Fatalf("cursor chain continuity broken: err=%t %s", isErr, text)
 	}
 }
+
+func TestMCPFeedReadContentPredicateParityIntegration(t *testing.T) {
+	fixture := newOCEFixture(t)
+	fixture.note(t, fixture.itemA, "oce-content-by-alpha", fixture.actorA.Token)
+	fixture.note(t, fixture.itemB, "oce-content-by-beta", fixture.actorB.Token)
+	outside, err := fixture.work.Create(fixture.ctx, workitems.CreateInput{Title: "oce-content-outside", Actor: fixture.root.Token})
+	if err != nil {
+		t.Fatalf("create outside item: %v", err)
+	}
+	fixture.note(t, outside, "oce-content-outside-note", fixture.root.Token)
+	s := fixture.server(t, fixture.broad.Secret)
+
+	// kinds: only the requested event kind. The tree's work_item.created
+	// events exist, so their absence under the kinds filter is meaningful.
+	isErr, text := feedReadForTest(t, s, map[string]any{"limit": 100, "kinds": []string{"work_item.event_appended"}})
+	if isErr || !strings.Contains(text, "oce-content-by-alpha") || strings.Contains(text, "work_item.created") {
+		t.Fatalf("kinds filter broken: err=%t %s", isErr, text)
+	}
+
+	// exclude_kinds: the excluded kind is gone.
+	isErr, text = feedReadForTest(t, s, map[string]any{"limit": 100, "exclude_kinds": []string{"work_item.event_appended"}})
+	if isErr || strings.Contains(text, "oce-content-by-alpha") || !strings.Contains(text, "work_item.created") {
+		t.Fatalf("exclude_kinds filter broken: err=%t %s", isErr, text)
+	}
+
+	// actors: only the named author's events.
+	isErr, text = feedReadForTest(t, s, map[string]any{"limit": 100, "actors": []string{fixture.actorB.Token.ID.String()}})
+	if isErr || !strings.Contains(text, "oce-content-by-beta") || strings.Contains(text, "oce-content-by-alpha") {
+		t.Fatalf("actors filter broken: err=%t %s", isErr, text)
+	}
+
+	// Two actors are a UNION — REST parity for the repeated actor param.
+	isErr, text = feedReadForTest(t, s, map[string]any{"limit": 100,
+		"actors": []string{fixture.actorA.Token.ID.String(), fixture.actorB.Token.ID.String()}})
+	if isErr || !strings.Contains(text, "oce-content-by-alpha") || !strings.Contains(text, "oce-content-by-beta") {
+		t.Fatalf("actors union broken: err=%t %s", isErr, text)
+	}
+	if strings.Contains(text, "oce-content-outside-note") {
+		t.Fatalf("actors union leaked a root-authored event: %s", text)
+	}
+
+	// work_item_tree: subtree anchoring keeps tree events, drops outside.
+	isErr, text = feedReadForTest(t, s, map[string]any{"limit": 100, "work_item_tree": fixture.tree.ID.String()})
+	if isErr || !strings.Contains(text, "oce-content-by-alpha") || strings.Contains(text, "oce-content-outside-note") {
+		t.Fatalf("work_item_tree filter broken: err=%t %s", isErr, text)
+	}
+
+	// work_item: exact anchoring only.
+	isErr, text = feedReadForTest(t, s, map[string]any{"limit": 100, "work_item": fixture.itemA.ID.String()})
+	if isErr || !strings.Contains(text, "oce-content-by-alpha") || strings.Contains(text, "oce-content-by-beta") {
+		t.Fatalf("work_item filter broken: err=%t %s", isErr, text)
+	}
+
+	// Fail-closed argument validation, same vocabulary authority as REST.
+	if isErr, text = feedReadForTest(t, s, map[string]any{"kinds": []string{"not.a.known.kind"}}); !isErr || !strings.Contains(text, "invalid_filter") {
+		t.Fatalf("unknown kind not rejected: err=%t %s", isErr, text)
+	}
+	if isErr, text = feedReadForTest(t, s, map[string]any{"actors": []string{"not-a-uuid"}}); !isErr || !strings.Contains(text, "invalid_feed_actor") {
+		t.Fatalf("malformed actors entry not rejected: err=%t %s", isErr, text)
+	}
+	if isErr, text = feedReadForTest(t, s, map[string]any{"work_item": "not-a-uuid"}); !isErr || !strings.Contains(text, "invalid_feed_work_item") {
+		t.Fatalf("malformed work_item not rejected: err=%t %s", isErr, text)
+	}
+
+	// The content filter participates in cursor identity: a cursor minted
+	// under one kinds set fails closed under any other filter.
+	isErr, text = feedReadForTest(t, s, map[string]any{"wait": "0s", "kinds": []string{"work_item.event_appended"}})
+	if isErr {
+		t.Fatalf("filtered page errored: %s", text)
+	}
+	cursor := nextCursorFromText(t, text)
+	isErr, text = feedReadForTest(t, s, map[string]any{"wait": "0s", "cursor": cursor, "kinds": []string{"work_item.event_appended"}})
+	if isErr {
+		t.Fatalf("same-filter cursor resume errored: %s", text)
+	}
+	for _, mismatched := range []map[string]any{
+		{"wait": "0s", "cursor": cursor},
+		{"wait": "0s", "cursor": cursor, "kinds": []string{"work_item.created"}},
+		{"wait": "0s", "cursor": cursor, "kinds": []string{"work_item.event_appended"}, "actors": []string{fixture.actorA.Token.ID.String()}},
+	} {
+		if isErr, text = feedReadForTest(t, s, mismatched); !isErr || !strings.Contains(text, "cursor_filter_mismatch") {
+			t.Fatalf("mismatched filter identity not rejected: err=%t %s", isErr, text)
+		}
+	}
+}
+
+func TestMCPFeedReadBootstrapHeadParityIntegration(t *testing.T) {
+	fixture := newOCEFixture(t)
+	s := fixture.server(t, fixture.broad.Secret)
+
+	// Bootstrap mints an identity-bound head cursor with no items.
+	isErr, text := feedReadForTest(t, s, map[string]any{"bootstrap": "head", "kinds": []string{"work_item.event_appended"}})
+	if isErr {
+		t.Fatalf("bootstrap errored: %s", text)
+	}
+	var boot struct {
+		Items      []json.RawMessage `json:"items"`
+		NextCursor string            `json:"next_cursor"`
+	}
+	if err := json.Unmarshal([]byte(text), &boot); err != nil || boot.NextCursor == "" {
+		t.Fatalf("decode bootstrap: err=%v text=%s", err, text)
+	}
+	if len(boot.Items) != 0 {
+		t.Fatalf("bootstrap must not return items, got %d", len(boot.Items))
+	}
+
+	// An event appended after the mint is delivered from the minted cursor.
+	fixture.note(t, fixture.itemA, "oce-bootstrap-race-wake", fixture.root.Token)
+	isErr, text = feedReadForTest(t, s, map[string]any{"wait": "0s", "cursor": boot.NextCursor, "kinds": []string{"work_item.event_appended"}})
+	if isErr || !strings.Contains(text, "oce-bootstrap-race-wake") {
+		t.Fatalf("event after bootstrap not delivered: err=%t %s", isErr, text)
+	}
+
+	// Identity binding and argument validation fail closed.
+	if isErr, text = feedReadForTest(t, s, map[string]any{"wait": "0s", "cursor": boot.NextCursor}); !isErr || !strings.Contains(text, "cursor_filter_mismatch") {
+		t.Fatalf("bootstrap cursor not identity-bound: err=%t %s", isErr, text)
+	}
+	if isErr, text = feedReadForTest(t, s, map[string]any{"bootstrap": "tail"}); !isErr || !strings.Contains(text, "invalid_bootstrap") {
+		t.Fatalf("invalid bootstrap value not rejected: err=%t %s", isErr, text)
+	}
+	if isErr, text = feedReadForTest(t, s, map[string]any{"bootstrap": "head", "wait": "0s"}); !isErr || !strings.Contains(text, "invalid_bootstrap") {
+		t.Fatalf("bootstrap+wait not rejected: err=%t %s", isErr, text)
+	}
+}
