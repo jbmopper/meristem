@@ -1258,7 +1258,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 		InputSchema: schemaObject([]string{"id", "kind"}, map[string]any{
 			"id":      schemaString("Work item uuid."),
 			"kind":    schemaString("Inner event kind (e.g. agent.tool_used). Required."),
-			"payload": schemaAny("Arbitrary JSON payload describing the event."),
+			"payload": schemaObjectAny("JSON OBJECT payload describing the event. Must be the object itself - a JSON-encoded string of the object is rejected as double-encoded."),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
@@ -1921,6 +1921,14 @@ func schemaBool(description string) map[string]any {
 
 func schemaAny(description string) map[string]any {
 	return map[string]any{"description": description}
+}
+
+// schemaObjectAny types a parameter as a JSON object without constraining its
+// properties. Typeless parameters get marshaled as strings by some MCP
+// clients, which is exactly the double-encoding defect the append seam now
+// rejects - the declared type keeps conformant clients shape-faithful.
+func schemaObjectAny(description string) map[string]any {
+	return map[string]any{"type": "object", "description": description}
 }
 
 func (s *Server) toolPolicyProfileSwitch() Tool {
