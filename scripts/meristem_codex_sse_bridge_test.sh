@@ -100,10 +100,23 @@ printf '%s\n' \
   '          printf '\''%s\n%s'\'' '\''{"error":{"code":"cursor_filter_mismatch","message":"filter identity changed"}}'\'' 400' \
   '        fi' \
   '        ;;' \
+  '      listen_for_ignored)' \
+  '        case "$last" in' \
+  '          *"&scope=assigned&exclude_actor=self")' \
+  '            printf '\''%s\n%s'\'' '\''{"items":[],"next_cursor":"cursor-0"}'\'' 200' \
+  '            ;;' \
+  '          *)' \
+  '            printf '\''%s\n%s'\'' '\''{"error":{"code":"cursor_filter_mismatch","message":"filter identity changed"}}'\'' 400' \
+  '            ;;' \
+  '        esac' \
+  '        ;;' \
   '      *)' \
   '        printf '\''%s\n%s'\'' '\''{"error":{"code":"cursor_filter_mismatch","message":"filter identity changed"}}'\'' 400' \
   '        ;;' \
   '    esac' \
+  '    ;;' \
+  '  *"/v1/feed?wait=0s&limit=1&scope=assigned&listen_for="*"&exclude_actor=self")' \
+  '    printf '\''%s\n'\'' '\''{"next_cursor":"cursor-0"}'\''' \
   '    ;;' \
   '  *"/v1/feed?wait=0s&limit=1&scope=assigned&exclude_actor=self")' \
   '    printf '\''%s\n'\'' '\''{"next_cursor":"cursor-0"}'\''' \
@@ -170,6 +183,13 @@ printf '%s\n' \
   '        printf '\''%s\n'\'' "id: $cursor" '\''data: {"event_id":"event-1","actor_token_id":"claude-test","source":"agent","kind":"work_item.event_appended","subject_id":"item-1"}'\'' '\'''\''' \
   '        ;;' \
   '    esac' \
+  '    ;;' \
+  '  *"/v1/feed/stream?scope=assigned&listen_for="*"&exclude_actor=self")' \
+  '    count=0' \
+  '    [ -f "$FAKE_CURL_COUNT_FILE" ] && count=$(cat "$FAKE_CURL_COUNT_FILE")' \
+  '    count=$((count + 1))' \
+  '    printf '\''%s\n'\'' "$count" >"$FAKE_CURL_COUNT_FILE"' \
+  '    printf '\''%s\n'\'' "id: cursor-$count" "data: {\"event_id\":\"event-$count\",\"actor_token_id\":\"claude-test\",\"source\":\"agent\",\"kind\":\"work_item.event_appended\",\"subject_id\":\"item-$count\"}" '\'''\''' \
   '    ;;' \
   '  *) exit 22 ;;' \
   'esac' >"$FAKE_CURL"
@@ -282,7 +302,7 @@ wait_for_file() {
 }
 
 start_bridge() {
-  local name="$1" curl_scenario="$2" dry_run="$3" python_bin="$4" helper_scenario="${5:-none}" codex_bin="${6:-$FAKE_CODEX}"
+  local name="$1" curl_scenario="$2" dry_run="$3" python_bin="$4" helper_scenario="${5:-none}" codex_bin="${6:-$FAKE_CODEX}" listen_for="${7:-}"
   STATE_DIR="$TMP_ROOT/$name-state"
   LOG_FILE="$TMP_ROOT/$name.log"
   COUNT_FILE="$TMP_ROOT/$name-curl-count"
@@ -295,6 +315,7 @@ start_bridge() {
     MERISTEM_TOKEN_FILE="$TOKEN_FILE" \
     CODEX_THREAD_ID="dedicated-listener-thread" \
     MERISTEM_WAKE_ACTOR_TOKEN_IDS="claude-test" \
+    MERISTEM_FEED_LISTEN_FOR_TOKEN_ID="$listen_for" \
     CODEX_BIN="$codex_bin" \
     PYTHON_BIN="$python_bin" \
     CURL_BIN="$FAKE_CURL" \
@@ -457,6 +478,25 @@ wait_for_log 'wake_dry_run events=1'
 kill -0 "$BRIDGE_PID" 2>/dev/null
 stop_bridge
 [[ "$STOP_FORCED" == "0" ]]
+
+# A target-routed bridge proves that listen_for participates in the server's
+# cursor identity. An older server that ignores the parameter is rejected
+# before the stream opens.
+LISTEN_FOR_ID="76bb7593-4aa6-491e-a9d9-328ec79f5bc6"
+start_bridge listen-for selected 1 /usr/bin/python3 none "$FAKE_CODEX" "$LISTEN_FOR_ID"
+wait_for_log 'wake_dry_run events=1'
+grep -Fxq "http://127.0.0.1:8080/v1/feed?wait=0s&limit=1&scope=assigned&listen_for=$LISTEN_FOR_ID&exclude_actor=self" "$URLS_FILE"
+grep -Fxq "http://127.0.0.1:8080/v1/feed?wait=0s&limit=1&cursor=cursor-0&scope=assigned&exclude_actor=self" "$URLS_FILE"
+grep -Fxq "http://127.0.0.1:8080/v1/feed/stream?scope=assigned&listen_for=$LISTEN_FOR_ID&exclude_actor=self" "$URLS_FILE"
+printf 'version=2\nfilter=assigned-listen-for-%s-exclude-self-v1\n' "$LISTEN_FOR_ID" | cmp -s - "$STATE_DIR/initialized"
+stop_bridge
+[[ "$STOP_FORCED" == "0" ]]
+
+start_bridge listen-for-ignored listen_for_ignored 1 /usr/bin/python3 none "$FAKE_CODEX" "$LISTEN_FOR_ID"
+wait_for_bridge_exit
+[[ "$BRIDGE_RC" == "80" ]]
+! grep -Fq '/v1/feed/stream' "$URLS_FILE"
+grep -Fq 'feed_filter_identity_unverified' "$LOG_FILE"
 
 # A cursor from the old unfiltered bridge has no trustworthy server identity.
 # It is not silently blessed or sent back to the API.

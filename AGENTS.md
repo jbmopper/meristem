@@ -157,6 +157,11 @@ A projection writer turns appended events into derived rows. It is the *only* co
   scope-less tokens keep legacy broad access until rotated; any non-empty scope
   set is treated as policy-bearing and must fail closed on unknown or incomplete
   scopes.
+- A listener may read another token's assigned/addressed lane only with broad
+  `feed.read` or the exact `feed.listen_for:<token-uuid>` delegation. An
+  assigned-only listener remains bounded by its `work_items.tree:<uuid>` scope,
+  gains none of the target token's writes, and receives a distinct
+  filter-bound cursor for each watched identity.
 - Provider OAuth actors use one exact versioned authority marker plus its
   sealed scopes. Owner profiles may read the portfolio-wide provider-safe
   work-item/feed projections; delegated profiles remain tree-scoped. Tracker

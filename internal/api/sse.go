@@ -58,7 +58,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 	if !s.canReadFeed(w, r, actor) {
 		return
 	}
-	assigned, ok := requestedAssignedFeed(w, r, actor)
+	assignedRecipient, ok := requestedAssignedFeedRecipient(w, r, actor)
 	if !ok {
 		return
 	}
@@ -95,7 +95,7 @@ func (s *Server) handleFeedStream(w http.ResponseWriter, r *http.Request) {
 		projectionVersion = projection.Version
 		projectionForRead = &projection
 	}
-	readFilter, err := s.feedReadFilter(actor, projectionForRead, assigned, excludeActors)
+	readFilter, err := s.feedReadFilter(actor, projectionForRead, assignedRecipient, excludeActors)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
 		return
