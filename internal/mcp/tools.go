@@ -1306,7 +1306,7 @@ func (s *Server) toolApprovalsDecide() Tool {
 				return nil, err
 			}
 			if !access.ToolVisible(actor, "approvals.decide") {
-				return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot decide approvals"))
+				return nil, replayableToolErr(pureToolErr(fmt.Errorf("insufficient_scope: token cannot decide approvals")))
 			}
 			result, err := s.deps.Approvals.Decide(ctx, approvals.DecisionInput{
 				ApprovalID: id,
@@ -1353,7 +1353,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 				return nil, err
 			}
 			if strings.TrimSpace(args.Kind) == "" {
-				return nil, replayableToolErr(errors.New("workitems: event kind is required"))
+				return nil, replayableToolErr(pureToolErr(errors.New("workitems: event kind is required")))
 			}
 			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
 				return nil, err
@@ -1361,7 +1361,7 @@ func (s *Server) toolWorkItemsAppendEvent() Tool {
 			var payload any
 			if len(args.Payload) > 0 {
 				if err := json.Unmarshal(args.Payload, &payload); err != nil {
-					return nil, replayableToolErr(fmt.Errorf("payload: %w", err))
+					return nil, replayableToolErr(pureToolErr(fmt.Errorf("payload: %w", err)))
 				}
 			}
 			if err := s.deps.WorkItems.AppendEvent(ctx, id, args.Kind, payload, actor); err != nil {
@@ -1586,7 +1586,8 @@ func (s *Server) canCreateWorkItem(ctx context.Context, actor domain.Token) erro
 	}
 	if err := s.deps.Access.CanCreateWorkItem(ctx, actor); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return replayableToolErr(fmt.Errorf("insufficient_scope: token cannot create top-level work_items"))
+			// Pre-dispatch access refusal: nothing committed.
+			return replayableToolErr(pureToolErr(fmt.Errorf("insufficient_scope: token cannot create top-level work_items")))
 		}
 		return err
 	}
@@ -1602,7 +1603,9 @@ func (s *Server) canWriteWorkItem(ctx context.Context, actor domain.Token, id uu
 	}
 	if err := s.deps.Access.CanWriteWorkItem(ctx, actor, id); err != nil {
 		if errors.Is(err, access.ErrDenied) {
-			return replayableToolErr(fmt.Errorf("work item %s not found", id))
+			// Pre-dispatch access refusal: nothing committed, so it keeps
+			// not-found identity for the pure-refusal classification.
+			return replayableToolErr(notFoundToolError{msg: fmt.Sprintf("work item %s not found", id)})
 		}
 		return err
 	}
@@ -1618,10 +1621,12 @@ func workItemToolErr(err error, notFound error) error {
 	}
 	switch {
 	case errors.Is(err, workitems.ErrNotFound):
+		// The rewritten message must keep identifying as ErrNotFound so the
+		// idempotency layer classifies it as a pure (key-preserving) refusal.
 		if notFound != nil {
-			return replayableToolErr(notFound)
+			return replayableToolErr(notFoundToolError{msg: notFound.Error()})
 		}
-		return replayableToolErr(fmt.Errorf("work_item_not_found: work item not found"))
+		return replayableToolErr(notFoundToolError{msg: "work_item_not_found: work item not found"})
 	case errors.Is(err, workitems.ErrInvalidRequest),
 		errors.Is(err, workitems.ErrInvalidState),
 		errors.Is(err, workitems.ErrInvalidTransition),
@@ -1874,7 +1879,8 @@ func decodeArgs(raw json.RawMessage, out any) error {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
-		return fmt.Errorf("invalid arguments: %w", err)
+		// Argument decoding precedes every dispatch: a pure refusal.
+		return pureToolErr(fmt.Errorf("invalid arguments: %w", err))
 	}
 	return nil
 }
@@ -1882,14 +1888,19 @@ func decodeArgs(raw json.RawMessage, out any) error {
 func parseUUID(raw, field string) (uuid.UUID, error) {
 	id, err := uuid.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("%s must be a valid uuid", field)
+		// Identity parsing precedes every dispatch: a pure refusal.
+		return uuid.Nil, pureToolErr(fmt.Errorf("%s must be a valid uuid", field))
 	}
 	return id, nil
 }
 
+// The argument validators below run strictly before any service dispatch, so
+// their refusals are provably side-effect-free: they carry the pure marker and
+// leave the caller's idempotency key unconsumed for a corrected retry.
+
 func validateWorkItemCreateArgs(title, state string, checks []string, humanReview string) error {
 	if strings.TrimSpace(title) == "" {
-		return replayableToolErr(errors.New("workitems: title is required"))
+		return replayableToolErr(pureToolErr(errors.New("workitems: title is required")))
 	}
 	if err := validateWorkItemStateArg(state); err != nil {
 		return err
@@ -1899,10 +1910,10 @@ func validateWorkItemCreateArgs(title, state string, checks []string, humanRevie
 
 func validateWorkItemLaunchArgs(patienceBudgetSeconds int, escalationRule string) error {
 	if patienceBudgetSeconds < 0 {
-		return replayableToolErr(errors.New("workitems: patience_budget_seconds must be >= 0"))
+		return replayableToolErr(pureToolErr(errors.New("workitems: patience_budget_seconds must be >= 0")))
 	}
 	if escalationRule != "" && !domain.EscalationRule(escalationRule).Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid escalation_rule %q", escalationRule))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid escalation_rule %q", escalationRule)))
 	}
 	return nil
 }
@@ -1910,11 +1921,11 @@ func validateWorkItemLaunchArgs(patienceBudgetSeconds int, escalationRule string
 func validateWorkItemMetadataArgs(checks []string, humanReview string) error {
 	for i, check := range checks {
 		if strings.TrimSpace(check) == "" {
-			return replayableToolErr(fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i))
+			return replayableToolErr(pureToolErr(fmt.Errorf("workitems: suggested_convergence_checks[%d] is blank", i)))
 		}
 	}
 	if humanReview != "" && !domain.HumanReviewStatus(humanReview).Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid human_review_status %q", humanReview))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid human_review_status %q", humanReview)))
 	}
 	return nil
 }
@@ -1925,7 +1936,7 @@ func validateWorkItemStateArg(state string) error {
 	}
 	parsed := domain.WorkItemState(state)
 	if !parsed.Valid() {
-		return replayableToolErr(fmt.Errorf("workitems: invalid state %q", parsed))
+		return replayableToolErr(pureToolErr(fmt.Errorf("workitems: invalid state %q", parsed)))
 	}
 	return nil
 }

@@ -68,8 +68,11 @@ func NewMiddlewareWithGuard(pool *pgxpool.Pool, writer *events.Writer, guard fun
 
 // ExecuteInput describes one non-HTTP mutation guarded by the same durable
 // idempotency store as POST middleware. Run must return a JSON response body
-// for successful execution; semantic tool/API errors that should be replayed
-// should be encoded in that body and returned with a nil error.
+// for successful execution. Semantic tool/API refusals should be encoded in
+// that body with a 4xx status and a nil error; a refusal that provably
+// committed nothing may additionally call MarkRefusalUnconsumed on the run
+// context to leave the key usable by a corrected retry, while unmarked
+// refusals are recorded and replayed like committed conclusions.
 type ExecuteInput struct {
 	Token       domain.Token
 	Scope       string
@@ -147,6 +150,7 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	}
 
 	override := &recordedResponseOverride{}
+	disposition := &refusalDisposition{}
 	callCtx := withRequest(ctx, Request{
 		TokenID:     in.Token.ID,
 		Scope:       in.Scope,
@@ -154,6 +158,7 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 		RequestHash: in.RequestHash,
 	})
 	callCtx = withRecordedResponseOverride(callCtx, override)
+	callCtx = withRefusalDisposition(callCtx, disposition)
 	status, body, err := in.Run(callCtx)
 	if err != nil {
 		return ExecuteResult{}, err
@@ -161,12 +166,42 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	if status == 0 {
 		status = http.StatusOK
 	}
-	if status >= http.StatusBadRequest && m.guardBlocked() {
-		return ExecuteResult{}, m.requireGuard()
-	}
-	// Mirror Wrap: a 5xx is an incomplete attempt, not a conclusion, and
-	// must not be pinned under the key for the cache TTL.
+	// Mirror Wrap: a 5xx is an incomplete attempt, never pinned. For 4xx the
+	// cache disposition is explicit, not status-derived: a handler that
+	// committed nothing marks its refusal unconsumed, leaving the key usable
+	// with a corrected body; every other 4xx is conservatively recorded like
+	// a conclusion, because stateful refusals append authoritative events
+	// before returning and MUST replay (and conflict on a changed body)
+	// rather than re-execute.
 	if status >= http.StatusInternalServerError {
+		return ExecuteResult{Status: status, Body: body}, nil
+	}
+	if status >= http.StatusBadRequest && refusalUnconsumed(callCtx) {
+		// Pure refusal: nothing committed, nothing to complete — the pin
+		// advancing only means the stale process must not answer.
+		if m.guardBlocked() {
+			return ExecuteResult{}, m.requireGuard()
+		}
+		return ExecuteResult{Status: status, Body: body}, nil
+	}
+	if status >= http.StatusBadRequest {
+		// Unmarked refusal: the handler may have committed authoritative
+		// events while admitted/current. Its idempotency record is the
+		// COMPLETION of that admitted mutation, so it must be durably
+		// written even if the pin advanced after the commit — dropping it
+		// would let the same key admit a second authoritative action after
+		// cutover (IDEM-B4). The admission fence is scoped to exactly this
+		// record append; the stale process still refuses outward below.
+		if _, err := m.recordAdmitted(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, body); err != nil {
+			return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
+		}
+		if m.guardBlocked() {
+			return ExecuteResult{}, m.requireGuard()
+		}
+		cached, err = m.lookup(callCtx, in.Token.ID, in.Scope, in.Key, in.RequestHash)
+		if err == nil && cached.found {
+			return ExecuteResult{Status: cached.status, Body: cached.body}, nil
+		}
 		return ExecuteResult{Status: status, Body: body}, nil
 	}
 	recordBody := body
@@ -177,15 +212,13 @@ func (m *Middleware) Execute(ctx context.Context, in ExecuteInput) (ExecuteResul
 	}
 	fresh, err := m.record(callCtx, in.Token, in.Scope, in.Key, in.RequestHash, status, recordBody)
 	if err != nil {
-		// The handler was admitted only after a current-build check. If the pin
-		// advances after its domain transaction commits, do not strand the
-		// admitted response merely because the follow-on cache event is now
-		// blocked. The retry remains safe under the domain idempotency identity.
-		if status < http.StatusBadRequest && m.guardBlocked() {
-			return ExecuteResult{Status: status, Body: body}, nil
-		}
+		// The handler was admitted only after a current-build check. If the
+		// pin advances after its domain transaction commits, do not strand
+		// the admitted response merely because the follow-on cache event is
+		// now blocked. The retry remains safe under the domain idempotency
+		// identity: re-execution converges on the same event rows.
 		if m.guardBlocked() {
-			return ExecuteResult{}, m.requireGuard()
+			return ExecuteResult{Status: status, Body: body}, nil
 		}
 		return ExecuteResult{}, fmt.Errorf("idempotency record failed: %w", err)
 	}
@@ -296,6 +329,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		rec := newRecorder()
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		override := &recordedResponseOverride{}
+		disposition := &refusalDisposition{}
 		ctx := withRequest(r.Context(), Request{
 			TokenID:     tok.ID,
 			Scope:       scope,
@@ -303,6 +337,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			RequestHash: reqHash,
 		})
 		ctx = withRecordedResponseOverride(ctx, override)
+		ctx = withRefusalDisposition(ctx, disposition)
 		r = r.WithContext(ctx)
 		next.ServeHTTP(rec, r)
 		if rec.overflow {
@@ -313,17 +348,49 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 				"response exceeds the deterministic API buffering limit")
 			return
 		}
-		if rec.status >= http.StatusBadRequest && m.writeGuardError(w) {
+		// 5xx responses are never recorded: the attempt did not complete
+		// and a well-behaved same-key retry must re-execute. For 4xx the
+		// cache disposition is explicit, not status-derived: a handler
+		// that committed nothing marks its refusal unconsumed (validation,
+		// not-found), which keeps the key usable with a corrected body.
+		// Every unmarked 4xx is conservatively recorded like a conclusion:
+		// stateful refusals (xylem/signal budget exhaustion) append
+		// authoritative events before returning 409 and MUST replay — and
+		// conflict on a changed body — rather than re-execute and append
+		// again under one key.
+		if rec.status >= http.StatusInternalServerError ||
+			(rec.status >= http.StatusBadRequest && refusalUnconsumed(r.Context())) {
+			if m.writeGuardError(w) {
+				return
+			}
+			copyHeader(w.Header(), rec.header)
+			w.WriteHeader(rec.status)
+			_, _ = w.Write(rec.body.Bytes())
 			return
 		}
-
-		// 5xx responses are never recorded: they mean "the attempt did
-		// not complete", and pinning one under the key would make every
-		// well-behaved retry (same key, same body) replay the failure
-		// for the cache TTL instead of re-executing. The client's
-		// contract — retry with the same key until a non-5xx answer —
-		// only works if the cache stores conclusions, not accidents.
-		if rec.status >= http.StatusInternalServerError {
+		if rec.status >= http.StatusBadRequest {
+			// Unmarked refusal: the handler may have committed authoritative
+			// events while admitted/current. Its idempotency record is the
+			// COMPLETION of that admitted mutation and must be durably
+			// written even if the pin advanced after the commit — dropping
+			// it would let the same key admit a second authoritative action
+			// after cutover (IDEM-B4). The admission fence covers exactly
+			// this record append; a stale process still refuses outward
+			// after the record is durable.
+			if _, err := m.recordAdmitted(r.Context(), tok, scope, key, reqHash, rec.status, rec.body.Bytes()); err != nil {
+				writeError(w, http.StatusInternalServerError, "idempotency_record_failed", "could not record idempotency key")
+				return
+			}
+			if m.writeGuardError(w) {
+				return
+			}
+			cached, err = m.lookup(r.Context(), tok.ID, scope, key, reqHash)
+			if err == nil && cached.found {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(cached.status)
+				_, _ = w.Write(cached.body)
+				return
+			}
 			copyHeader(w.Header(), rec.header)
 			w.WriteHeader(rec.status)
 			_, _ = w.Write(rec.body.Bytes())
@@ -340,7 +407,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			// its first response if the pin advances after the domain commit. This
 			// is load-bearing for one-time credentials such as subactor token
 			// secrets: discarding the response would leave an active unusable token.
-			if rec.status < http.StatusBadRequest && m.guardBlocked() {
+			if m.guardBlocked() {
 				copyHeader(w.Header(), rec.header)
 				w.WriteHeader(rec.status)
 				_, _ = w.Write(rec.body.Bytes())
@@ -562,7 +629,19 @@ func (m *Middleware) lookup(ctx context.Context, tokenID uuid.UUID, scope, key s
 // the canonical cached bytes (belt-and-suspenders for lock-key
 // collision, out-of-band writers, or session-lock loss across a
 // connection bounce).
+// recordAdmitted persists the idempotency record of an already-admitted
+// stateful conclusion through the writer's enforced admitted-record path, so
+// the record survives a reviewed-pin advance that happened after the
+// handler's commit. Only the unmarked-4xx completion paths call this.
+func (m *Middleware) recordAdmitted(ctx context.Context, tok domain.Token, scope, key string, reqHash []byte, status int, body []byte) (bool, error) {
+	return m.recordWith(ctx, tok, scope, key, reqHash, status, body, m.writer.AppendAdmittedIdempotencyRecord)
+}
+
 func (m *Middleware) record(ctx context.Context, tok domain.Token, scope, key string, reqHash []byte, status int, body []byte) (bool, error) {
+	return m.recordWith(ctx, tok, scope, key, reqHash, status, body, m.writer.Append)
+}
+
+func (m *Middleware) recordWith(ctx context.Context, tok domain.Token, scope, key string, reqHash []byte, status int, body []byte, appendFn func(context.Context, pgx.Tx, events.Spec) (uuid.UUID, bool, error)) (bool, error) {
 	var decoded any
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
@@ -575,7 +654,7 @@ func (m *Middleware) record(ctx context.Context, tok domain.Token, scope, key st
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	_, fresh, err := m.writer.Append(ctx, tx, events.Spec{
+	_, fresh, err := appendFn(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectIdempotencyKey,
 		SubjectID:    subjectID,
 		Kind:         domain.EventIdempotencyRecorded,
