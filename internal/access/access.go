@@ -33,10 +33,14 @@ const (
 	ScopeWorkItemsCreate          = "work_items.create"
 	ScopeFeedRead                 = "feed.read"
 	ScopeFeedReadAssigned         = "feed.read_assigned"
-	ScopeInboxCapture             = "inbox.capture"
-	ScopePolicyProfileSwitch      = "policy_profile.switch"
-	ScopeRegistryWrite            = "registry.write"
-	ScopeApprovalsDecide          = "approvals.decide"
+	// feed.listen_for:<token-id> lets an assigned-only reader consume the
+	// assigned/addressed lane of one other token without inheriting that
+	// token's write authority. The ordinary tree scope still bounds content.
+	scopeFeedListenForPrefix = "feed.listen_for:"
+	ScopeInboxCapture        = "inbox.capture"
+	ScopePolicyProfileSwitch = "policy_profile.switch"
+	ScopeRegistryWrite       = "registry.write"
+	ScopeApprovalsDecide     = "approvals.decide"
 	// OAuth-client administration is deliberately separate from token
 	// administration. The root credential only mints and revokes tokens; a
 	// scoped, non-root human client reviews provider metadata and binds or
@@ -159,6 +163,32 @@ func CanReadAssignedFeed(actor domain.Token) bool {
 	}
 	scopes := scopeSet(actor.Scopes)
 	return scopes[ScopeFeedRead] || (scopes[ScopeFeedReadAssigned] && hasWorkItemTreeScope(actor))
+}
+
+// FeedListenForScope returns the exact delegated-lane scope for target.
+// It is intentionally token-id based for the first routing slice; a future
+// stable-principal projection can become another reducer without changing the
+// feed predicate or granting the listener the target's mutation authority.
+func FeedListenForScope(target uuid.UUID) string {
+	return scopeFeedListenForPrefix + target.String()
+}
+
+// CanReadAssignedFeedFor authorizes which identity supplies the
+// assigned/addressed predicate. Reading another identity's lane is narrowing
+// for a broad feed reader. An assigned-only reader needs an exact delegated
+// lane scope in addition to its existing feed and tree authority.
+func CanReadAssignedFeedFor(actor domain.Token, target uuid.UUID) bool {
+	if target == uuid.Nil || !CanReadAssignedFeed(actor) {
+		return false
+	}
+	if target == actor.ID {
+		return true
+	}
+	if actor.IsRoot || legacyUnscoped(actor) {
+		return true
+	}
+	scopes := scopeSet(actor.Scopes)
+	return scopes[ScopeFeedRead] || scopes[FeedListenForScope(target)]
 }
 
 // RequiresAssignedFeed reports whether the assigned/addressed preset is the

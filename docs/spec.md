@@ -277,7 +277,8 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
   `work_items.write_all`, `work_items.tracker_write`,
   `work_items.tracker_write_all`, `work_items.create`,
   `work_items.tree:<uuid>`), feed
-  scopes (`feed.read`, `feed.read_assigned`), owner posture scopes such as
+  scopes (`feed.read`, `feed.read_assigned`, `feed.listen_for:<token-uuid>`),
+  owner posture scopes such as
   `policy_profile.switch`, registry write scope `registry.write`, log scopes,
   `oauth_clients.bind`, `oauth_clients.revoke`, and `approvals.decide`.
   OAuth-client administration requires an explicitly scoped non-root human;
@@ -294,6 +295,12 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
   services. Denied writes append no events. Scope-less legacy tokens retain
   broad v0 access until explicitly rotated; any non-empty scope set is
   policy-bearing and fails closed on unknown or incomplete scopes.
+  A listener may read another token's assigned/addressed lane only when it
+  already has broad `feed.read`, or when its assigned-only credential carries
+  the exact `feed.listen_for:<token-uuid>` delegation. The latter remains
+  bounded by `work_items.tree:<uuid>` and never grants the target token's
+  mutation authority. The authenticated listener remains the attributed
+  reader; changing the watched lane changes the cursor's filter identity.
 - Provider OAuth actors carry exactly one versioned `provider.profile:*`
   marker plus its sealed Meristem scope set. Their coarse OAuth scope is
   `mcp:read` or `mcp:read mcp:tracker_write`. Dynamic registration records an

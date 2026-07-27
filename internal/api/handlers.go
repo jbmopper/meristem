@@ -196,7 +196,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cursor := q.Get("cursor")
 	waitStr := q.Get("wait")
-	assigned, ok := requestedAssignedFeed(w, r, actor)
+	assignedRecipient, ok := requestedAssignedFeedRecipient(w, r, actor)
 	if !ok {
 		return
 	}
@@ -218,7 +218,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		projection = &item
 	}
-	readFilter, err := s.feedReadFilter(actor, projection, assigned, excludeActors)
+	readFilter, err := s.feedReadFilter(actor, projection, assignedRecipient, excludeActors)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
 		return
@@ -226,7 +226,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 
 	if cursor == "" && waitStr == "" {
 		var items []feed.Item
-		if !assigned && projection == nil && len(excludeActors) == 0 {
+		if assignedRecipient == uuid.Nil && projection == nil && len(excludeActors) == 0 {
 			// Preserve the legacy snapshot's byte-for-byte ordering for full
 			// readers. Assigned-only actors can never reach this branch.
 			items, err = s.feed.List(r.Context(), limit)
@@ -335,24 +335,53 @@ func projectionFilterForFeed(p *projectiondefs.Projection) *feed.ProjectionFilte
 	return &p.Filter
 }
 
-func requestedAssignedFeed(w http.ResponseWriter, r *http.Request, actor domain.Token) (bool, bool) {
+// requestedAssignedFeedRecipient returns the token identity whose
+// assigned/addressed lane should be reduced. uuid.Nil selects the broad feed.
+// listen_for implies scope=assigned and never changes request attribution:
+// the authenticated listener remains the reader and gains no target writes.
+func requestedAssignedFeedRecipient(w http.ResponseWriter, r *http.Request, actor domain.Token) (uuid.UUID, bool) {
 	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
 	switch scope {
 	case "":
-		if access.RequiresAssignedFeed(actor) {
-			return true, true
-		}
-		return false, true
 	case "assigned":
-		if !access.CanReadAssignedFeed(actor) {
-			writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read assigned feed")
-			return false, false
-		}
-		return true, true
 	default:
 		writeAPIError(w, http.StatusBadRequest, "invalid_feed_scope", "scope must be assigned when present")
-		return false, false
+		return uuid.Nil, false
 	}
+
+	listenForValues, present := r.URL.Query()["listen_for"]
+	if len(listenForValues) > 1 {
+		writeAPIError(w, http.StatusBadRequest, "invalid_listen_for", "listen_for must appear at most once")
+		return uuid.Nil, false
+	}
+	var target uuid.UUID
+	if present {
+		raw := strings.TrimSpace(listenForValues[0])
+		if raw == "self" {
+			target = actor.ID
+		} else {
+			id, err := uuid.Parse(raw)
+			if err != nil || id == uuid.Nil {
+				writeAPIError(w, http.StatusBadRequest, "invalid_listen_for", "listen_for must be self or a token id")
+				return uuid.Nil, false
+			}
+			target = id
+		}
+		if !access.CanReadAssignedFeedFor(actor, target) {
+			writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot listen for the requested feed identity")
+			return uuid.Nil, false
+		}
+		return target, true
+	}
+
+	if scope == "assigned" || access.RequiresAssignedFeed(actor) {
+		if !access.CanReadAssignedFeedFor(actor, actor.ID) {
+			writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read assigned feed")
+			return uuid.Nil, false
+		}
+		return actor.ID, true
+	}
+	return uuid.Nil, true
 }
 
 // requestedActorExclusions parses the repeatable exclude_actor query param
@@ -377,12 +406,12 @@ func requestedActorExclusions(w http.ResponseWriter, r *http.Request, actor doma
 	return excluded, true
 }
 
-func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.Projection, assigned bool, excludeActors []uuid.UUID) (feed.ReadFilter, error) {
+func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.Projection, assignedRecipient uuid.UUID, excludeActors []uuid.UUID) (feed.ReadFilter, error) {
 	filter := feed.ReadFilter{Projection: projectionFilterForFeed(projection)}
-	if assigned {
+	if assignedRecipient != uuid.Nil {
 		filter.Predicates = append(filter.Predicates, feed.Predicate{
 			Kind:    feed.PredicateAssignedOrAddressed,
-			TokenID: actor.ID,
+			TokenID: assignedRecipient,
 		})
 	}
 	for _, id := range excludeActors {

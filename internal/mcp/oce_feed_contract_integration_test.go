@@ -170,6 +170,50 @@ func TestMCPFeedReadAssignedLaneParityIntegration(t *testing.T) {
 	}
 }
 
+func TestMCPFeedReadListenForParityIntegration(t *testing.T) {
+	fixture := newOCEFixture(t)
+	fixture.note(t, fixture.itemA, "oce-listen-a-hidden", fixture.root.Token)
+	fixture.note(t, fixture.itemB, "oce-listen-b-visible", fixture.root.Token)
+	target := fixture.actorB.Token.ID.String()
+
+	sBroad := fixture.server(t, fixture.broad.Secret)
+	isErr, text := feedReadForTest(t, sBroad, map[string]any{
+		"limit": 100, "listen_for": target,
+	})
+	if isErr || !strings.Contains(text, "oce-listen-b-visible") || strings.Contains(text, "oce-listen-a-hidden") {
+		t.Fatalf("broad listen_for lane broken: err=%t %s", isErr, text)
+	}
+
+	delegated, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{
+		Name: "oce-listen-delegated", Source: domain.SourceAgent,
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeFeedReadAssigned,
+			access.WorkItemTreeScope(fixture.tree.ID),
+			access.FeedListenForScope(fixture.actorB.Token.ID),
+		},
+		Actor: &fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create delegated listener: %v", err)
+	}
+	sDelegated := fixture.server(t, delegated.Secret)
+	isErr, text = feedReadForTest(t, sDelegated, map[string]any{
+		"limit": 100, "scope": "assigned", "listen_for": target,
+	})
+	if isErr || !strings.Contains(text, "oce-listen-b-visible") || strings.Contains(text, "oce-listen-a-hidden") {
+		t.Fatalf("delegated listen_for lane broken: err=%t %s", isErr, text)
+	}
+
+	sDenied := fixture.server(t, fixture.actorA.Secret)
+	if isErr, text = feedReadForTest(t, sDenied, map[string]any{"listen_for": target}); !isErr || !strings.Contains(text, "insufficient_scope") {
+		t.Fatalf("undelegated listen_for was not denied: err=%t %s", isErr, text)
+	}
+	if isErr, text = feedReadForTest(t, sBroad, map[string]any{"listen_for": "not-a-uuid"}); !isErr || !strings.Contains(text, "invalid_listen_for") {
+		t.Fatalf("malformed listen_for was not rejected: err=%t %s", isErr, text)
+	}
+}
+
 func TestMCPFeedReadExcludeActorParityIntegration(t *testing.T) {
 	fixture := newOCEFixture(t)
 	fixture.note(t, fixture.itemA, "oce-by-alpha", fixture.actorA.Token)

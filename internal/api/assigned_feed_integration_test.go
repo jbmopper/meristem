@@ -87,6 +87,101 @@ func TestAssignedFeedSnapshotAndAccessIntegration(t *testing.T) {
 	assertErrorCode(t, rec, "invalid_feed_scope")
 }
 
+func TestAssignedFeedListenForDelegatedLaneIntegration(t *testing.T) {
+	fixture := newAssignedFeedFixture(t)
+
+	appendAssignedFeedNote(t, fixture, fixture.assignedA.ID, "listen-for-a-hidden", uuid.Nil)
+	appendAssignedFeedNote(t, fixture, fixture.assignedB.ID, "listen-for-b-assigned", uuid.Nil)
+	appendAssignedFeedNote(t, fixture, fixture.addressed.ID, "listen-for-b-addressed", fixture.actorB.Token.ID)
+	appendAssignedFeedNote(t, fixture, fixture.outside.ID, "listen-for-b-outside", fixture.actorB.Token.ID)
+
+	broad, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{
+		Name: "listen-for-broad", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeFeedRead}, Actor: &fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create broad listener: %v", err)
+	}
+	target := fixture.actorB.Token.ID.String()
+	rec := doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?limit=100&listen_for="+target, broad.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	for _, visible := range []string{"listen-for-b-assigned", "listen-for-b-addressed", "listen-for-b-outside"} {
+		if !strings.Contains(rec.Body.String(), visible) {
+			t.Errorf("broad target lane omitted %q: %s", visible, rec.Body.String())
+		}
+	}
+	if strings.Contains(rec.Body.String(), "listen-for-a-hidden") {
+		t.Errorf("target lane leaked another assignee: %s", rec.Body.String())
+	}
+
+	delegated, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{
+		Name: "listen-for-delegated", Source: domain.SourceAgent,
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeFeedReadAssigned,
+			access.WorkItemTreeScope(fixture.tree.ID),
+			access.FeedListenForScope(fixture.actorB.Token.ID),
+		},
+		Actor: &fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create delegated listener: %v", err)
+	}
+	rec = doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?scope=assigned&listen_for="+target+"&limit=100", delegated.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	for _, visible := range []string{"listen-for-b-assigned", "listen-for-b-addressed"} {
+		if !strings.Contains(rec.Body.String(), visible) {
+			t.Errorf("delegated target lane omitted %q: %s", visible, rec.Body.String())
+		}
+	}
+	for _, hidden := range []string{"listen-for-a-hidden", "listen-for-b-outside"} {
+		if strings.Contains(rec.Body.String(), hidden) {
+			t.Errorf("delegated target lane leaked %q: %s", hidden, rec.Body.String())
+		}
+	}
+
+	denied, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{
+		Name: "listen-for-denied", Source: domain.SourceAgent,
+		Scopes: []string{
+			access.ScopeWorkItemsRead,
+			access.ScopeFeedReadAssigned,
+			access.WorkItemTreeScope(fixture.tree.ID),
+		},
+		Actor: &fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create denied listener: %v", err)
+	}
+	rec = doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?listen_for="+target, denied.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusForbidden)
+	assertErrorCode(t, rec, "insufficient_scope")
+
+	for _, malformed := range []string{"", "not-a-uuid", "00000000-0000-0000-0000-000000000000"} {
+		rec = doREST(t, fixture.server.Handler(), http.MethodGet,
+			"/v1/feed?listen_for="+malformed, broad.Secret, "", nil)
+		assertRESTStatus(t, rec, http.StatusBadRequest)
+		assertErrorCode(t, rec, "invalid_listen_for")
+	}
+
+	cursorRec := doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?wait=0s&listen_for="+target, broad.Secret, "", nil)
+	assertRESTStatus(t, cursorRec, http.StatusOK)
+	var page struct {
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(cursorRec.Body.Bytes(), &page); err != nil || page.NextCursor == "" {
+		t.Fatalf("decode target cursor: err=%v body=%s", err, cursorRec.Body.String())
+	}
+	rec = doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?wait=0s&cursor="+page.NextCursor+"&listen_for="+fixture.actorA.Token.ID.String(),
+		broad.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusBadRequest)
+	assertErrorCode(t, rec, "cursor_filter_mismatch")
+}
+
 func TestAssignedFeedLongPollIgnoresReducedTrafficIntegration(t *testing.T) {
 	fixture := newAssignedFeedFixture(t)
 	cursor := fetchHeadCursor(t, fixture.server.Handler(), fixture.actorA.Secret)

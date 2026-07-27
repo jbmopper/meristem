@@ -14,6 +14,7 @@ API="${MERISTEM_API:-http://127.0.0.1:8080}"
 TOKEN_FILE="${MERISTEM_TOKEN_FILE:-}"
 THREAD_ID="${CODEX_THREAD_ID:-}"
 WAKE_ACTORS="${MERISTEM_WAKE_ACTOR_TOKEN_IDS:-}"
+LISTEN_FOR_TOKEN_ID="${MERISTEM_FEED_LISTEN_FOR_TOKEN_ID:-}"
 CODEX_BIN="${CODEX_BIN:-$(command -v codex 2>/dev/null || true)}"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 2>/dev/null || true)}"
 DURABILITY_PYTHON_BIN="${MERISTEM_DURABILITY_PYTHON_BIN:-/usr/bin/python3}"
@@ -65,6 +66,7 @@ FILTER_IDENTITY_RETRYABLE=1
 FILTER_IDENTITY_DISPROVED=2
 FEED_FILTER_QUERY="scope=assigned&exclude_actor=self"
 FEED_FILTER_IDENTITY="assigned-exclude-self-v1"
+FEED_IDENTITY_PROBE_QUERY=""
 
 lane_block_status() {
   local first="" second="" extra="" mode="" size=""
@@ -120,6 +122,16 @@ die() {
 [[ -f "$TOKEN_FILE" ]] || die "token file does not exist: $TOKEN_FILE"
 [[ -n "$THREAD_ID" ]] || die "CODEX_THREAD_ID is required"
 [[ -n "$WAKE_ACTORS" ]] || die "MERISTEM_WAKE_ACTOR_TOKEN_IDS is required"
+if [[ -n "$LISTEN_FOR_TOKEN_ID" ]]; then
+  [[ "$LISTEN_FOR_TOKEN_ID" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] ||
+    die "MERISTEM_FEED_LISTEN_FOR_TOKEN_ID must be a token UUID"
+  FEED_FILTER_QUERY="scope=assigned&listen_for=${LISTEN_FOR_TOKEN_ID}&exclude_actor=self"
+  FEED_FILTER_IDENTITY="assigned-listen-for-${LISTEN_FOR_TOKEN_ID}-exclude-self-v1"
+  # A target-aware cursor must fail under the otherwise-identical self lane.
+  # This extra probe prevents an older server that ignores listen_for from
+  # being mistaken for one that enforced the requested routing identity.
+  FEED_IDENTITY_PROBE_QUERY="scope=assigned&exclude_actor=self"
+fi
 [[ -x "$CODEX_BIN" ]] || die "codex executable not found"
 [[ -x "$PYTHON_BIN" ]] || die "python executable not found"
 [[ -x "$DURABILITY_PYTHON_BIN" ]] || die "durability python executable not found"
@@ -432,33 +444,48 @@ mark_cursor_initialized() {
 }
 
 verify_server_filter_identity() {
-  local token="$1" cursor="$2" probe_url probe_response="" probe_body="" probe_status="" error_code="" curl_rc=0
+  local token="$1" cursor="$2" probe_query probe_url probe_response="" probe_body="" probe_status="" error_code="" curl_rc=0
+  local -a probe_queries=("")
+  if [[ -n "$FEED_IDENTITY_PROBE_QUERY" ]]; then
+    probe_queries+=("$FEED_IDENTITY_PROBE_QUERY")
+  fi
 
-  probe_url="${API%/}/v1/feed?wait=0s&limit=1&cursor=$cursor"
-  probe_response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | \
-    "$CURL_BIN" -q --noproxy '*' --proto '=http' --proto-redir '=http' --max-redirs 0 \
-      --config - --silent --show-error --output - --write-out $'\n%{http_code}' \
-      "$probe_url" 2>/dev/null)" || curl_rc=$?
-  if [[ "$curl_rc" != "0" || "$probe_response" != *$'\n'* ]]; then
-    unset probe_response probe_body token
-    return "$FILTER_IDENTITY_RETRYABLE"
-  fi
-  probe_status="${probe_response##*$'\n'}"
-  probe_body="${probe_response%$'\n'*}"
-  if [[ ! "$probe_status" =~ ^[0-9][0-9][0-9]$ ]]; then
-    unset probe_response probe_body token
-    return "$FILTER_IDENTITY_RETRYABLE"
-  fi
-  error_code="$(printf '%s' "$probe_body" | "$JQ_BIN" -r '.error.code // ""' 2>/dev/null || true)"
-  unset probe_response probe_body token
-  if [[ "$probe_status" == "400" && "$error_code" == "cursor_filter_mismatch" ]]; then
-    return 0
-  fi
-  if [[ "$probe_status" =~ ^5[0-9][0-9]$ || "$probe_status" == "408" ||
-        "$probe_status" == "425" || "$probe_status" == "429" ]]; then
-    return "$FILTER_IDENTITY_RETRYABLE"
-  fi
-  return "$FILTER_IDENTITY_DISPROVED"
+  for probe_query in "${probe_queries[@]}"; do
+    probe_url="${API%/}/v1/feed?wait=0s&limit=1&cursor=$cursor"
+    if [[ -n "$probe_query" ]]; then
+      probe_url="${probe_url}&${probe_query}"
+    fi
+    probe_response=""
+    curl_rc=0
+    probe_response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | \
+      "$CURL_BIN" -q --noproxy '*' --proto '=http' --proto-redir '=http' --max-redirs 0 \
+        --config - --silent --show-error --output - --write-out $'\n%{http_code}' \
+        "$probe_url" 2>/dev/null)" || curl_rc=$?
+    if [[ "$curl_rc" != "0" || "$probe_response" != *$'\n'* ]]; then
+      unset probe_response probe_body token
+      return "$FILTER_IDENTITY_RETRYABLE"
+    fi
+    probe_status="${probe_response##*$'\n'}"
+    probe_body="${probe_response%$'\n'*}"
+    if [[ ! "$probe_status" =~ ^[0-9][0-9][0-9]$ ]]; then
+      unset probe_response probe_body token
+      return "$FILTER_IDENTITY_RETRYABLE"
+    fi
+    error_code="$(printf '%s' "$probe_body" | "$JQ_BIN" -r '.error.code // ""' 2>/dev/null || true)"
+    unset probe_response probe_body
+    if [[ "$probe_status" == "400" && "$error_code" == "cursor_filter_mismatch" ]]; then
+      continue
+    fi
+    if [[ "$probe_status" =~ ^5[0-9][0-9]$ || "$probe_status" == "408" ||
+          "$probe_status" == "425" || "$probe_status" == "429" ]]; then
+      unset token
+      return "$FILTER_IDENTITY_RETRYABLE"
+    fi
+    unset token
+    return "$FILTER_IDENTITY_DISPROVED"
+  done
+  unset token
+  return 0
 }
 
 block_lane() {

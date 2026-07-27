@@ -546,11 +546,15 @@ func (s *Server) toolFeedRead() Tool {
 				return nil, errors.New("feed service not configured")
 			}
 			var args struct {
-				Limit        int      `json:"limit"`
-				Projection   string   `json:"projection"`
-				Cursor       string   `json:"cursor"`
-				Wait         string   `json:"wait"`
-				Scope        string   `json:"scope"`
+				Limit      int    `json:"limit"`
+				Projection string `json:"projection"`
+				Cursor     string `json:"cursor"`
+				Wait       string `json:"wait"`
+				Scope      string `json:"scope"`
+				// Handler-compatible for REST parity, but deliberately absent
+				// from the frozen legacy tools/list schema. The modern
+				// subscription/listen surface will advertise routed listening.
+				ListenFor    string   `json:"listen_for"`
 				ExcludeActor []string `json:"exclude_actor"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
@@ -567,17 +571,33 @@ func (s *Server) toolFeedRead() Tool {
 				}
 				projection = &item
 			}
-			var assigned bool
+			var assignedRecipient uuid.UUID
 			switch args.Scope {
 			case "":
-				assigned = access.RequiresAssignedFeed(actor)
+				if access.RequiresAssignedFeed(actor) {
+					assignedRecipient = actor.ID
+				}
 			case "assigned":
-				if !access.CanReadAssignedFeed(actor) {
+				if !access.CanReadAssignedFeedFor(actor, actor.ID) {
 					return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot read assigned feed"))
 				}
-				assigned = true
+				assignedRecipient = actor.ID
 			default:
 				return nil, fmt.Errorf("feed.read: invalid_feed_scope: scope must be assigned when present")
+			}
+			if listenFor := strings.TrimSpace(args.ListenFor); listenFor != "" {
+				if listenFor == "self" {
+					assignedRecipient = actor.ID
+				} else {
+					id, err := uuid.Parse(listenFor)
+					if err != nil || id == uuid.Nil {
+						return nil, fmt.Errorf("feed.read: invalid_listen_for: listen_for must be self or a token id")
+					}
+					assignedRecipient = id
+				}
+				if !access.CanReadAssignedFeedFor(actor, assignedRecipient) {
+					return nil, replayableToolErr(fmt.Errorf("insufficient_scope: token cannot listen for the requested feed identity"))
+				}
 			}
 			excluded := make([]uuid.UUID, 0, len(args.ExcludeActor))
 			for _, value := range args.ExcludeActor {
@@ -596,10 +616,10 @@ func (s *Server) toolFeedRead() Tool {
 			// unauthorized or filtered traffic can neither satisfy a wait nor
 			// consume a limit. No post-hoc MCP-only filtering remains.
 			readFilter := feed.ReadFilter{Projection: projectionFilterForTool(projection)}
-			if assigned {
+			if assignedRecipient != uuid.Nil {
 				readFilter.Predicates = append(readFilter.Predicates, feed.Predicate{
 					Kind:    feed.PredicateAssignedOrAddressed,
-					TokenID: actor.ID,
+					TokenID: assignedRecipient,
 				})
 			}
 			for _, id := range excluded {
@@ -615,7 +635,7 @@ func (s *Server) toolFeedRead() Tool {
 			}
 			if args.Cursor == "" && args.Wait == "" {
 				var items []feed.Item
-				if !assigned && projection == nil && len(excluded) == 0 {
+				if assignedRecipient == uuid.Nil && projection == nil && len(excluded) == 0 {
 					// Preserve the legacy snapshot's byte-for-byte ordering for
 					// plain broad readers — the same compatibility branch REST
 					// keeps. The access reduction still applies, so scoped

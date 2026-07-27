@@ -149,6 +149,7 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 
 func TestAssignedFeedAuthorityAndDefaultNormalization(t *testing.T) {
 	rootID := uuid.New()
+	otherID := uuid.New()
 	assignedOnly := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{
 		ScopeFeedReadAssigned, scopeWorkItemsTreePrefix + rootID.String(),
 	}}
@@ -162,6 +163,25 @@ func TestAssignedFeedAuthorityAndDefaultNormalization(t *testing.T) {
 	incomplete := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{ScopeFeedReadAssigned}}
 	if CanReadAssignedFeed(incomplete) {
 		t.Fatal("feed.read_assigned without a work-item tree must fail closed")
+	}
+	if !CanReadAssignedFeedFor(assignedOnly, assignedOnly.ID) {
+		t.Fatal("assigned-only actor must be able to read its own lane")
+	}
+	if CanReadAssignedFeedFor(assignedOnly, otherID) {
+		t.Fatal("assigned-only actor read another lane without an exact delegation")
+	}
+	assignedOnly.Scopes = append(assignedOnly.Scopes, FeedListenForScope(otherID))
+	if !CanReadAssignedFeedFor(assignedOnly, otherID) {
+		t.Fatal("exact delegated lane scope did not authorize the target")
+	}
+	if CanReadAssignedFeedFor(assignedOnly, uuid.New()) {
+		t.Fatal("delegated lane scope authorized a different target")
+	}
+	if !CanReadAssignedFeedFor(full, otherID) {
+		t.Fatal("full feed reader could not request a narrower target lane")
+	}
+	if CanReadAssignedFeedFor(incomplete, otherID) {
+		t.Fatal("delegated target cannot repair incomplete base feed authority")
 	}
 }
 
