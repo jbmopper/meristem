@@ -105,6 +105,13 @@ allowlist (`handleListToolsFiltered`) and rejects any non-allowlisted
 local token is `stdio-visible-tools ∩ {the four provider-safe reads}` — never
 wider, regardless of how broad the token's scopes are.
 
+The shared dispatcher also treats a valid sealed `provider.profile:*` marker as
+transport-independent authority. A marked stdio actor receives the same profile
+allowlist and provider-safe response reducer as its HTTP counterpart; an
+unknown, inexact, root, or non-agent marked identity fails closed. The
+local-token comparison below concerns unmarked local credentials and is
+otherwise unchanged.
+
 ### Parity table (local agent token)
 
 Two representative local tokens:

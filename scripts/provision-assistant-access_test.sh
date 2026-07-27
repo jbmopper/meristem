@@ -120,13 +120,14 @@ else
   fail "session mode regenerates no wrappers"
 fi
 
-# 8. Full provisioning still generates wrappers honoring MERISTEM_TOKEN_FILE.
+# 8. Full provisioning keeps the interactive override and gives unattended
+# Codex tasks a distinct credential-path boundary.
 if run >/dev/null 2>&1 &&
    grep -q 'MERISTEM_TOKEN_FILE:-' "$tmp/tok/generated/claude-code-meristem-command.sh" &&
-   grep -q 'MERISTEM_TOKEN_FILE:-' "$tmp/tok/generated/codex-meristem-command.sh"; then
-  pass "generated wrappers honor MERISTEM_TOKEN_FILE with per-app fallback"
+   grep -q 'CODEX_MERISTEM_TOKEN_FILE:-.*MERISTEM_TOKEN_FILE:-' "$tmp/tok/generated/codex-meristem-command.sh"; then
+  pass "generated wrappers separate unattended Codex and interactive token paths"
 else
-  fail "generated wrappers honor MERISTEM_TOKEN_FILE with per-app fallback"
+  fail "generated wrappers separate unattended Codex and interactive token paths"
 fi
 
 if (( failures > 0 )); then

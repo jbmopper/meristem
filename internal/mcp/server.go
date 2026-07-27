@@ -146,6 +146,9 @@ func (s *Server) Authenticate(ctx context.Context, secret string) error {
 	if err != nil {
 		return err
 	}
+	if _, _, err := providerMCPProfileForActor(tok); err != nil {
+		return fmt.Errorf("mcp: invalid sealed provider authority: %w", err)
+	}
 	s.mu.Lock()
 	s.actor = tok
 	s.mu.Unlock()
@@ -265,8 +268,32 @@ func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor do
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
+		profile, restricted, err := providerMCPProfileForActor(actor)
+		if err != nil {
+			return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
+		}
+		if restricted {
+			return s.handleListToolsFiltered(actor, HTTPOptions{Profile: profile})
+		}
 		return s.handleListTools(actor)
 	case "tools/call":
+		// Build consistency precedes profile and argument validation just as it
+		// does on the HTTP route. handleCallTool repeats the check to preserve
+		// the dynamic pin boundary between validation and handler execution.
+		if result, blocked := s.buildToolCallRefusal(); blocked {
+			return result, nil
+		}
+		profile, restricted, err := providerMCPProfileForActor(actor)
+		if err != nil {
+			return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
+		}
+		if restricted {
+			opts := HTTPOptions{Profile: profile}
+			if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
+				return nil, rerr
+			}
+			ctx = withProviderSafeContext(ctx)
+		}
 		return s.handleCallTool(ctx, actor, msg.Params)
 	case "shutdown":
 		return map[string]any{}, nil

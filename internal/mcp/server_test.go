@@ -543,6 +543,49 @@ func TestServer_ToolsList_FiltersScopedWorkerTools(t *testing.T) {
 	}
 }
 
+func TestServer_SealedProviderReadProfileRestrictsStdioSurface(t *testing.T) {
+	root := uuid.New()
+	authority, err := access.ReduceProviderAuthority(access.ProviderDelegatedTreeReadV1, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer(t)
+	s.actor = domain.Token{
+		ID:     uuid.New(),
+		Source: domain.SourceAgent,
+		Name:   "dedicated-listener",
+		Scopes: authority.Scopes,
+	}
+
+	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if resp.Error != nil {
+		t.Fatalf("tools/list returned error: %+v", resp.Error)
+	}
+	var result struct {
+		Tools []toolDescriptor `json:"tools"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tools/list: %v", err)
+	}
+	got := toolNameSet(result.Tools)
+	for _, want := range []string{"feed.read", "backlog.readiness", "work_items.list", "work_items.get"} {
+		if !got[want] {
+			t.Errorf("sealed read profile omitted %q; got %v", want, toolNames(result.Tools))
+		}
+	}
+	if len(got) != 4 {
+		t.Fatalf("sealed read profile advertised extra stdio tools: %v", toolNames(result.Tools))
+	}
+
+	// registry.list is coarse-scope-visible to a tree reader, so this proves
+	// the sealed profile gate runs before any handler, not merely that the
+	// ordinary scope reducer happened to deny the call.
+	denied := roundtrip(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"registry.list","arguments":{}}}`)
+	if denied.Error == nil || denied.Error.Code != errCodeMethodNotFound {
+		t.Fatalf("sealed read profile did not reject out-of-profile call: %+v", denied)
+	}
+}
+
 func TestServer_CallMutationTool_RequiresIdempotencyKey(t *testing.T) {
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"nope"}}}`)

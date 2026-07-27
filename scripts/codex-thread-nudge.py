@@ -235,6 +235,10 @@ def sanitized_environment(source=None):
         "CODEX_SANDBOX",
         "CODEX_SANDBOX_NETWORK_DISABLED",
         "CODEX_SHELL",
+        # A path is safe to pass; the wrapper reads the credential after the
+        # app-server starts. Keep MERISTEM_TOKEN_FILE excluded so the bridge's
+        # feed-only bearer can never become the awakened task's MCP identity.
+        "CODEX_MERISTEM_TOKEN_FILE",
         "XDG_CONFIG_HOME",
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",

@@ -286,6 +286,7 @@ class NudgeTests(unittest.TestCase):
         self.environment = {
             "HOME": str(self.root),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CODEX_MERISTEM_TOKEN_FILE": "/scoped/listener/token",
             "MERISTEM_TOKEN": "secret",
             "MERISTEM_TOKEN_FILE": "/secret/token",
             "MERISTEM_DATABASE_URL": "postgres://secret",
@@ -661,7 +662,11 @@ class NudgeTests(unittest.TestCase):
     def test_environment_allowlist_drops_credentials(self):
         sanitized = NUDGE.sanitized_environment(self.environment)
         self.assertEqual(sanitized["HOME"], str(self.root))
+        self.assertEqual(
+            sanitized["CODEX_MERISTEM_TOKEN_FILE"], "/scoped/listener/token"
+        )
         self.assertNotIn("MERISTEM_TOKEN", sanitized)
+        self.assertNotIn("MERISTEM_TOKEN_FILE", sanitized)
         self.assertNotIn("OPENAI_API_KEY", sanitized)
         self.assertNotIn("TEST_SENTINEL_SECRET", sanitized)
 

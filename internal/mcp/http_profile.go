@@ -4,6 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/google/uuid"
+
+	"github.com/jbmopper/meristem/internal/access"
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // HTTPToolProfile is a fail-closed provider-facing tool policy. The allowed
@@ -29,6 +34,37 @@ func ProviderSafeReadHTTPProfile() *HTTPToolProfile {
 			"work_items.list",
 			"work_items.get",
 		),
+	}
+}
+
+// providerMCPProfileForActor maps an exact sealed provider authority marker to
+// the corresponding MCP tool/data boundary. HTTP already selects this profile
+// at its route boundary; doing the same inside the shared dispatcher makes the
+// marker transport-independent, so a provider-scoped static credential cannot
+// silently regain the broader stdio surface.
+//
+// A marker-bearing credential must be one non-root agent identity with exactly
+// the scopes produced by access.ReduceProviderAuthority. Malformed or
+// hand-expanded markers fail closed instead of falling back to ordinary token
+// scope filtering.
+func providerMCPProfileForActor(actor domain.Token) (*HTTPToolProfile, bool, error) {
+	if !access.HasProviderAuthorityMarker(actor.Scopes) {
+		return nil, false, nil
+	}
+	if actor.ID == uuid.Nil || actor.IsRoot || actor.Source != domain.SourceAgent || actor.RevokedAt != nil {
+		return nil, true, access.ErrInvalidProviderAuthority
+	}
+	profile, err := access.ProviderAuthorityProfileFromScopes(actor.Scopes)
+	if err != nil {
+		return nil, true, err
+	}
+	switch profile {
+	case access.ProviderOwnerTrackerReadV1, access.ProviderDelegatedTreeReadV1:
+		return ProviderSafeReadHTTPProfile(), true, nil
+	case access.ProviderOwnerTrackerWriteV1, access.ProviderDelegatedTreeWriteV1:
+		return ProviderTrackerHTTPProfile(), true, nil
+	default:
+		return nil, true, access.ErrInvalidProviderAuthority
 	}
 }
 
