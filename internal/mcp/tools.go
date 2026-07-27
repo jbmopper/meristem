@@ -556,6 +556,16 @@ func (s *Server) toolFeedRead() Tool {
 				// subscription/listen surface will advertise routed listening.
 				ListenFor    string   `json:"listen_for"`
 				ExcludeActor []string `json:"exclude_actor"`
+				// Content predicates — same normalized contract as the REST
+				// kind / exclude_kind / actor / work_item / work_item_tree
+				// query params, so the fingerprinted cursor identity is
+				// portable across surfaces. Handler-compatible only, like
+				// listen_for, until the modern surface advertises them.
+				Kinds        []string `json:"kinds"`
+				ExcludeKinds []string `json:"exclude_kinds"`
+				Actors       []string `json:"actors"`
+				WorkItem     string   `json:"work_item"`
+				WorkItemTree string   `json:"work_item_tree"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -611,6 +621,41 @@ func (s *Server) toolFeedRead() Tool {
 				}
 				excluded = append(excluded, id)
 			}
+			var contentPredicates []feed.Predicate
+			if len(args.Kinds) > 0 {
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateKindInclude, EventKinds: args.Kinds})
+			}
+			if len(args.ExcludeKinds) > 0 {
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateKindExclude, EventKinds: args.ExcludeKinds})
+			}
+			for _, value := range args.Actors {
+				if value == "self" {
+					contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: actor.ID})
+					continue
+				}
+				id, err := uuid.Parse(strings.TrimSpace(value))
+				if err != nil || id == uuid.Nil {
+					return nil, fmt.Errorf("feed.read: invalid_feed_actor: actors entries must be self or a token id")
+				}
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: id})
+			}
+			for _, ref := range []struct {
+				name  string
+				value string
+				kind  feed.PredicateKind
+			}{
+				{"work_item", args.WorkItem, feed.PredicateWorkItem},
+				{"work_item_tree", args.WorkItemTree, feed.PredicateWorkItemTree},
+			} {
+				if strings.TrimSpace(ref.value) == "" {
+					continue
+				}
+				id, err := uuid.Parse(strings.TrimSpace(ref.value))
+				if err != nil || id == uuid.Nil {
+					return nil, fmt.Errorf("feed.read: invalid_feed_work_item: %s must be a work item id", ref.name)
+				}
+				contentPredicates = append(contentPredicates, feed.Predicate{Kind: ref.kind, WorkItemID: id})
+			}
 			// One contract: the identical normalized ReadFilter REST builds,
 			// with the access reduction evaluated inside each scan batch so
 			// unauthorized or filtered traffic can neither satisfy a wait nor
@@ -628,6 +673,7 @@ func (s *Server) toolFeedRead() Tool {
 					TokenID: id,
 				})
 			}
+			readFilter.Predicates = append(readFilter.Predicates, contentPredicates...)
 			readFilter.Reduce = s.feedAccessReduce(actor)
 			readFilter, err := feed.NormalizeReadFilter(readFilter)
 			if err != nil {
@@ -635,7 +681,7 @@ func (s *Server) toolFeedRead() Tool {
 			}
 			if args.Cursor == "" && args.Wait == "" {
 				var items []feed.Item
-				if assignedRecipient == uuid.Nil && projection == nil && len(excluded) == 0 {
+				if assignedRecipient == uuid.Nil && projection == nil && len(excluded) == 0 && len(contentPredicates) == 0 {
 					// Preserve the legacy snapshot's byte-for-byte ordering for
 					// plain broad readers — the same compatibility branch REST
 					// keeps. The access reduction still applies, so scoped

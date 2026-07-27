@@ -218,15 +218,19 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		projection = &item
 	}
-	readFilter, err := s.feedReadFilter(actor, projection, assignedRecipient, excludeActors)
+	contentPredicates, ok := requestedContentPredicates(w, r, actor)
+	if !ok {
+		return
+	}
+	readFilter, err := s.feedReadFilter(actor, projection, assignedRecipient, excludeActors, contentPredicates)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
+		writeFeedFilterError(w, err)
 		return
 	}
 
 	if cursor == "" && waitStr == "" {
 		var items []feed.Item
-		if assignedRecipient == uuid.Nil && projection == nil && len(excludeActors) == 0 {
+		if assignedRecipient == uuid.Nil && projection == nil && len(excludeActors) == 0 && len(contentPredicates) == 0 {
 			// Preserve the legacy snapshot's byte-for-byte ordering for full
 			// readers. Assigned-only actors can never reach this branch.
 			items, err = s.feed.List(r.Context(), limit)
@@ -406,7 +410,73 @@ func requestedActorExclusions(w http.ResponseWriter, r *http.Request, actor doma
 	return excluded, true
 }
 
-func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.Projection, assignedRecipient uuid.UUID, excludeActors []uuid.UUID) (feed.ReadFilter, error) {
+// requestedContentPredicates parses the content-narrowing query params into
+// feed predicates: kind / exclude_kind (repeatable event kinds), actor
+// (repeatable; self or a token id), and work_item / work_item_tree (at most
+// one each; a work item id). Malformed identities fail the request closed
+// here; kind vocabulary and predicate shape are validated fail-closed by
+// feed.NormalizeReadFilter so unknown kinds surface as invalid_feed_predicate
+// rather than silently widening the view.
+func requestedContentPredicates(w http.ResponseWriter, r *http.Request, actor domain.Token) ([]feed.Predicate, bool) {
+	q := r.URL.Query()
+	var predicates []feed.Predicate
+
+	if kinds := q["kind"]; len(kinds) > 0 {
+		predicates = append(predicates, feed.Predicate{Kind: feed.PredicateKindInclude, EventKinds: kinds})
+	}
+	if kinds := q["exclude_kind"]; len(kinds) > 0 {
+		predicates = append(predicates, feed.Predicate{Kind: feed.PredicateKindExclude, EventKinds: kinds})
+	}
+	for _, value := range q["actor"] {
+		if value == "self" {
+			predicates = append(predicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: actor.ID})
+			continue
+		}
+		id, err := uuid.Parse(strings.TrimSpace(value))
+		if err != nil || id == uuid.Nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_feed_actor", "actor must be self or a token id")
+			return nil, false
+		}
+		predicates = append(predicates, feed.Predicate{Kind: feed.PredicateActor, TokenID: id})
+	}
+	for _, param := range []struct {
+		name string
+		kind feed.PredicateKind
+	}{
+		{"work_item", feed.PredicateWorkItem},
+		{"work_item_tree", feed.PredicateWorkItemTree},
+	} {
+		values := q[param.name]
+		if len(values) == 0 {
+			continue
+		}
+		if len(values) > 1 {
+			writeAPIError(w, http.StatusBadRequest, "invalid_feed_work_item", param.name+" must appear at most once")
+			return nil, false
+		}
+		id, err := uuid.Parse(strings.TrimSpace(values[0]))
+		if err != nil || id == uuid.Nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_feed_work_item", param.name+" must be a work item id")
+			return nil, false
+		}
+		predicates = append(predicates, feed.Predicate{Kind: param.kind, WorkItemID: id})
+	}
+	return predicates, true
+}
+
+// writeFeedFilterError maps a feedReadFilter construction failure to a
+// response. Predicate validation failures are the caller's to fix (unknown
+// kind, malformed shape) and return 400 with the validation message; anything
+// else is a server-side construction failure.
+func writeFeedFilterError(w http.ResponseWriter, err error) {
+	if errors.Is(err, feed.ErrInvalidPredicate) || errors.Is(err, feed.ErrUnknownPredicate) {
+		writeAPIError(w, http.StatusBadRequest, "invalid_feed_predicate", err.Error())
+		return
+	}
+	writeAPIError(w, http.StatusInternalServerError, "feed_filter_failed", "could not construct feed filter")
+}
+
+func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.Projection, assignedRecipient uuid.UUID, excludeActors []uuid.UUID, contentPredicates []feed.Predicate) (feed.ReadFilter, error) {
 	filter := feed.ReadFilter{Projection: projectionFilterForFeed(projection)}
 	if assignedRecipient != uuid.Nil {
 		filter.Predicates = append(filter.Predicates, feed.Predicate{
@@ -420,6 +490,7 @@ func (s *Server) feedReadFilter(actor domain.Token, projection *projectiondefs.P
 			TokenID: id,
 		})
 	}
+	filter.Predicates = append(filter.Predicates, contentPredicates...)
 	filter.Reduce = func(ctx context.Context, items []feed.Item) ([]feed.Item, error) {
 		return s.filterFeedItems(ctx, actor, items)
 	}
