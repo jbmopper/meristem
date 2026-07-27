@@ -93,33 +93,52 @@ func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, a
 	if opts.AllowedTools != nil || opts.Profile != nil {
 		ctx = withProviderSafeContext(ctx)
 	}
+	// The response era must be knowable on every path, including requests too
+	// malformed to classify: a modern transport header establishes the modern
+	// era for early rejections before any body inspection.
+	earlyVersion := ""
+	if opts.Transport != nil && opts.Transport.HasProtocolVersion && opts.Transport.ProtocolVersion == modernProtocolVersion {
+		earlyVersion = modernProtocolVersion
+	}
 	var msg rpcMessage
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		return jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
+		resp := jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
 			JSONRPC: "2.0",
 			ID:      json.RawMessage("null"),
 			Error:   rpcErrorf(errCodeParse, "invalid JSON: "+err.Error()),
 		})
+		resp.ProtocolVersion = earlyVersion
+		return resp
+	}
+	// A parseable body can also establish the modern era for early errors
+	// (modern-shaped _meta with a broken JSON-RPC envelope).
+	if earlyVersion == "" && opts.Transport != nil {
+		if _, shaped, _ := s.classifyModern(msg); shaped {
+			earlyVersion = modernProtocolVersion
+		}
 	}
 	if msg.JSONRPC != "2.0" {
-		if msg.isNotification() {
-			return HTTPResponse{Status: http.StatusAccepted}
-		}
-		return jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
+		// An id-less message that is not JSON-RPC 2.0 is an invalid message,
+		// not a notification; 202 is reserved for accepted notifications.
+		resp := jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
 			JSONRPC: "2.0",
-			ID:      msg.ID,
+			ID:      invalidRequestID(msg),
 			Error:   rpcErrorf(errCodeInvalidRequest, "jsonrpc must be \"2.0\""),
 		})
+		resp.ProtocolVersion = earlyVersion
+		return resp
 	}
 	if isJSONRPCResponse(msg) {
-		return HTTPResponse{Status: http.StatusAccepted}
+		return HTTPResponse{Status: http.StatusAccepted, ProtocolVersion: earlyVersion}
 	}
 	if msg.Method == "" {
-		return jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
+		resp := jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
 			JSONRPC: "2.0",
 			ID:      msg.ID,
 			Error:   rpcErrorf(errCodeInvalidRequest, "method is required"),
 		})
+		resp.ProtocolVersion = earlyVersion
+		return resp
 	}
 	// 2026-07-28 per-request era classification. HTTP carries no server-side
 	// era state: every request declares its era through the version header and
@@ -412,6 +431,16 @@ func (s *Server) canonicalToolName(name string) string {
 
 func isJSONRPCResponse(msg rpcMessage) bool {
 	return msg.Method == "" && (len(msg.Result) > 0 || msg.Error != nil)
+}
+
+// invalidRequestID echoes the offending message's id when it has one and
+// falls back to null for id-less invalid messages, per JSON-RPC 2.0 error
+// conventions.
+func invalidRequestID(msg rpcMessage) json.RawMessage {
+	if len(msg.ID) == 0 {
+		return json.RawMessage("null")
+	}
+	return msg.ID
 }
 
 func jsonRPCHTTPResponse(status int, msg rpcMessage) HTTPResponse {
