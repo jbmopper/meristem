@@ -360,8 +360,10 @@ func convergenceChecksRequired(current domain.WorkItem, to domain.WorkItemState)
 }
 
 // validateAppendPayloadShape enforces the object contract for appended event
-// payloads at the one seam REST and MCP share. Write-side rejection is what
-// keeps a client-side marshaling bug from minting new prose non-signals;
+// payloads at the one seam REST and MCP share. It also rejects an already
+// wrapped {inner_kind, inner} envelope: AppendEvent owns that outer shape.
+// Write-side rejection keeps client-side marshaling bugs from minting
+// malformed non-signals;
 // historical string inners stay readable through the reducer's legacy
 // recovery, which tolerates exactly what this boundary no longer admits.
 // The string-of-JSON case gets its own message because it is always a
@@ -371,6 +373,13 @@ func validateAppendPayloadShape(payload any) error {
 	case nil:
 		return nil
 	case map[string]any:
+		if len(v) == 2 {
+			_, hasInnerKind := v["inner_kind"]
+			_, hasInner := v["inner"]
+			if hasInnerKind && hasInner {
+				return fmt.Errorf("%w: payload is already a work_item.event_appended envelope; send the logical event kind and its payload object without the inner_kind/inner wrapper", ErrInvalidRequest)
+			}
+		}
 		return nil
 	case string:
 		trimmed := strings.TrimSpace(v)
@@ -390,6 +399,9 @@ func (s *Service) AppendEvent(ctx context.Context, id uuid.UUID, innerKind strin
 	innerKind = strings.TrimSpace(innerKind)
 	if innerKind == "" {
 		return fmt.Errorf("%w: event kind is required", ErrInvalidRequest)
+	}
+	if innerKind == domain.EventWorkItemEventAppended {
+		return fmt.Errorf("%w: event kind %q is the transport envelope; send the logical inner event kind instead", ErrInvalidRequest, innerKind)
 	}
 	if err := validateAppendPayloadShape(payload); err != nil {
 		return err

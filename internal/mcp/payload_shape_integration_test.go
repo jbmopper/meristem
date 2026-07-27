@@ -85,6 +85,48 @@ func TestMCPAppendEventPayloadShapeBoundaryIntegration(t *testing.T) {
 	if after != before {
 		t.Fatalf("rejected append wrote an event: before=%d after=%d", before, after)
 	}
+	for _, tc := range []struct {
+		name    string
+		kind    string
+		payload map[string]any
+		want    string
+	}{
+		{
+			name: "reserved wrapper kind",
+			kind: domain.EventWorkItemEventAppended,
+			payload: map[string]any{
+				"inner_kind": "agent.actual_kind",
+				"inner":      map[string]any{"marker": "nested"},
+			},
+			want: "transport envelope",
+		},
+		{
+			name: "envelope-shaped payload",
+			kind: "agent.double_wrapped",
+			payload: map[string]any{
+				"inner_kind": "agent.actual_kind",
+				"inner":      map[string]any{"marker": "nested"},
+			},
+			want: "inner_kind/inner wrapper",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isErr, text := callToolForTest(t, s, "work_items.append_event", map[string]any{
+				"id": item.ID.String(), "kind": tc.kind, "payload": tc.payload,
+				"idempotency_key": "shape-" + strings.ReplaceAll(tc.name, " ", "-"),
+			})
+			if !isErr || !strings.Contains(text, tc.want) {
+				t.Fatalf("double wrapper not rejected precisely: isErr=%t text=%s, want %q", isErr, text, tc.want)
+			}
+		})
+	}
+	var afterDoubleWrap int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE subject_id=$1 AND kind=$2`, item.ID, domain.EventWorkItemEventAppended).Scan(&afterDoubleWrap); err != nil {
+		t.Fatalf("count after double-wrapper cases: %v", err)
+	}
+	if afterDoubleWrap != before {
+		t.Fatalf("double-wrapper rejection wrote events: before=%d after=%d", before, afterDoubleWrap)
+	}
 
 	// Schema pin: the payload parameter must stay typed as object.
 	tool := s.toolWorkItemsAppendEvent()

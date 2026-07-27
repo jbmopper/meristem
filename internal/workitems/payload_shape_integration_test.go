@@ -14,10 +14,11 @@ import (
 )
 
 // The append seam is the one place REST and MCP share, so the object contract
-// is enforced here: objects and nil pass, everything else fails closed, and
-// the string-of-JSON case names double-encoding because it is always a client
-// marshaling bug (2026-07-22 incident: an untyped MCP tool parameter caused a
-// client to send the object's string form, silently minting non-signals).
+// is enforced here: ordinary objects and nil pass; non-objects and caller-
+// supplied transport envelopes fail closed. The string-of-JSON case names
+// double-encoding because it is always a client marshaling bug (2026-07-22
+// incident: an untyped MCP tool parameter caused a client to send the object's
+// string form, silently minting non-signals).
 func TestAppendEventPayloadShapeFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t, "meristem_payload_shape")
@@ -68,6 +69,18 @@ func TestAppendEventPayloadShapeFailsClosed(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.fragment) {
 			t.Fatalf("%s: err=%v, want fragment %q", tc.name, err, tc.fragment)
 		}
+	}
+	if err := service.AppendEvent(ctx, item.ID, domain.EventWorkItemEventAppended, map[string]any{
+		"inner_kind": "agent.double_wrapped",
+		"inner":      map[string]any{"marker": "nested"},
+	}, root.Token); err == nil || !strings.Contains(err.Error(), "transport envelope") {
+		t.Fatalf("reserved wrapper kind: err=%v, want transport-envelope message", err)
+	}
+	if err := service.AppendEvent(ctx, item.ID, "agent.double_wrapped", map[string]any{
+		"inner_kind": "agent.actual_kind",
+		"inner":      map[string]any{"marker": "nested"},
+	}, root.Token); err == nil || !strings.Contains(err.Error(), "inner_kind/inner wrapper") {
+		t.Fatalf("envelope-shaped payload: err=%v, want wrapper-shape message", err)
 	}
 	// The typed-verdict path gets the precise shape error too, replacing the
 	// old misleading rejection for double-encoded verdicts.
