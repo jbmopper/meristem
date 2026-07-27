@@ -24,6 +24,22 @@ type HTTPResponse struct {
 	Status      int
 	ContentType string
 	Body        []byte
+	// ProtocolVersion is the negotiated era version for the transport to echo
+	// in the MCP-Protocol-Version response header. Empty means the caller's
+	// historical default (2025-06-18) applies.
+	ProtocolVersion string
+}
+
+// HTTPTransportContext carries the protocol-relevant request headers into the
+// per-request era classifier. A nil context (in-process callers, pre-2026
+// tests) preserves the legacy-only behavior of the c5a99ac contract.
+type HTTPTransportContext struct {
+	ProtocolVersion    string
+	HasProtocolVersion bool
+	McpMethod          string
+	HasMcpMethod       bool
+	McpName            string
+	HasMcpName         bool
 }
 
 // HTTPOptions controls the subset of MCP behavior exposed by an HTTP route.
@@ -35,6 +51,9 @@ type HTTPOptions struct {
 	// When set it takes precedence over AllowedTools and may reject a call based
 	// on its arguments before the normal MCP dispatcher can run a handler.
 	Profile *HTTPToolProfile
+	// Transport enables 2026-07-28 per-request era classification from the
+	// request headers. Nil keeps the pre-2026 legacy-only behavior.
+	Transport *HTTPTransportContext
 }
 
 // ReadOnlyHTTPTools is the provider-safe HTTP surface. The non-nil allowlist
@@ -74,34 +93,218 @@ func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, a
 	if opts.AllowedTools != nil || opts.Profile != nil {
 		ctx = withProviderSafeContext(ctx)
 	}
+	// The response era must be knowable on every path, including requests too
+	// malformed to classify: a modern transport header establishes the modern
+	// era for early rejections before any body inspection.
+	earlyVersion := ""
+	if opts.Transport != nil && opts.Transport.HasProtocolVersion && opts.Transport.ProtocolVersion == modernProtocolVersion {
+		earlyVersion = modernProtocolVersion
+	}
 	var msg rpcMessage
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		return jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
+		resp := jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
 			JSONRPC: "2.0",
 			ID:      json.RawMessage("null"),
 			Error:   rpcErrorf(errCodeParse, "invalid JSON: "+err.Error()),
 		})
+		resp.ProtocolVersion = earlyVersion
+		return resp
+	}
+	// A parseable body can also establish the modern era for early errors
+	// (modern-shaped _meta with a broken JSON-RPC envelope).
+	if earlyVersion == "" && opts.Transport != nil {
+		if _, shaped, _ := s.classifyModern(msg); shaped {
+			earlyVersion = modernProtocolVersion
+		}
 	}
 	if msg.JSONRPC != "2.0" {
-		if msg.isNotification() {
-			return HTTPResponse{Status: http.StatusAccepted}
-		}
-		return jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
+		// An id-less message that is not JSON-RPC 2.0 is an invalid message,
+		// not a notification; 202 is reserved for accepted notifications.
+		resp := jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
 			JSONRPC: "2.0",
-			ID:      msg.ID,
+			ID:      invalidRequestID(msg),
 			Error:   rpcErrorf(errCodeInvalidRequest, "jsonrpc must be \"2.0\""),
 		})
+		resp.ProtocolVersion = earlyVersion
+		return resp
 	}
 	if isJSONRPCResponse(msg) {
-		return HTTPResponse{Status: http.StatusAccepted}
+		return HTTPResponse{Status: http.StatusAccepted, ProtocolVersion: earlyVersion}
 	}
 	if msg.Method == "" {
-		return jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
+		resp := jsonRPCHTTPResponse(http.StatusBadRequest, rpcMessage{
 			JSONRPC: "2.0",
 			ID:      msg.ID,
 			Error:   rpcErrorf(errCodeInvalidRequest, "method is required"),
 		})
+		resp.ProtocolVersion = earlyVersion
+		return resp
 	}
+	// 2026-07-28 per-request era classification. HTTP carries no server-side
+	// era state: every request declares its era through the version header and
+	// body metadata; a modern-shaped or modern-headed request never falls back
+	// to legacy handling.
+	if opts.Transport != nil {
+		era, meta, legacyVersion, rerr, status := s.classifyHTTPEra(msg, opts.Transport)
+		if rerr != nil {
+			// A request rejected at classification still answers in its own
+			// era's voice: a modern-established era labels the error response
+			// with the modern version.
+			responseVersion := ""
+			if era == eraModern {
+				responseVersion = modernProtocolVersion
+			}
+			if msg.isNotification() {
+				// A notification the server cannot accept is an HTTP-level
+				// error with no JSON-RPC response body; 202 is reserved for
+				// accepted notifications.
+				s.logClassification("http", era, transportRequestedVersion(msg, opts.Transport), "", "", "rejected_notification:"+rerr.Message)
+				return HTTPResponse{Status: status, ProtocolVersion: responseVersion}
+			}
+			s.logClassification("http", era, transportRequestedVersion(msg, opts.Transport), "", "", "rejected:"+rerr.Message)
+			resp := jsonRPCHTTPResponse(status, rpcMessage{JSONRPC: "2.0", ID: msg.ID, Error: rerr})
+			resp.ProtocolVersion = responseVersion
+			return resp
+		}
+		if era == eraModern {
+			return s.handleModernHTTP(ctx, msg, meta, actor, opts)
+		}
+		s.logClassification("http", eraLegacy, transportRequestedVersion(msg, opts.Transport), "", "", "served:"+msg.Method)
+		resp := s.handleLegacyHTTP(ctx, msg, actor, opts)
+		resp.ProtocolVersion = legacyVersion
+		return resp
+	}
+	return s.handleLegacyHTTP(ctx, msg, actor, opts)
+}
+
+// transportRequestedVersion reports the version the request asked for, for
+// telemetry only: the header when present, an initialize proposal otherwise,
+// and the measurable "(absent)" marker for grandfathered headerless traffic.
+func transportRequestedVersion(msg rpcMessage, transport *HTTPTransportContext) string {
+	if transport.HasProtocolVersion {
+		return transport.ProtocolVersion
+	}
+	if v := requestedInitializeVersion(msg); v != "" {
+		return v
+	}
+	if msg.Method != "initialize" {
+		return "(absent)"
+	}
+	return ""
+}
+
+// classifyHTTPEra applies the consensus rules: a 2026-07-28 header requires
+// matching modern _meta; an allowlisted legacy header selects legacy
+// semantics with no server session; initialize without a modern header may
+// open legacy; anything else is rejected naming the supported versions.
+func (s *Server) classifyHTTPEra(msg rpcMessage, transport *HTTPTransportContext) (protocolEra, *modernRequestMeta, string, *rpcError, int) {
+	meta, shaped, metaErr := s.classifyModern(msg)
+	if shaped {
+		if metaErr != nil {
+			return eraModern, meta, "", metaErr, http.StatusBadRequest
+		}
+		if !transport.HasProtocolVersion {
+			return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+				"missing required header "+HeaderProtocolVersion), http.StatusBadRequest
+		}
+		if transport.ProtocolVersion != meta.ProtocolVersion {
+			return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+				HeaderProtocolVersion+" header does not match _meta "+metaProtocolVersionKey), http.StatusBadRequest
+		}
+		if !transport.HasMcpMethod || transport.McpMethod != msg.Method {
+			return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+				"Mcp-Method header is required and must match the request method"), http.StatusBadRequest
+		}
+		if msg.Method == "tools/call" {
+			var params callToolParams
+			if len(msg.Params) > 0 {
+				_ = json.Unmarshal(msg.Params, &params)
+			}
+			if !transport.HasMcpName || transport.McpName != params.Name {
+				return eraModern, meta, "", rpcErrorf(errCodeHeaderMismatch,
+					"Mcp-Name header is required on tools/call and must match params.name"), http.StatusBadRequest
+			}
+		}
+		return eraModern, meta, "", nil, 0
+	}
+	if transport.HasProtocolVersion {
+		switch {
+		case transport.ProtocolVersion == modernProtocolVersion:
+			return eraModern, nil, "", rpcErrorf(errCodeInvalidParams,
+				"missing required _meta field "+metaProtocolVersionKey), http.StatusBadRequest
+		case s.legacyVersionSupported(transport.ProtocolVersion):
+			return eraLegacy, nil, transport.ProtocolVersion, nil, 0
+		default:
+			return eraLegacy, nil, "", unsupportedProtocolError(transport.ProtocolVersion, s.supportedVersions()), http.StatusBadRequest
+		}
+	}
+	if msg.Method == "initialize" {
+		version := s.negotiateLegacyVersion(msg.Params)
+		if version == "" {
+			return eraLegacy, nil, "", unsupportedProtocolError(legacyRequestLabel(msg), s.supportedVersions()), http.StatusBadRequest
+		}
+		return eraLegacy, nil, version, nil, 0
+	}
+	// Headerless non-initialize requests are the repo's own current clients
+	// (the provider integration surface sends no MCP-Protocol-Version on tool
+	// calls). Grandfather them onto the default SERVED legacy version exactly
+	// like the stdio bare-request rule: legacy is the compatibility era,
+	// modern strictness is never relaxed, narrowing is honored, and the
+	// telemetry tags these requests "(absent)" so the removal gate can
+	// measure headerless traffic. An empty served set fails closed.
+	if !s.legacyEnabled() {
+		return eraLegacy, nil, "", unsupportedProtocolError("(absent)", s.supportedVersions()), http.StatusBadRequest
+	}
+	return eraLegacy, nil, s.defaultLegacyVersion(), nil, 0
+}
+
+// handleModernHTTP serves a classified modern request. Protocol-level errors
+// were already rejected by the classifier; from here the modern era differs
+// from legacy only in method surface, envelopes, and the 404 mapping for
+// unknown methods.
+func (s *Server) handleModernHTTP(ctx context.Context, msg rpcMessage, meta *modernRequestMeta, actor domain.Token, opts HTTPOptions) HTTPResponse {
+	s.logClassification("http", eraModern, meta.ProtocolVersion, meta.ClientName, meta.ClientVersion, "served:"+msg.Method)
+	if msg.isNotification() {
+		// The modern surface served here defines no notifications; accept and
+		// drop per Streamable HTTP semantics.
+		return HTTPResponse{Status: http.StatusAccepted, ProtocolVersion: modernProtocolVersion}
+	}
+	switch msg.Method {
+	case "server/discover":
+		return s.modernHTTPResult(msg, s.handleServerDiscover(), nil, false)
+	case "tools/list":
+		result, rerr := s.handleListToolsFiltered(actor, opts)
+		return s.modernHTTPResult(msg, result, rerr, true)
+	case "tools/call":
+		if refusal, blocked := s.buildToolCallRefusal(); blocked {
+			return s.modernHTTPResult(msg, refusal, nil, false)
+		}
+		if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
+			return s.modernHTTPResult(msg, nil, rerr, false)
+		}
+		result, rerr := s.gatedToolsCall(ctx, actor, msg.Params)
+		return s.modernHTTPResult(msg, result, rerr, false)
+	default:
+		resp := jsonRPCHTTPResponse(http.StatusNotFound, rpcMessage{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error:   rpcErrorf(errCodeMethodNotFound, "method not found in the "+modernProtocolVersion+" era: "+msg.Method),
+		})
+		resp.ProtocolVersion = modernProtocolVersion
+		return resp
+	}
+}
+
+func (s *Server) modernHTTPResult(msg rpcMessage, result any, rerr *rpcError, cacheable bool) HTTPResponse {
+	if rerr == nil {
+		result = s.modernizeResult(result, cacheable)
+	}
+	resp := s.httpRPCResult(msg, result, rerr)
+	resp.ProtocolVersion = modernProtocolVersion
+	return resp
+}
+
+func (s *Server) handleLegacyHTTP(ctx context.Context, msg rpcMessage, actor domain.Token, opts HTTPOptions) HTTPResponse {
 	// Build consistency precedes HTTP profile and argument validation. A stale
 	// shared process must report the same fail-closed tools/call result over
 	// HTTP and stdio, including for malformed or profile-disallowed calls, and
@@ -228,6 +431,16 @@ func (s *Server) canonicalToolName(name string) string {
 
 func isJSONRPCResponse(msg rpcMessage) bool {
 	return msg.Method == "" && (len(msg.Result) > 0 || msg.Error != nil)
+}
+
+// invalidRequestID echoes the offending message's id when it has one and
+// falls back to null for id-less invalid messages, per JSON-RPC 2.0 error
+// conventions.
+func invalidRequestID(msg rpcMessage) json.RawMessage {
+	if len(msg.ID) == 0 {
+		return json.RawMessage("null")
+	}
+	return msg.ID
 }
 
 func jsonRPCHTTPResponse(status int, msg rpcMessage) HTTPResponse {

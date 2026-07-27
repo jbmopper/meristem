@@ -46,7 +46,12 @@ func newTestServer(t *testing.T) *Server {
 	return s
 }
 
-func TestServer_Initialize_EchoesProtocolVersion(t *testing.T) {
+// This test previously codified the pre-2026 echo-any-version behavior
+// (2024-11-05 was echoed back). The 2026-core consensus replaces echo with
+// negotiation: an unsupported proposal is answered with a supported version,
+// never echoed. See TestLegacyInitializeNeverEchoesUnknownVersion for the
+// dedicated negotiation matrix.
+func TestServer_Initialize_NegotiatesProtocolVersion(t *testing.T) {
 	s := newTestServer(t)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`)
 	if resp.Error != nil {
@@ -61,8 +66,8 @@ func TestServer_Initialize_EchoesProtocolVersion(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if result.ProtocolVersion != "2024-11-05" {
-		t.Errorf("expected echoed protocolVersion 2024-11-05, got %q", result.ProtocolVersion)
+	if result.ProtocolVersion != "2025-06-18" {
+		t.Errorf("expected negotiated protocolVersion 2025-06-18, got %q", result.ProtocolVersion)
 	}
 	if result.ServerInfo["name"] != "meristem-test" {
 		t.Errorf("unexpected serverInfo.name: %v", result.ServerInfo["name"])

@@ -87,6 +87,17 @@ type Server struct {
 	mu    sync.RWMutex
 	actor domain.Token
 
+	// Stdio era lock (2026-07-28 dual-era serving): the first meaningful
+	// request locks the process era; later requests are validated under it.
+	// HTTP requests never touch this state — their era is per-request.
+	stdioEraMu         sync.Mutex
+	stdioEra           protocolEra
+	stdioLegacyVersion string
+
+	// legacyVersions is the served legacy protocol set: code-defined and
+	// fixture-backed, optionally narrowed (never widened) by EnvLegacyVersions.
+	legacyVersions []string
+
 	toolNameMode ToolNameMode
 	tools        []Tool
 	toolsByName  map[string]Tool
@@ -108,11 +119,12 @@ func New(deps Deps, info ServerInfo, logger *slog.Logger) *Server {
 		info.BuildStatus = buildguard.Disabled()
 	}
 	s := &Server{
-		deps:        deps,
-		logger:      logger,
-		info:        info,
-		build:       info.BuildStatus,
-		toolsByName: make(map[string]Tool),
+		deps:           deps,
+		logger:         logger,
+		info:           info,
+		build:          info.BuildStatus,
+		legacyVersions: legacyVersionsFromEnv(),
+		toolsByName:    make(map[string]Tool),
 	}
 	s.tools = s.buildTools()
 	for _, t := range s.tools {
@@ -230,7 +242,7 @@ func (s *Server) handleRaw(ctx context.Context, raw []byte, w *syncWriter) error
 			Error:   rpcErrorf(errCodeInvalidRequest, "jsonrpc must be \"2.0\""),
 		})
 	}
-	result, rerr := s.dispatch(ctx, msg)
+	result, rerr := s.dispatchStdio(ctx, msg)
 	if msg.isNotification() {
 		// Errors on notifications are logged; the protocol forbids a
 		// response.
@@ -259,6 +271,126 @@ func (s *Server) dispatch(ctx context.Context, msg rpcMessage) (any, *rpcError) 
 	return s.dispatchWithActor(ctx, msg, s.actorToken())
 }
 
+// dispatchStdio applies the stdio era state machine (2026-07-28 dual-era
+// serving): a valid modern request locks the process to the modern era; an
+// initialize locks the negotiated legacy version. For byte-compatibility with
+// the pre-2026 server, a bare legacy request with no handshake also locks the
+// default legacy version — modern entry is always explicit, legacy stays as
+// permissive as the c5a99ac contract. Later requests are validated under the
+// locked era; the only reset is a new process.
+func (s *Server) dispatchStdio(ctx context.Context, msg rpcMessage) (any, *rpcError) {
+	meta, shaped, metaErr := s.classifyModern(msg)
+
+	s.stdioEraMu.Lock()
+	if s.stdioEra == eraNone {
+		if shaped {
+			if metaErr == nil {
+				s.stdioEra = eraModern
+			}
+		} else if s.legacyEnabled() {
+			s.stdioEra = eraLegacy
+			s.stdioLegacyVersion = s.defaultLegacyVersion()
+			if msg.Method == "initialize" {
+				s.stdioLegacyVersion = s.negotiateLegacyVersion(msg.Params)
+			}
+			s.logClassification("stdio", eraLegacy, requestedInitializeVersion(msg), "", "", "locked")
+		}
+	}
+	locked := s.stdioEra
+	lockedVersion := s.stdioLegacyVersion
+	s.stdioEraMu.Unlock()
+
+	if shaped {
+		if metaErr != nil {
+			requested := ""
+			if meta != nil {
+				requested = meta.ProtocolVersion
+			}
+			s.logClassification("stdio", eraModern, requested, "", "", "rejected:"+metaErr.Message)
+			return nil, metaErr
+		}
+		if locked == eraLegacy {
+			s.logClassification("stdio", eraModern, meta.ProtocolVersion, meta.ClientName, meta.ClientVersion, "rejected:era_locked_legacy")
+			return nil, eraLockedError(eraLegacy, lockedVersion)
+		}
+		return s.dispatchModern(ctx, msg, meta, s.actorToken())
+	}
+
+	if locked == eraModern {
+		s.logClassification("stdio", eraLegacy, requestedInitializeVersion(msg), "", "", "rejected:era_locked_modern")
+		if msg.Method == "initialize" {
+			return nil, eraLockedError(eraModern, modernProtocolVersion)
+		}
+		return nil, rpcErrorf(errCodeInvalidParams,
+			"missing required _meta field "+metaProtocolVersionKey+" (this connection is locked to the "+modernProtocolVersion+" era)")
+	}
+
+	// Legacy is disabled (empty served set): fail closed naming the
+	// modern-only supported versions; nothing was or will be locked.
+	if locked == eraNone {
+		s.logClassification("stdio", eraLegacy, requestedInitializeVersion(msg), "", "", "rejected:legacy_disabled")
+		return nil, unsupportedProtocolError(legacyRequestLabel(msg), s.supportedVersions())
+	}
+
+	if msg.Method == "initialize" {
+		s.stdioEraMu.Lock()
+		s.stdioLegacyVersion = s.negotiateLegacyVersion(msg.Params)
+		s.stdioEraMu.Unlock()
+	}
+	return s.dispatchWithActor(ctx, msg, s.actorToken())
+}
+
+// legacyRequestLabel names what a rejected legacy opening asked for, for the
+// UnsupportedProtocolVersionError data payload.
+func legacyRequestLabel(msg rpcMessage) string {
+	if v := requestedInitializeVersion(msg); v != "" {
+		return v
+	}
+	return "(none)"
+}
+
+// requestedInitializeVersion extracts the proposed legacy version for
+// telemetry only; empty for non-initialize requests.
+func requestedInitializeVersion(msg rpcMessage) string {
+	if msg.Method != "initialize" || len(msg.Params) == 0 {
+		return ""
+	}
+	var params initializeParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return ""
+	}
+	return params.ProtocolVersion
+}
+
+// dispatchModern serves the 2026-07-28 method surface. ping, initialize,
+// initialized, logging/setLevel, and the nonstandard shutdown do not exist in
+// this era; tools/list and tools/call share the exact provider gating and
+// handlers with the legacy path and differ only in response envelopes.
+func (s *Server) dispatchModern(ctx context.Context, msg rpcMessage, meta *modernRequestMeta, actor domain.Token) (any, *rpcError) {
+	s.logClassification("stdio", eraModern, meta.ProtocolVersion, meta.ClientName, meta.ClientVersion, "served:"+msg.Method)
+	switch msg.Method {
+	case "server/discover":
+		return s.handleServerDiscover(), nil
+	case "tools/list":
+		result, rerr := s.gatedToolsList(actor)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return s.modernizeResult(result, true), nil
+	case "tools/call":
+		if refusal, blocked := s.buildToolCallRefusal(); blocked {
+			return s.modernizeResult(refusal, false), nil
+		}
+		result, rerr := s.gatedToolsCall(ctx, actor, msg.Params)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return s.modernizeResult(result, false), nil
+	default:
+		return nil, rpcErrorf(errCodeMethodNotFound, fmt.Sprintf("method not found in the %s era: %s", modernProtocolVersion, msg.Method))
+	}
+}
+
 func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor domain.Token) (any, *rpcError) {
 	switch msg.Method {
 	case "initialize":
@@ -268,14 +400,7 @@ func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor do
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		profile, restricted, err := providerMCPProfileForActor(actor)
-		if err != nil {
-			return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
-		}
-		if restricted {
-			return s.handleListToolsFiltered(actor, HTTPOptions{Profile: profile})
-		}
-		return s.handleListTools(actor)
+		return s.gatedToolsList(actor)
 	case "tools/call":
 		// Build consistency precedes profile and argument validation just as it
 		// does on the HTTP route. handleCallTool repeats the check to preserve
@@ -283,23 +408,41 @@ func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor do
 		if result, blocked := s.buildToolCallRefusal(); blocked {
 			return result, nil
 		}
-		profile, restricted, err := providerMCPProfileForActor(actor)
-		if err != nil {
-			return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
-		}
-		if restricted {
-			opts := HTTPOptions{Profile: profile}
-			if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
-				return nil, rerr
-			}
-			ctx = withProviderSafeContext(ctx)
-		}
-		return s.handleCallTool(ctx, actor, msg.Params)
+		return s.gatedToolsCall(ctx, actor, msg.Params)
 	case "shutdown":
 		return map[string]any{}, nil
 	default:
 		return nil, rpcErrorf(errCodeMethodNotFound, fmt.Sprintf("method not found: %s", msg.Method))
 	}
+}
+
+// gatedToolsList and gatedToolsCall carry the sealed provider-profile gating
+// shared verbatim by the legacy and modern eras — the era boundary renders
+// envelopes, it never grows a second policy path.
+func (s *Server) gatedToolsList(actor domain.Token) (any, *rpcError) {
+	profile, restricted, err := providerMCPProfileForActor(actor)
+	if err != nil {
+		return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
+	}
+	if restricted {
+		return s.handleListToolsFiltered(actor, HTTPOptions{Profile: profile})
+	}
+	return s.handleListTools(actor)
+}
+
+func (s *Server) gatedToolsCall(ctx context.Context, actor domain.Token, params json.RawMessage) (any, *rpcError) {
+	profile, restricted, err := providerMCPProfileForActor(actor)
+	if err != nil {
+		return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
+	}
+	if restricted {
+		opts := HTTPOptions{Profile: profile}
+		if rerr := s.checkHTTPToolAllowed(params, opts); rerr != nil {
+			return nil, rerr
+		}
+		ctx = withProviderSafeContext(ctx)
+	}
+	return s.handleCallTool(ctx, actor, params)
 }
 
 type initializeParams struct {
@@ -309,44 +452,28 @@ type initializeParams struct {
 }
 
 func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
-	var params initializeParams
 	if len(raw) > 0 {
+		var params initializeParams
 		if err := json.Unmarshal(raw, &params); err != nil {
 			return nil, rpcErrorf(errCodeInvalidParams, "invalid initialize params: "+err.Error())
 		}
 	}
-	version := params.ProtocolVersion
+	// Answer a supported legacy version, never echo an unknown one; see
+	// negotiateLegacyVersion for the 2025-06-18 lifecycle contract. An empty
+	// negotiation means the served legacy set is empty: fail closed naming
+	// the (modern-only) supported versions, on every transport path.
+	version := s.negotiateLegacyVersion(raw)
 	if version == "" {
-		version = protocolVersion
+		return nil, unsupportedProtocolError(legacyRequestLabel(rpcMessage{Method: "initialize", Params: raw}), s.supportedVersions())
 	}
-	buildStatus := s.build.Status()
-	serverVersion := buildStatus.Version()
-	if serverVersion == "unknown" {
-		serverVersion = s.info.Version
-	}
-	instructions := serverInstructions
-	if !buildStatus.Current() {
-		callPolicy := "This is an unmanaged development build; tool calls remain available."
-		if buildStatus.Blocking() {
-			callPolicy = "ALL MCP TOOL CALLS ARE DISABLED until the served build matches the reviewed v1 pin."
-		}
-		instructions = fmt.Sprintf("WARNING: MERISTEM BUILD IS NOT CURRENT (%s): %s %s\n\n%s",
-			buildStatus.State, buildStatus.Warning(), callPolicy, serverInstructions)
-	}
+	instructions, buildBlock, serverVersion := s.instructionsAndBuild()
 	return map[string]any{
 		"protocolVersion": version,
 		"serverInfo": map[string]any{
 			"name":    s.info.Name,
 			"version": serverVersion,
 		},
-		"meristemBuild": map[string]any{
-			"state":             buildStatus.State,
-			"compiled_commit":   buildStatus.CompiledCommit,
-			"pinned_commit":     buildStatus.ExpectedCommit,
-			"compiled_metadata": buildStatus.CompiledMetadata,
-			"blocking":          buildStatus.Blocking(),
-			"reason":            buildStatus.Reason,
-		},
+		"meristemBuild": buildBlock,
 		"capabilities": map[string]any{
 			"tools": map[string]any{
 				"listChanged": false,
@@ -357,6 +484,89 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 		// instructions.go for why the same text is safe across profiles.
 		"instructions": instructions,
 	}, nil
+}
+
+// instructionsAndBuild is the single source for the onboarding text (with the
+// build-guard warning applied) and the structured build diagnostic. The
+// legacy initialize result and modern server/discover result both consume it
+// so the two eras can never drift.
+func (s *Server) instructionsAndBuild() (instructions string, buildBlock map[string]any, serverVersion string) {
+	buildStatus := s.build.Status()
+	serverVersion = buildStatus.Version()
+	if serverVersion == "unknown" {
+		serverVersion = s.info.Version
+	}
+	instructions = serverInstructions
+	if !buildStatus.Current() {
+		callPolicy := "This is an unmanaged development build; tool calls remain available."
+		if buildStatus.Blocking() {
+			callPolicy = "ALL MCP TOOL CALLS ARE DISABLED until the served build matches the reviewed v1 pin."
+		}
+		instructions = fmt.Sprintf("WARNING: MERISTEM BUILD IS NOT CURRENT (%s): %s %s\n\n%s",
+			buildStatus.State, buildStatus.Warning(), callPolicy, serverInstructions)
+	}
+	buildBlock = map[string]any{
+		"state":             buildStatus.State,
+		"compiled_commit":   buildStatus.CompiledCommit,
+		"pinned_commit":     buildStatus.ExpectedCommit,
+		"compiled_metadata": buildStatus.CompiledMetadata,
+		"blocking":          buildStatus.Blocking(),
+		"reason":            buildStatus.Reason,
+	}
+	return instructions, buildBlock, serverVersion
+}
+
+// handleServerDiscover serves the modern era's required discovery method.
+// ttlMs=0 and cacheScope=private are the agreed 2026-core defaults: the tool
+// surface is per-token visibility (private is mandatory) and immediate
+// staleness trades client caching for simplicity in this slice.
+func (s *Server) handleServerDiscover() map[string]any {
+	instructions, buildBlock, serverVersion := s.instructionsAndBuild()
+	return map[string]any{
+		"resultType":        "complete",
+		"supportedVersions": s.supportedVersions(),
+		"capabilities": map[string]any{
+			"tools": map[string]any{
+				"listChanged": false,
+			},
+		},
+		"instructions": instructions,
+		"ttlMs":        0,
+		"cacheScope":   "private",
+		"_meta": map[string]any{
+			metaServerInfoKey: map[string]any{
+				"name":    s.info.Name,
+				"version": serverVersion,
+			},
+			metaBuildKey: buildBlock,
+		},
+	}
+}
+
+// modernizeResult applies the 2026-07-28 result envelope to a legacy-shaped
+// result map: resultType on every result, cache hints on cacheable list
+// results, and serverInfo riding _meta. The underlying payload is unchanged.
+func (s *Server) modernizeResult(result any, cacheable bool) any {
+	body, ok := result.(map[string]any)
+	if !ok {
+		return result
+	}
+	body["resultType"] = "complete"
+	if cacheable {
+		body["ttlMs"] = 0
+		body["cacheScope"] = "private"
+	}
+	_, _, serverVersion := s.instructionsAndBuild()
+	meta, ok := body["_meta"].(map[string]any)
+	if !ok {
+		meta = map[string]any{}
+	}
+	meta[metaServerInfoKey] = map[string]any{
+		"name":    s.info.Name,
+		"version": serverVersion,
+	}
+	body["_meta"] = meta
+	return body
 }
 
 func (s *Server) handleListTools(actor domain.Token) (any, *rpcError) {

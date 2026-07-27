@@ -49,6 +49,17 @@ const (
 	errCodeInternal       = -32603
 )
 
+// 2026-07-28 spec-reserved error codes (-32020..-32099 belong to the MCP
+// specification; implementations must not emit undefined codes from that
+// range). Values pinned to the June 2026 renumbering; re-verify against the
+// published 2026-07-28 text before merge.
+const (
+	errCodeHeaderMismatch = -32020
+	// errCodeMissingClientCapability (-32021) is defined by the spec but this
+	// server never requires client capabilities, so it is never emitted.
+	errCodeUnsupportedProtocol = -32022
+)
+
 func (e *rpcError) Error() string {
 	if e == nil {
 		return ""
@@ -62,6 +73,16 @@ func (e *rpcError) Error() string {
 // or a tool-result with isError=true (handler-level mistake).
 func rpcErrorf(code int, message string) *rpcError {
 	return &rpcError{Code: code, Message: message}
+}
+
+// rpcErrorWithData builds an rpcError carrying a structured data payload,
+// e.g. the supported/requested pair on UnsupportedProtocolVersionError.
+func rpcErrorWithData(code int, message string, data any) *rpcError {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return rpcErrorf(code, message)
+	}
+	return &rpcError{Code: code, Message: message, Data: encoded}
 }
 
 // isNotification reports whether m is a JSON-RPC notification (no id).
