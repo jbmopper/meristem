@@ -376,3 +376,42 @@ func TestMCPFeedReadContentPredicateParityIntegration(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPFeedReadBootstrapHeadParityIntegration(t *testing.T) {
+	fixture := newOCEFixture(t)
+	s := fixture.server(t, fixture.broad.Secret)
+
+	// Bootstrap mints an identity-bound head cursor with no items.
+	isErr, text := feedReadForTest(t, s, map[string]any{"bootstrap": "head", "kinds": []string{"work_item.event_appended"}})
+	if isErr {
+		t.Fatalf("bootstrap errored: %s", text)
+	}
+	var boot struct {
+		Items      []json.RawMessage `json:"items"`
+		NextCursor string            `json:"next_cursor"`
+	}
+	if err := json.Unmarshal([]byte(text), &boot); err != nil || boot.NextCursor == "" {
+		t.Fatalf("decode bootstrap: err=%v text=%s", err, text)
+	}
+	if len(boot.Items) != 0 {
+		t.Fatalf("bootstrap must not return items, got %d", len(boot.Items))
+	}
+
+	// An event appended after the mint is delivered from the minted cursor.
+	fixture.note(t, fixture.itemA, "oce-bootstrap-race-wake", fixture.root.Token)
+	isErr, text = feedReadForTest(t, s, map[string]any{"wait": "0s", "cursor": boot.NextCursor, "kinds": []string{"work_item.event_appended"}})
+	if isErr || !strings.Contains(text, "oce-bootstrap-race-wake") {
+		t.Fatalf("event after bootstrap not delivered: err=%t %s", isErr, text)
+	}
+
+	// Identity binding and argument validation fail closed.
+	if isErr, text = feedReadForTest(t, s, map[string]any{"wait": "0s", "cursor": boot.NextCursor}); !isErr || !strings.Contains(text, "cursor_filter_mismatch") {
+		t.Fatalf("bootstrap cursor not identity-bound: err=%t %s", isErr, text)
+	}
+	if isErr, text = feedReadForTest(t, s, map[string]any{"bootstrap": "tail"}); !isErr || !strings.Contains(text, "invalid_bootstrap") {
+		t.Fatalf("invalid bootstrap value not rejected: err=%t %s", isErr, text)
+	}
+	if isErr, text = feedReadForTest(t, s, map[string]any{"bootstrap": "head", "wait": "0s"}); !isErr || !strings.Contains(text, "invalid_bootstrap") {
+		t.Fatalf("bootstrap+wait not rejected: err=%t %s", isErr, text)
+	}
+}

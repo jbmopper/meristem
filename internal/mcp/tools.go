@@ -566,6 +566,9 @@ func (s *Server) toolFeedRead() Tool {
 				Actors       []string `json:"actors"`
 				WorkItem     string   `json:"work_item"`
 				WorkItemTree string   `json:"work_item_tree"`
+				// bootstrap=head mints an identity-bound cursor at the
+				// current head without consuming events — REST parity.
+				Bootstrap string `json:"bootstrap"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -684,6 +687,27 @@ func (s *Server) toolFeedRead() Tool {
 			readFilter, err := feed.NormalizeReadFilter(readFilter)
 			if err != nil {
 				return nil, fmt.Errorf("feed.read: invalid_filter: %w", err)
+			}
+			if args.Bootstrap != "" {
+				if args.Bootstrap != "head" {
+					return nil, fmt.Errorf("feed.read: invalid_bootstrap: bootstrap must be head when present")
+				}
+				if args.Cursor != "" || args.Wait != "" {
+					return nil, fmt.Errorf("feed.read: invalid_bootstrap: bootstrap cannot be combined with cursor or wait")
+				}
+				bootCursor, err := s.deps.Feed.BootstrapCursorForIdentity(ctx,
+					projectionNameForTool(projection), projectionVersionForTool(projection), readFilter.FingerprintHash())
+				if err != nil {
+					return nil, err
+				}
+				if isProviderSafeContext(ctx) {
+					return providerSafeFeedPage{page: feed.Page{Items: []feed.Item{}, NextCursor: bootCursor}}, nil
+				}
+				return map[string]any{
+					"items":       []feed.Item{},
+					"next_cursor": bootCursor,
+					"has_more":    false,
+				}, nil
 			}
 			if args.Cursor == "" && args.Wait == "" {
 				var items []feed.Item

@@ -268,6 +268,63 @@ func TestFeedStreamContentFilterDeliversAndOmitsIntegration(t *testing.T) {
 	}
 }
 
+func TestFeedBootstrapHeadCursorConsumesNothingIntegration(t *testing.T) {
+	fixture := newAssignedFeedFixture(t)
+
+	broad, err := fixture.auth.CreateToken(fixture.ctx, auth.CreateTokenInput{
+		Name: "bootstrap-broad", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeFeedRead}, Actor: &fixture.root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create broad reader: %v", err)
+	}
+
+	// Bootstrap returns an identity-bound cursor and NO items.
+	lens := "kind=work_item.event_appended"
+	rec := doREST(t, fixture.server.Handler(), http.MethodGet, "/v1/feed?bootstrap=head&"+lens, broad.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	var boot struct {
+		Items      []feedItemProbe `json:"items"`
+		NextCursor string          `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &boot); err != nil || boot.NextCursor == "" {
+		t.Fatalf("decode bootstrap: err=%v body=%s", err, rec.Body.String())
+	}
+	if len(boot.Items) != 0 {
+		t.Fatalf("bootstrap must not return items, got %d", len(boot.Items))
+	}
+
+	// An event appended immediately after the mint is fully the cursor's to
+	// deliver — nothing was consumed by the bootstrap itself.
+	appendAssignedFeedNote(t, fixture, fixture.assignedA.ID, "bootstrap-race-wake", uuid.Nil)
+	rec = doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?wait=0s&cursor="+boot.NextCursor+"&"+lens, broad.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "bootstrap-race-wake") {
+		t.Fatalf("event after bootstrap was not delivered from the minted cursor: %s", rec.Body.String())
+	}
+
+	// The minted cursor is bound to the lens identity: a different lens
+	// fails closed exactly like any other cursor.
+	rec = doREST(t, fixture.server.Handler(), http.MethodGet,
+		"/v1/feed?wait=0s&cursor="+boot.NextCursor, broad.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusBadRequest)
+	assertErrorCode(t, rec, "cursor_filter_mismatch")
+
+	// Fail-closed argument validation.
+	for _, tc := range []struct {
+		query string
+	}{
+		{"bootstrap=tail"},
+		{"bootstrap=head&cursor=" + boot.NextCursor},
+		{"bootstrap=head&wait=0s"},
+	} {
+		rec := doREST(t, fixture.server.Handler(), http.MethodGet, "/v1/feed?"+tc.query+"&"+lens, broad.Secret, "", nil)
+		assertRESTStatus(t, rec, http.StatusBadRequest)
+		assertErrorCode(t, rec, "invalid_bootstrap")
+	}
+}
+
 func TestFeedAssignedLaneKindExclusionKeepsWakesIntegration(t *testing.T) {
 	fixture := newAssignedFeedFixture(t)
 

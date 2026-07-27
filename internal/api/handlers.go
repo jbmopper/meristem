@@ -228,6 +228,36 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// bootstrap=head: mint an identity-bound cursor at the current head
+	// without consuming any events — the atomic start point for durable
+	// watchers. The lens is fully validated above, so the cursor carries
+	// the same fingerprint later stream/page reads will demand.
+	if bootstrap := q.Get("bootstrap"); bootstrap != "" {
+		if bootstrap != "head" {
+			writeAPIError(w, http.StatusBadRequest, "invalid_bootstrap", "bootstrap must be head when present")
+			return
+		}
+		if cursor != "" || waitStr != "" {
+			writeAPIError(w, http.StatusBadRequest, "invalid_bootstrap", "bootstrap cannot be combined with cursor or wait")
+			return
+		}
+		bootCursor, err := s.feed.BootstrapCursorForIdentity(r.Context(),
+			projectionNameForFeed(projection), projectionVersionForFeed(projection), readFilter.FingerprintHash())
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "feed_read_failed", "could not resolve bootstrap cursor")
+			return
+		}
+		if !s.allowAuthoritativeReadResponse(w) {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items":       []feed.Item{},
+			"next_cursor": bootCursor,
+			"has_more":    false,
+		})
+		return
+	}
+
 	if cursor == "" && waitStr == "" {
 		var items []feed.Item
 		if assignedRecipient == uuid.Nil && projection == nil && len(excludeActors) == 0 && len(contentPredicates) == 0 {

@@ -92,22 +92,44 @@ type Predicate struct {
 // ordering, and the filter fingerprint all derive from it. EventKinds and
 // TokenIDs must be canonicalized (trimmed/sorted/deduped) before this is
 // meaningful.
+//
+// COMPATIBILITY CONTRACT: issued cursors embed the fingerprint derived from
+// these keys, so every predicate shape that could exist before a deploy MUST
+// keep its exact encoding — changing it would invalidate every outstanding
+// filtered cursor (production listener lanes included) at once. The shipped
+// encoding is the 4-element tuple [kind, tokenID, workItemID, kinds]. A
+// single-entry actor set therefore encodes exactly like the legacy
+// single-TokenID actor predicate. Only the genuinely NEW shape — a
+// multi-actor set — gets the distinct 5-element tuple, which no pre-existing
+// cursor can carry. Pinned by TestCanonicalFingerprintsAreStable.
 func (p Predicate) canonicalKey() string {
 	// JSON encoding is unambiguous under arbitrary kind strings — delimiter
-	// characters inside EventKinds entries cannot collide across sets.
+	// characters inside EventKinds entries cannot collide across sets; nor
+	// can the 4- and 5-element tuples collide with each other.
 	kinds := p.EventKinds
 	if len(kinds) == 0 {
 		// nil and empty are one identity; encode both as [].
 		kinds = []string{}
 	}
-	tokens := make([]string, 0, len(p.TokenIDs))
-	for _, id := range p.TokenIDs {
-		tokens = append(tokens, id.String())
+	if len(p.TokenIDs) > 1 {
+		tokens := make([]string, 0, len(p.TokenIDs))
+		for _, id := range p.TokenIDs {
+			tokens = append(tokens, id.String())
+		}
+		raw, err := json.Marshal([]any{string(p.Kind), p.TokenID.String(), tokens, p.WorkItemID.String(), kinds})
+		if err != nil {
+			return string(p.Kind) + "|" + p.TokenID.String() + "|" + p.WorkItemID.String()
+		}
+		return string(raw)
 	}
-	raw, err := json.Marshal([]any{string(p.Kind), p.TokenID.String(), tokens, p.WorkItemID.String(), kinds})
+	tokenID := p.TokenID
+	if len(p.TokenIDs) == 1 {
+		tokenID = p.TokenIDs[0]
+	}
+	raw, err := json.Marshal([]any{string(p.Kind), tokenID.String(), p.WorkItemID.String(), kinds})
 	if err != nil {
 		// Marshaling strings cannot fail; keep the contract total anyway.
-		return string(p.Kind) + "|" + p.TokenID.String() + "|" + p.WorkItemID.String()
+		return string(p.Kind) + "|" + tokenID.String() + "|" + p.WorkItemID.String()
 	}
 	return string(raw)
 }

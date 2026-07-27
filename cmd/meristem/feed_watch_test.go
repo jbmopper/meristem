@@ -113,6 +113,8 @@ func TestClassifyWatchError(t *testing.T) {
 		{"invalid filter", fmt.Errorf("wrap: %w", &apiRequestError{Status: 400, Code: "invalid_feed_predicate"}), watchErrPermanent},
 		{"auth denied", fmt.Errorf("wrap: %w", &apiRequestError{Status: 403, Code: "insufficient_scope"}), watchErrPermanent},
 		{"unauthenticated", fmt.Errorf("wrap: %w", &apiRequestError{Status: 401, Code: "missing_authenticated_token"}), watchErrPermanent},
+		{"request timeout", fmt.Errorf("wrap: %w", &apiRequestError{Status: 408, Code: "request_timeout"}), watchErrTransient},
+		{"rate limited", fmt.Errorf("wrap: %w", &apiRequestError{Status: 429, Code: "rate_limited"}), watchErrTransient},
 	} {
 		if got := classifyWatchError(tc.err); got != tc.want {
 			t.Fatalf("%s: classified %d, want %d", tc.name, got, tc.want)
@@ -208,10 +210,14 @@ func TestWatchBootstrapsCursorThenDeliversAndPersists(t *testing.T) {
 		}, os.Stderr)
 	}()
 
-	// First request is the bootstrap page read; it must carry the lens.
+	// First request is the atomic bootstrap read; it must carry the lens
+	// and ask for the head cursor rather than a consuming page.
 	boot := <-requests
 	if boot.URL.Path != "/v1/feed" || boot.URL.Query().Get("kind") != "work_item.event_appended" {
-		t.Fatalf("expected lens-carrying bootstrap page read, got %s?%s", boot.URL.Path, boot.URL.RawQuery)
+		t.Fatalf("expected lens-carrying bootstrap read, got %s?%s", boot.URL.Path, boot.URL.RawQuery)
+	}
+	if got := boot.URL.Query().Get("bootstrap"); got != "head" {
+		t.Fatalf("bootstrap read must use bootstrap=head, got %q", got)
 	}
 	// The stream then resumes from the minted cursor — no from-now gap.
 	stream := <-requests
@@ -352,6 +358,68 @@ func TestWatchCursorMismatchWithOptInRemintsAndResumes(t *testing.T) {
 		cursor, _ := loadCursorFile(cursorFile)
 		return cursor
 	}, "post-reset-cursor")
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("watch exited with error: %v", err)
+	}
+}
+
+func TestWatchBootstrapRetriesTransientFailureThenConnects(t *testing.T) {
+	cursorFile := filepath.Join(t.TempDir(), "cursor")
+	requests := make(chan *http.Request, 8)
+	var bootAttempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case requests <- r.Clone(context.Background()):
+		default:
+		}
+		if r.URL.Path == "/v1/feed" {
+			bootAttempts++
+			if bootAttempts == 1 {
+				// Transient outage on the first mint: must be retried, not fatal.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprint(w, `{"error":{"code":"database_unavailable","message":"temporarily down"}}`)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"items":[],"next_cursor":"boot-after-503","has_more":false}`)
+			return
+		}
+		serveSSE(w, sseFrameFor("cursor-live", "work_item.event_appended", "post-outage"))
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runFeedWatch(ctx, nil, watchClientFor(srv, nil), watchOptions{
+			retryBackoff: 10 * time.Millisecond,
+			cursorFile:   cursorFile,
+		}, os.Stderr)
+	}()
+
+	// 503 mint -> retried mint -> stream resumes from the minted cursor.
+	first := <-requests
+	if first.URL.Path != "/v1/feed" {
+		t.Fatalf("expected bootstrap attempt first, got %s", first.URL.Path)
+	}
+	second := <-requests
+	if second.URL.Path != "/v1/feed" {
+		t.Fatalf("expected bootstrap retry after 503, got %s", second.URL.Path)
+	}
+	stream := <-requests
+	if stream.URL.Path != "/v1/feed/stream" || stream.Header.Get("Last-Event-ID") != "boot-after-503" {
+		t.Fatalf("expected stream resume from retried bootstrap cursor, got %s %q", stream.URL.Path, stream.Header.Get("Last-Event-ID"))
+	}
+
+	waitForFileContent(t, "cursor file", func() string {
+		cursor, _ := loadCursorFile(cursorFile)
+		return cursor
+	}, "cursor-live")
 
 	cancel()
 	if err := <-done; err != nil {

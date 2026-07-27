@@ -296,12 +296,16 @@ func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, 
 			lastID = saved
 		} else {
 			// Fresh durable watcher: mint the identity-bound head cursor
-			// through the page surface and persist it BEFORE opening the
-			// stream. From here on, every event after this point is either
-			// delivered or still ahead of the durable cursor — a crash or a
-			// slow first connect cannot silently skip a wake.
-			lastID, err = client.mintCursor(ctx)
+			// via the server's atomic bootstrap and persist it BEFORE
+			// opening the stream. From here on, every event after this
+			// point is either delivered or still ahead of the durable
+			// cursor — a crash or a slow first connect cannot silently
+			// skip a wake. Transient mint failures retry like the stream.
+			lastID, err = mintCursorWithRetry(ctx, logger, client, opts.retryBackoff)
 			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil
+				}
 				return fmt.Errorf("feed --watch: bootstrap cursor: %w", err)
 			}
 			if err := saveCursorFile(opts.cursorFile, lastID); err != nil {
@@ -392,8 +396,8 @@ func runFeedWatch(ctx context.Context, logger *slog.Logger, client *feedClient, 
 				// Re-mint under the current identity rather than leaving the
 				// file empty: the durable no-silent-skip property resumes
 				// immediately at the reset point instead of lapsing until
-				// the first post-reset delivery.
-				fresh, mintErr := client.mintCursor(ctx)
+				// the first post-reset delivery. Transient failures retry.
+				fresh, mintErr := mintCursorWithRetry(ctx, logger, client, opts.retryBackoff)
 				if mintErr != nil {
 					return fmt.Errorf("feed --watch: re-bootstrap cursor after reset: %w", mintErr)
 				}
@@ -447,10 +451,46 @@ func classifyWatchError(err error) watchErrorClass {
 	case "invalid_cursor", "cursor_filter_mismatch", "cursor_projection_mismatch":
 		return watchErrCursorIdentity
 	}
+	switch apiErr.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		// Retryable by definition; treating them as permanent would kill a
+		// healthy watcher during a load spike.
+		return watchErrTransient
+	}
 	if apiErr.Status >= 400 && apiErr.Status < 500 {
 		return watchErrPermanent
 	}
 	return watchErrTransient
+}
+
+// mintCursorWithRetry runs the bootstrap mint under the same error policy as
+// the stream loop: transient failures (network, 5xx, 408/429) back off and
+// retry until ctx cancels; permanent config/auth errors and cursor-identity
+// errors exit immediately. Without this, one 503 during startup would kill a
+// durable watcher that the reconnect loop was built to keep alive.
+func mintCursorWithRetry(ctx context.Context, logger *slog.Logger, client *feedClient, backoff time.Duration) (string, error) {
+	for {
+		cursor, err := client.mintCursor(ctx)
+		if err == nil {
+			return cursor, nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if classifyWatchError(err) != watchErrTransient {
+			return "", err
+		}
+		if logger != nil {
+			logger.Warn("feed --watch: bootstrap mint failed, retrying",
+				slog.String("error", err.Error()),
+				slog.String("backoff", backoff.String()))
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
 }
 
 // printNDJSON emits the full wire envelope of one event as a single JSON
@@ -720,21 +760,20 @@ func (c *feedClient) fetch(ctx context.Context, limit int) ([]feedItem, error) {
 	return envelope.Items, nil
 }
 
-// mintCursor asks the page surface for an identity-bound cursor at the
-// current head, under exactly the lens (query params) this client streams
-// with — same normalized filter, same fingerprint, so the stream accepts it
-// as a resume point. Used to bootstrap a durable watcher before its first
-// stream connect. limit=1 keeps the response tiny; with an empty cursor the
-// page starts at head, so at most the events that landed during this call
-// are scanned and the returned next_cursor covers them.
+// mintCursor asks the server's bootstrap=head mode for an identity-bound
+// cursor at the current head, under exactly the lens (query params) this
+// client streams with — same normalized filter, same fingerprint, so the
+// stream accepts it as a resume point. bootstrap=head is atomic on the
+// server (one MAX(seq) read, no events returned), so no event can be
+// consumed-and-discarded by the mint itself: everything after the minted
+// point is the stream's to deliver.
 func (c *feedClient) mintCursor(ctx context.Context) (string, error) {
 	u, err := url.Parse(c.baseURL + "/v1/feed")
 	if err != nil {
 		return "", fmt.Errorf("feed: parse api URL: %w", err)
 	}
 	q := c.lensQuery()
-	q.Set("wait", "0s")
-	q.Set("limit", "1")
+	q.Set("bootstrap", "head")
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)

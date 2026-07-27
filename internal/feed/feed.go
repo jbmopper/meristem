@@ -411,6 +411,20 @@ func (s *Service) head(ctx context.Context) (cursor, error) {
 	return cursor{seq: seq}, nil
 }
 
+// BootstrapCursorForIdentity returns an identity-bound cursor at the current
+// head WITHOUT consuming any events: it is one MAX(seq) read, so there is no
+// snapshot-then-query window in which an arriving event could be returned
+// (and then discarded by a caller that only wants the cursor). Durable
+// watchers persist this before their first stream connect; every event with
+// a later seq is then either delivered or still ahead of the durable cursor.
+func (s *Service) BootstrapCursorForIdentity(ctx context.Context, projectionName string, projectionVersion int, filterFingerprint string) (string, error) {
+	head, err := s.head(ctx)
+	if err != nil {
+		return "", err
+	}
+	return encodeCursorFor(head.seq, projectionName, projectionVersion, filterFingerprint), nil
+}
+
 // cursorExists verifies that the seq encoded in a consumer-supplied
 // cursor was actually emitted by this server. Closes the contract gap
 // B found in e1625848: without this check, a fabricated cursor decodes
