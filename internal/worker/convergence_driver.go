@@ -415,22 +415,32 @@ func collectEventAppendedSignals(scanned []eventAppendedSignalRow) ([]convergenc
 	var latestReview *convergence.Signal
 
 	// First pass: index valid remediation annotations, first-accepted per
-	// source event id. Malformed annotations become durable evidence and are
-	// never partially applied.
+	// source event id. An annotation is HISTORICAL by contract: it may only
+	// interpret a source event that already existed when the annotation was
+	// appended. Because event ids are deterministic, a future event's id is
+	// predictable — without the ordering fence, an annotation could pre-seed
+	// the interpretation of an event not yet written (REM-B1). Rows arrive
+	// seq-ordered, so "source seen before annotation" is exactly the fence;
+	// a pre-source annotation is permanently invalid, never merely late.
+	// Malformed annotations become durable evidence and are never partially
+	// applied.
 	remediations := make(map[uuid.UUID]map[string]any)
+	seenEvents := make(map[uuid.UUID]bool, len(scanned))
 	for _, row := range scanned {
 		inner, innerKind, reason := decodeEventAppendedInner(row.payload)
-		if reason != "" || innerKind != workitems.PayloadShapeRemediatedInnerKind {
-			continue
+		if reason == "" && innerKind == workitems.PayloadShapeRemediatedInnerKind {
+			remediation, err := workitems.ParsePayloadShapeRemediation(inner)
+			if err != nil {
+				unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: err.Error()})
+			} else if seenEvents[remediation.SourceEventID] {
+				if _, seen := remediations[remediation.SourceEventID]; !seen {
+					remediations[remediation.SourceEventID] = remediation.Parsed
+				}
+			}
+			// A pre-source annotation indexes nothing: its source had not
+			// been appended yet, so it cannot be a historical interpretation.
 		}
-		remediation, err := workitems.ParsePayloadShapeRemediation(inner)
-		if err != nil {
-			unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: err.Error()})
-			continue
-		}
-		if _, seen := remediations[remediation.SourceEventID]; !seen {
-			remediations[remediation.SourceEventID] = remediation.Parsed
-		}
+		seenEvents[row.id] = true
 	}
 
 	for _, row := range scanned {

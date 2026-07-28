@@ -115,6 +115,27 @@ func TestPayloadRemediationInterpretationIntegration(t *testing.T) {
 	appendRawWorkItemEvent(t, ctx, pool, writer, systemTok.Token, itemD.ID, verdictPayloadD)
 	annotate(itemD.ID, rawAppendedEventID(t, itemD.ID, verdictPayloadD), map[string]any{"verdict": "accepted"})
 
+	// Item E (REM-B1): an annotation appended BEFORE its source event is a
+	// pre-seeded prediction, not a historical interpretation — deterministic
+	// event ids make the future id computable, so the ordering fence is the
+	// only thing standing between annotation and forgery-by-anticipation.
+	// The pre-seeded annotation must produce no signal even after the source
+	// arrives.
+	itemE := newItem("pre-source annotation is void", []string{"remedy-e"})
+	badPayloadE := map[string]any{"inner_kind": "checklist.item:remedy-e", "inner": `{"pass": tru`}
+	annotate(itemE.ID, rawAppendedEventID(t, itemE.ID, badPayloadE), map[string]any{"pass": true})
+	appendRawWorkItemEvent(t, ctx, pool, writer, systemTok.Token, itemE.ID, badPayloadE)
+
+	// Item F: same pre-seeding, but a second annotation lands AFTER the
+	// source: the pre-source copy stays void and the post-source one is the
+	// first ACCEPTED interpretation, so the item converges.
+	itemF := newItem("post-source annotation still speaks", []string{"remedy-f"})
+	badPayloadF := map[string]any{"inner_kind": "checklist.item:remedy-f", "inner": `{"pass": als`}
+	sourceF := rawAppendedEventID(t, itemF.ID, badPayloadF)
+	annotate(itemF.ID, sourceF, map[string]any{"pass": false})
+	appendRawWorkItemEvent(t, ctx, pool, writer, systemTok.Token, itemF.ID, badPayloadF)
+	annotate(itemF.ID, sourceF, map[string]any{"pass": true})
+
 	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{domain.WorkItemCaptured: time.Hour}}
 	now := time.Now()
 	w, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return now })
@@ -139,6 +160,8 @@ func TestPayloadRemediationInterpretationIntegration(t *testing.T) {
 	assertState(itemB, domain.WorkItemRunning, "the FIRST annotation (pass=false) must win deterministically")
 	assertState(itemC, domain.WorkItemRunning, "the recovered original (pass=false) must outrank the annotation")
 	assertState(itemD, domain.WorkItemRunning, "a review verdict must never be satisfied through remediation")
+	assertState(itemE, domain.WorkItemRunning, "a pre-source annotation must never produce a signal (REM-B1)")
+	assertState(itemF, domain.WorkItemDone, "the first POST-source annotation is the first accepted interpretation")
 }
 
 func TestPayloadRemediationMalformedAnnotationIsEvidenceIntegration(t *testing.T) {
