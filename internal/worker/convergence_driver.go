@@ -400,15 +400,56 @@ func (w *Worker) convergenceSignalsFromEventAppended(ctx context.Context, workIt
 // ignored. That lets a later accepted review supersede a blocking finding
 // without weakening AllPassChecklist's strict failure semantics for every
 // other check.
+//
+// payload_shape.remediated annotations (append-only remediation of historical
+// string-shaped inners, e5a975cb) are interpreted here under three fail-closed
+// rules: the FIRST valid annotation per source event wins (deterministic by
+// seq — a later annotation can never flip an interpretation already made);
+// an annotation only speaks where direct decoding yielded no object (an inner
+// the universal legacy recovery already reads keeps its original meaning);
+// and review verdicts are never remediated — their typed, attributed seam
+// cannot be re-interpreted by a different author after the fact.
 func collectEventAppendedSignals(scanned []eventAppendedSignalRow) ([]convergence.Signal, []unusableEventAppendedSignal) {
 	var out []convergence.Signal
 	var unusable []unusableEventAppendedSignal
 	var latestReview *convergence.Signal
+
+	// First pass: index valid remediation annotations, first-accepted per
+	// source event id. Malformed annotations become durable evidence and are
+	// never partially applied.
+	remediations := make(map[uuid.UUID]map[string]any)
+	for _, row := range scanned {
+		inner, innerKind, reason := decodeEventAppendedInner(row.payload)
+		if reason != "" || innerKind != workitems.PayloadShapeRemediatedInnerKind {
+			continue
+		}
+		remediation, err := workitems.ParsePayloadShapeRemediation(inner)
+		if err != nil {
+			unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: err.Error()})
+			continue
+		}
+		if _, seen := remediations[remediation.SourceEventID]; !seen {
+			remediations[remediation.SourceEventID] = remediation.Parsed
+		}
+	}
+
 	for _, row := range scanned {
 		inner, innerKind, reason := decodeEventAppendedInner(row.payload)
 		if reason != "" {
 			unusable = append(unusable, unusableEventAppendedSignal{id: row.id, reason: reason})
 			continue
+		}
+		if innerKind == workitems.PayloadShapeRemediatedInnerKind {
+			// The annotation interprets its source; it is never a signal of
+			// its own (malformed copies were already evidenced above).
+			continue
+		}
+		if inner == nil && innerKind != "" && innerKind != workitems.ReviewVerdictInnerKind {
+			// Unrecoverable inner: let a first-accepted remediation speak for
+			// it. Review verdicts are excluded — see the contract above.
+			if parsed, ok := remediations[row.id]; ok {
+				inner = parsed
+			}
 		}
 		if innerKind == workitems.ReviewVerdictCheckKind {
 			// This signal is server-derived. Ignore any legacy/manual copy so
