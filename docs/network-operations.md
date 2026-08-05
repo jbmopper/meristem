@@ -106,6 +106,57 @@ Use a distinct token row on each node. The hub bearer is authenticated by the
 hub database; the local bearer is authenticated by the pull-only node's
 database. Never reuse a root token for either role.
 
+### Draining more than one queue host
+
+A node's commands do not all live in one place. A command is accepted by
+whichever queue host was approved when it was enqueued, and it stays on that
+host until this node collects it. `--multi-peer` drains every approved host
+instead of only `MERISTEM_HUB_URL`:
+
+```bash
+export MERISTEM_HUB_URL='https://hub.example.test'   # still required; feed cursor
+export MERISTEM_NODE_ID='spoke-a'
+export MERISTEM_LOCAL_URL='http://127.0.0.1:8080'
+export MERISTEM_TOKEN='...local agent bearer...'
+export MERISTEM_HUB_TOKEN='...hub-minted agent bearer...'
+
+# One bearer per queue host, injected from the secret store.
+export MERISTEM_PEER_TOKEN_HUB='...minted by hub for spoke-a...'
+export MERISTEM_PEER_TOKEN_DEN='...minted by den for spoke-a...'
+
+go run ./cmd/meristem spoke --interval=30s --multi-peer
+```
+
+The drain set comes from the `nodes` projection each tick, so adding or
+removing an approved queue host takes effect at the next tick with no restart.
+
+**One bearer per host, and no fallback.** Each host is reached only under its
+own `MERISTEM_PEER_TOKEN_<NODE_ID>` (uppercase, hyphens to underscores:
+`home-server` → `MERISTEM_PEER_TOKEN_HOME_SERVER`). A host with no configured
+credential is skipped for that tick and logged by node id. `MERISTEM_HUB_TOKEN`
+is **not** used as a fallback: bearers are node-local, so presenting one host's
+token to another both fails and hands that host a credential it was never meant
+to see. For the same reason `--multi-peer` refuses to start without at least
+the resolver configured.
+
+**Removing a queue host does not stop the drain immediately.** For
+`--drain-grace` (default 24h) after an operator removes a host from this node's
+`queue_via`, the node keeps polling it to collect commands accepted before the
+change. Without that window those commands are not lost — they are stranded on
+a host nobody is polling, which is worse, because nothing reports it. Retained
+hosts appear in the logs marked `retained=true`. Widen the window if a peer may
+be offline longer than a day; do not set it to zero unless you are certain the
+removed host held nothing.
+
+**One unreachable host does not block the others.** Each host is drained
+independently; a failure costs that host's commands for that tick only. A tick
+reports `peers_drained` and `peers_unreachable`, so a partial outage reads as
+partial rather than as a total failure.
+
+Leaving `--multi-peer` off keeps the previous behavior exactly: one host,
+`MERISTEM_HUB_URL` under `MERISTEM_HUB_TOKEN`. An existing deployment upgrades
+with no configuration change, and its stored feed cursor is preserved.
+
 ## Reconcile the registry
 
 On each non-authoritative node, run the outbound reconciler under a supervisor:

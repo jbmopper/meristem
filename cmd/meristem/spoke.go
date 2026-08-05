@@ -15,6 +15,12 @@
 //	MERISTEM_TOKEN        this node's local agent bearer (required)
 //	MERISTEM_LOCAL_URL    local api base URL (default http://localhost:8080)
 //	MERISTEM_DATABASE_URL local Postgres DSN (for the feed-cursor bookmark)
+//
+// With --multi-peer the drain set comes from the nodes projection instead of
+// MERISTEM_HUB_URL, and each queue host is reached under its own bearer from
+// MERISTEM_PEER_TOKEN_<NODE_ID>. There is no fallback to MERISTEM_HUB_TOKEN:
+// bearers are node-local, so presenting one host's token to another both fails
+// and hands that host a credential it was never meant to see.
 package main
 
 import (
@@ -43,7 +49,11 @@ func runSpoke(ctx context.Context, logger *slog.Logger, args []string, build bui
 	fs := flag.NewFlagSet("spoke", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var intervalText string
+	var multiPeer bool
+	var graceText string
 	fs.StringVar(&intervalText, "interval", "", "duration between spoke poll ticks (default 30s)")
+	fs.BoolVar(&multiPeer, "multi-peer", false, "drain every approved queue host from the nodes projection instead of only MERISTEM_HUB_URL")
+	fs.StringVar(&graceText, "drain-grace", "", "how long to keep draining a queue host after it leaves this node's allowlist (default 24h)")
 	if err := fs.Parse(args); err != nil {
 		spokeUsage(os.Stderr)
 		return err
@@ -63,6 +73,21 @@ func runSpoke(ctx context.Context, logger *slog.Logger, args []string, build bui
 			return fmt.Errorf("spoke: --interval must be positive, got %s", parsed)
 		}
 		interval = parsed
+	}
+
+	grace := time.Duration(0)
+	if graceText != "" {
+		parsed, err := time.ParseDuration(graceText)
+		if err != nil {
+			return fmt.Errorf("spoke: invalid --drain-grace %q: %w", graceText, err)
+		}
+		if parsed < 0 {
+			return fmt.Errorf("spoke: --drain-grace must not be negative, got %s", parsed)
+		}
+		grace = parsed
+	}
+	if graceText != "" && !multiPeer {
+		return fmt.Errorf("spoke: --drain-grace only applies with --multi-peer")
 	}
 
 	cfg, err := spoke.LoadConfig()
@@ -100,11 +125,23 @@ func runSpoke(ctx context.Context, logger *slog.Logger, args []string, build bui
 	checkBuild := func() error { return buildguard.RequireNonBlocking(build) }
 	poller := spoke.NewWithCheck(cfg, client, cursor, logger, checkBuild)
 
+	// Multi-peer draining is opt-in. Without the flag the poller keeps draining
+	// exactly MERISTEM_HUB_URL under MERISTEM_HUB_TOKEN, so an existing
+	// deployment upgrades with no configuration change and no behavior change.
+	if multiPeer {
+		peers, err := spoke.NewProjectionPeerSource(pool, cfg.NodeID, grace)
+		if err != nil {
+			return err
+		}
+		poller = poller.WithPeers(peers, spoke.EnvBearerResolver())
+	}
+
 	logger.Info("spoke poller starting",
 		slog.String("node_id", cfg.NodeID),
 		slog.String("hub_url", cfg.HubBaseURL),
 		slog.String("local_url", cfg.LocalURL),
 		slog.String("interval", interval.String()),
+		slog.Bool("multi_peer", multiPeer),
 	)
 	return runCheckedIntervalLoop(
 		ctx,
@@ -132,7 +169,19 @@ MERISTEM_TOKEN with the original idempotency key, acks the outcome to the hub,
 then advances a persisted hub-feed cursor. The hub being unreachable is logged
 and retried, never fatal.
 
-  --interval=DURATION interval between poll ticks. Default: 30s.
+  --interval=DURATION    interval between poll ticks. Default: 30s.
+  --multi-peer           drain every queue host this node is approved to use,
+                         read from the nodes projection each tick, instead of
+                         only MERISTEM_HUB_URL. Each host is reached under its
+                         own MERISTEM_PEER_TOKEN_<NODE_ID> bearer; a host with
+                         no configured credential is skipped, never given
+                         another host's token. One unreachable host does not
+                         block draining from the others.
+  --drain-grace=DURATION with --multi-peer, how long to keep draining a queue
+                         host after an operator removes it from this node's
+                         allowlist. Default: 24h. Commands already accepted by
+                         that host would otherwise be stranded there with
+                         nothing coming to collect them.
 
 environment:
   MERISTEM_HUB_URL      base URL of the hub to poll (required)
@@ -141,5 +190,10 @@ environment:
   MERISTEM_TOKEN        this node's local agent bearer (required, never logged)
   MERISTEM_LOCAL_URL    local api base URL (default http://localhost:8080)
   MERISTEM_DATABASE_URL local Postgres DSN (for the feed-cursor bookmark)
+  MERISTEM_PEER_TOKEN_<NODE_ID>
+                        with --multi-peer, the bearer for one queue host, e.g.
+                        MERISTEM_PEER_TOKEN_HUB for peer "hub" and
+                        MERISTEM_PEER_TOKEN_HOME_SERVER for "home-server"
+                        (required, never logged)
 `)
 }
