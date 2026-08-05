@@ -32,6 +32,77 @@ type Poller struct {
 	cursor       CursorStore
 	logger       *slog.Logger
 	checkRequest func() error
+	peers        PeerSource
+	credentials  PeerBearerResolver
+}
+
+// queuePeer is one queue host resolved for this tick: where to reach it, and
+// the credential for reaching it. It is passed explicitly through every request
+// helper rather than read from config, because the peer a command came FROM is
+// the peer its attempt and ack must go back TO. Acking the wrong host would
+// leave the real one holding a command it believes is still in flight.
+type queuePeer struct {
+	NodeID   string
+	BaseURL  string
+	Bearer   string
+	Retained bool
+}
+
+// PeerSource yields the queue hosts to drain this tick. Production wires
+// ResolveDrainPeers; tests inject a fixed set.
+type PeerSource interface {
+	DrainPeers(ctx context.Context) ([]DrainPeer, error)
+}
+
+// PeerBearerResolver returns the credential for one queue host. It mirrors
+// crossnode.BearerResolver's contract: supervisor-injected or sealed-provider
+// material only, never read from token projections, never logged or persisted.
+// A peer whose credential cannot be resolved is skipped, not substituted for.
+type PeerBearerResolver func(ctx context.Context, peerNodeID string) (string, error)
+
+// WithPeers installs multi-peer draining. Without it a Poller keeps its
+// single-configured-host behavior, which is what makes the degenerate
+// spoke-hub deployment work with no configuration change.
+func (p *Poller) WithPeers(peers PeerSource, credentials PeerBearerResolver) *Poller {
+	p.peers = peers
+	p.credentials = credentials
+	return p
+}
+
+// resolvePeers returns the queue hosts for this tick. With no PeerSource
+// injected it yields exactly the configured host, so existing single-hub
+// deployments and their credentials behave identically.
+func (p *Poller) resolvePeers(ctx context.Context) ([]queuePeer, error) {
+	if p.peers == nil {
+		return []queuePeer{{NodeID: "", BaseURL: p.cfg.HubBaseURL, Bearer: p.cfg.HubToken}}, nil
+	}
+	found, err := p.peers.DrainPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Deliberately no fallback to the configured hub token here. Credentials
+	// are node-local: sending the bearer minted by one host to a different host
+	// both fails and hands that host a credential it was never meant to see. A
+	// resolved peer must have its own credential or be skipped.
+	if p.credentials == nil {
+		return nil, fmt.Errorf("spoke: multi-peer draining requires a per-peer credential resolver")
+	}
+	out := make([]queuePeer, 0, len(found))
+	for _, peer := range found {
+		bearer, err := p.credentials(ctx, peer.NodeID)
+		if err != nil || strings.TrimSpace(bearer) == "" {
+			// One peer without a credential is that peer's problem. It must not
+			// stop the others from draining, and the log line must never carry
+			// the material it failed to resolve.
+			p.logger.Warn("spoke has no credential for queue host, skipping it this tick",
+				slog.String("node_id", p.cfg.NodeID),
+				slog.String("peer_node_id", peer.NodeID),
+			)
+			continue
+		}
+		out = append(out, queuePeer{NodeID: peer.NodeID, BaseURL: peer.DirectURL, Bearer: bearer, Retained: peer.Retained})
+	}
+	return out, nil
 }
 
 // New constructs a Poller. A nil client uses http.DefaultClient; a nil logger
@@ -95,8 +166,16 @@ type TickResult struct {
 	Acked int
 	// NewFeedEvents is how many new hub-feed events this tick observed.
 	NewFeedEvents int
-	// HubReachable is false when the drain or feed poll could not reach the hub.
+	// HubReachable is false when the drain or feed poll could not reach the
+	// hub. With several queue hosts it means "every host was reachable" — one
+	// failing peer is enough to clear it, which keeps the single-host meaning
+	// exactly as it was.
 	HubReachable bool
+	// PeersDrained and PeersUnreachable break the drain down by queue host, so
+	// a partial outage is legible as a partial outage rather than collapsing
+	// into a single boolean.
+	PeersDrained     int
+	PeersUnreachable int
 }
 
 // Tick runs one full spoke iteration. It never returns an error: a hub that is
@@ -156,11 +235,46 @@ func (p *Poller) TickChecked(ctx context.Context) (TickResult, error) {
 // queue read itself fails (partition); per-command local/ack faults are logged
 // and skipped so one bad command never stalls the batch.
 func (p *Poller) drain(ctx context.Context, res *TickResult) error {
-	commands, err := p.fetchPending(ctx)
+	peers, err := p.resolvePeers(ctx)
 	if err != nil {
 		return err
 	}
-	res.Drained = len(commands)
+	var firstErr error
+	for _, peer := range peers {
+		if err := p.drainPeer(ctx, peer, res); err != nil {
+			if isRequestCheckError(err) {
+				return err
+			}
+			// Failure isolation: an unreachable or failing queue host costs its
+			// own commands this tick and nothing else. Returning here would let
+			// one dead peer starve every other peer indefinitely, which in a
+			// mesh is the difference between degraded and stopped.
+			res.PeersUnreachable++
+			p.logger.Warn("spoke could not drain queue host, continuing with the others",
+				slog.String("node_id", p.cfg.NodeID),
+				slog.String("peer_node_id", peer.NodeID),
+				slog.Bool("retained", peer.Retained),
+				slog.String("error", err.Error()),
+			)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		res.PeersDrained++
+	}
+	return firstErr
+}
+
+// drainPeer runs the full drain cycle against exactly one queue host. Every
+// request it makes carries that peer's own URL and credential, so an attempt or
+// ack always returns to the host the command actually came from.
+func (p *Poller) drainPeer(ctx context.Context, peer queuePeer, res *TickResult) error {
+	commands, err := p.fetchPending(ctx, peer)
+	if err != nil {
+		return err
+	}
+	res.Drained += len(commands)
 
 	for _, cmd := range commands {
 		// Never trust the hub's command path. The queue host validates it at
@@ -183,7 +297,7 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 			// mirrors the queue host's own invalid_command_path status. If the ack
 			// fails we simply leave it pending; the 24h/5-attempt patience
 			// reconciler is the backstop.
-			if err := p.ackHub(ctx, cmd.EventID, http.StatusBadRequest, crossnode.CommandRefused); err != nil {
+			if err := p.ackHub(ctx, peer, cmd.EventID, http.StatusBadRequest, crossnode.CommandRefused); err != nil {
 				if isRequestCheckError(err) {
 					return err
 				}
@@ -198,7 +312,7 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 			res.Acked++
 			continue
 		}
-		if err := p.recordAttempt(ctx, cmd); err != nil {
+		if err := p.recordAttempt(ctx, peer, cmd); err != nil {
 			if isRequestCheckError(err) {
 				return err
 			}
@@ -240,7 +354,7 @@ func (p *Poller) drain(ctx context.Context, res *TickResult) error {
 		if ok {
 			outcome = crossnode.CommandDone
 		}
-		if err := p.ackHub(ctx, cmd.EventID, status, outcome); err != nil {
+		if err := p.ackHub(ctx, peer, cmd.EventID, status, outcome); err != nil {
 			if isRequestCheckError(err) {
 				return err
 			}
@@ -260,19 +374,19 @@ type attemptPayload struct {
 	AttemptKey string `json:"attempt_key"`
 }
 
-func (p *Poller) recordAttempt(ctx context.Context, cmd crossnode.QueuedCommand) error {
+func (p *Poller) recordAttempt(ctx context.Context, peer queuePeer, cmd crossnode.QueuedCommand) error {
 	attemptKey := fmt.Sprintf("%s:%d", cmd.EventID, cmd.AttemptCount+1)
 	body, err := json.Marshal(attemptPayload{AttemptKey: attemptKey})
 	if err != nil {
 		return err
 	}
-	endpoint := p.hubURL("/v1/crossnode/commands/" + cmd.EventID.String() + "/attempt")
+	endpoint := peerURL(peer, "/v1/crossnode/commands/"+cmd.EventID.String()+"/attempt")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
+	req.Header.Set("Authorization", "Bearer "+peer.Bearer)
 	req.Header.Set("Idempotency-Key", "attempt:"+attemptKey)
 	if err := p.requireRequest(); err != nil {
 		return err
@@ -291,17 +405,17 @@ func (p *Poller) recordAttempt(ctx context.Context, cmd crossnode.QueuedCommand)
 
 // fetchPending reads GET /v1/crossnode/commands?target=<node_id>&limit=N from
 // the hub under the spoke's hub bearer.
-func (p *Poller) fetchPending(ctx context.Context) ([]crossnode.QueuedCommand, error) {
+func (p *Poller) fetchPending(ctx context.Context, peer queuePeer) ([]crossnode.QueuedCommand, error) {
 	q := url.Values{}
 	q.Set("target", p.cfg.NodeID)
 	q.Set("limit", strconv.Itoa(p.cfg.DrainLimit))
-	endpoint := p.hubURL("/v1/crossnode/commands") + "?" + q.Encode()
+	endpoint := peerURL(peer, "/v1/crossnode/commands") + "?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
+	req.Header.Set("Authorization", "Bearer "+peer.Bearer)
 
 	if err := p.requireRequest(); err != nil {
 		return nil, err
@@ -377,19 +491,19 @@ type ackPayload struct {
 // ackHub posts the structural outcome to
 // POST /v1/crossnode/commands/{event_id}/ack under the hub bearer, keyed by the
 // command's event id so a re-ack collapses at the hub's idempotency middleware.
-func (p *Poller) ackHub(ctx context.Context, eventID uuid.UUID, status int, outcome crossnode.CommandOutcome) error {
+func (p *Poller) ackHub(ctx context.Context, peer queuePeer, eventID uuid.UUID, status int, outcome crossnode.CommandOutcome) error {
 	body, err := json.Marshal(ackPayload{StatusCode: status, OK: outcome == crossnode.CommandDone, Outcome: outcome})
 	if err != nil {
 		return err
 	}
-	endpoint := p.hubURL("/v1/crossnode/commands/" + eventID.String() + "/ack")
+	endpoint := peerURL(peer, "/v1/crossnode/commands/"+eventID.String()+"/ack")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.cfg.HubToken)
+	req.Header.Set("Authorization", "Bearer "+peer.Bearer)
 	req.Header.Set("Idempotency-Key", "ack:"+eventID.String())
 
 	if err := p.requireRequest(); err != nil {
@@ -493,6 +607,10 @@ func (p *Poller) pollFeed(ctx context.Context, res *TickResult) error {
 
 func (p *Poller) hubURL(path string) string {
 	return strings.TrimRight(p.cfg.HubBaseURL, "/") + path
+}
+
+func peerURL(peer queuePeer, path string) string {
+	return strings.TrimRight(peer.BaseURL, "/") + path
 }
 
 // RunLoop drives Tick every interval until ctx is cancelled, running one tick
