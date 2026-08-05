@@ -362,6 +362,9 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 		"convergence.propose_checks",
 		"work_items.update_metadata",
 		"work_items.transition",
+		"work_items.claim",
+		"work_items.get_assignment",
+		"work_items.yield",
 	}
 	if len(result.Tools) != len(expected) {
 		t.Fatalf("expected %d tools, got %d (%v)", len(expected), len(result.Tools), toolNames(result.Tools))
@@ -427,6 +430,9 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		"convergence_propose_checks",
 		"work_items_update_metadata",
 		"work_items_transition",
+		"work_items_claim",
+		"work_items_get_assignment",
+		"work_items_yield",
 	}
 	if len(result.Tools) != len(expected) {
 		t.Fatalf("expected %d tools, got %d (%v)", len(expected), len(result.Tools), toolNames(result.Tools))
@@ -469,6 +475,8 @@ func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 		"convergence.propose_checks": true,
 		"work_items.update_metadata": true,
 		"work_items.transition":      true,
+		"work_items.claim":           true,
+		"work_items.yield":           true,
 	}
 	for _, tool := range s.tools {
 		required := schemaRequiredSet(tool.InputSchema)

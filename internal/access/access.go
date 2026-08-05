@@ -134,7 +134,7 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "registry.list", "registry.get", "projections.list", "projections.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
-	case "work_items.list", "work_items.get":
+	case "work_items.list", "work_items.get", "work_items.get_assignment":
 		return canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor))
 	case "approvals.get", "approvals.list_for_work_item":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
@@ -143,6 +143,11 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition":
 		return scopes[ScopeWorkItemsWriteAll] || scopes[ScopeWorkItemsTrackerWriteAll] ||
 			((scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsTrackerWrite]) && hasWorkItemTreeScope(actor))
+	case "work_items.claim", "work_items.yield":
+		// Assignment mutation is deliberately NOT a tracker-write capability:
+		// sealed provider tracker profiles must not gain lease authority as a
+		// side effect of this case list growing.
+		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	case "convergence.propose_checks", "registry.activate_cultivar", "approvals.request", "connectors.http_request":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:

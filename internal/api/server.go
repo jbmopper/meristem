@@ -540,6 +540,9 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/work-items/{id}/cultivar-activations", s.commandWithAccess(s.canWriteWorkItemPath("registry.activate_cultivar"), http.HandlerFunc(s.handleActivateCultivar)))
 	s.mux.Handle("POST /v1/work-items/{id}/metadata", s.commandWithAccess(s.canWriteWorkItemPath("work_items.update_metadata"), http.HandlerFunc(s.handleUpdateWorkItemMetadata)))
 	s.mux.Handle("POST /v1/work-items/{id}/transition", s.commandWithAccess(s.canWriteWorkItemPath("work_items.transition"), http.HandlerFunc(s.handleTransitionWorkItem)))
+	s.mux.Handle("POST /v1/work-items/{id}/claim", s.commandWithAccess(s.canWriteWorkItemPath("work_items.claim"), http.HandlerFunc(s.handleClaimWorkItem)))
+	s.mux.Handle("GET /v1/work-items/{id}/assignment", s.protected(http.HandlerFunc(s.handleGetWorkItemAssignment)))
+	s.mux.Handle("POST /v1/work-items/{id}/yield", s.commandWithAccess(s.canWriteWorkItemPath("work_items.yield"), http.HandlerFunc(s.handleYieldWorkItem)))
 }
 
 func (s *Server) protected(next http.Handler) http.Handler {

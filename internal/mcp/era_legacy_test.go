@@ -109,6 +109,22 @@ func TestLegacyGoldenBytes(t *testing.T) {
 				t.Fatalf("tools-list: reviewed append payload schema correction count = %d, want 1", strings.Count(got, corrected))
 			}
 			got = strings.Replace(got, corrected, legacy, 1)
+			// Second reviewed exception: the slice-1 assignment transports
+			// (claim/get_assignment/yield) are additive tools appended after
+			// the base catalog. Legacy clients that ignore unknown tools are
+			// unaffected; every base tool must still serialize byte-for-byte,
+			// so the comparison strips exactly the contiguous appended block.
+			marker := `,{"name":"work_items.claim"`
+			idx := strings.Index(got, marker)
+			if idx < 0 || !strings.HasSuffix(got, `]}}`) {
+				t.Fatalf("tools-list: expected the assignment tool block appended at the catalog tail: %s", got)
+			}
+			for _, name := range []string{`"work_items.claim"`, `"work_items.get_assignment"`, `"work_items.yield"`} {
+				if strings.Count(got, `{"name":`+name) != 1 {
+					t.Fatalf("tools-list: assignment tool %s count != 1", name)
+				}
+			}
+			got = got[:idx] + `]}}`
 		}
 		if got != strings.TrimRight(string(want), "\n") {
 			t.Errorf("%s: legacy response bytes changed from the c5a99ac golden\n got: %s\nwant: %s", name, got, strings.TrimRight(string(want), "\n"))

@@ -77,6 +77,9 @@ func (s *Server) buildTools() []Tool {
 		s.toolConvergenceProposeChecks(),
 		s.toolWorkItemsUpdateMetadata(),
 		s.toolWorkItemsTransition(),
+		s.toolWorkItemsClaim(),
+		s.toolWorkItemsGetAssignment(),
+		s.toolWorkItemsYield(),
 	}
 	for i := range tools {
 		if tools[i].Mutates {
@@ -1528,6 +1531,143 @@ func (s *Server) toolWorkItemsTransition() Tool {
 			}
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
+	}
+}
+
+func (s *Server) toolWorkItemsClaim() Tool {
+	return Tool{
+		Name:        "work_items.claim",
+		Description: "Atomically claim a work item under a bounded lease. A same-holder unexpired claim is an idempotent success; a different holder is a conflict with no takeover path.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"id"}, map[string]any{
+			"id": schemaString("Work item uuid."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.WorkItems == nil {
+				return nil, errors.New("workitems service not configured")
+			}
+			var args struct {
+				ID string `json:"id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
+				return nil, err
+			}
+			assignment, err := s.deps.WorkItems.Claim(ctx, id, actor)
+			if err != nil {
+				return nil, assignmentToolErr(err, id)
+			}
+			return map[string]any{"assignment": toAssignmentDTO(assignment)}, nil
+		},
+	}
+}
+
+func (s *Server) toolWorkItemsGetAssignment() Tool {
+	return Tool{
+		Name:        "work_items.get_assignment",
+		Description: "Read the current event-projected assignment holder of a work item.",
+		Mutates:     false,
+		InputSchema: schemaObject([]string{"id"}, map[string]any{
+			"id": schemaString("Work item uuid."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.WorkItems == nil {
+				return nil, errors.New("workitems service not configured")
+			}
+			var args struct {
+				ID string `json:"id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			if err := s.canReadWorkItem(ctx, actor, id); err != nil {
+				return nil, err
+			}
+			assignment, err := s.deps.WorkItems.GetAssignment(ctx, id)
+			if err != nil {
+				return nil, assignmentToolErr(err, id)
+			}
+			return map[string]any{"assignment": toAssignmentDTO(assignment)}, nil
+		},
+	}
+}
+
+func (s *Server) toolWorkItemsYield() Tool {
+	return Tool{
+		Name:        "work_items.yield",
+		Description: "Voluntarily release the caller's active assignment on a work item.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"id"}, map[string]any{
+			"id": schemaString("Work item uuid."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.WorkItems == nil {
+				return nil, errors.New("workitems service not configured")
+			}
+			var args struct {
+				ID string `json:"id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
+				return nil, err
+			}
+			assignment, err := s.deps.WorkItems.Yield(ctx, id, actor)
+			if err != nil {
+				return nil, assignmentToolErr(err, id)
+			}
+			return map[string]any{"assignment": toAssignmentDTO(assignment)}, nil
+		},
+	}
+}
+
+func toAssignmentDTO(a domain.WorkItemAssignment) map[string]any {
+	return map[string]any{
+		"work_item_id":        a.WorkItemID.String(),
+		"holder_token_id":     a.HolderTokenID.String(),
+		"mode":                string(a.Mode),
+		"assignment_event_id": a.AssignmentEventID.String(),
+		"claimed_at":          a.ClaimedAt.UTC().Format(time.RFC3339Nano),
+		"expires_at":          a.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		"updated_at":          a.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// assignmentToolErr maps assignment refusals. The claim-held, unavailable,
+// not-found, and not-held branches are pure — the service rolled back without
+// appending — so they carry the typed pure marker and preserve the caller's
+// idempotency key. Everything else defers to workItemToolErr, which keeps the
+// recorded classification for paths that committed events (notably xylem
+// exhaustion after an incumbent-expiry release).
+func assignmentToolErr(err error, id uuid.UUID) error {
+	if err == nil {
+		return nil
+	}
+	var held *workitems.ClaimHeldError
+	switch {
+	case errors.As(err, &held),
+		errors.Is(err, workitems.ErrClaimUnavailable),
+		errors.Is(err, workitems.ErrAssignmentNotHeld):
+		return replayableToolErr(pureToolErr(err))
+	case errors.Is(err, workitems.ErrAssignmentNotFound):
+		return replayableToolErr(notFoundToolError{msg: fmt.Sprintf("assignment_not_found: no active assignment on work item %s", id)})
+	default:
+		return workItemToolErr(err, fmt.Errorf("work item %s not found", id))
 	}
 }
 
