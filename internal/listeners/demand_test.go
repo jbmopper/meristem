@@ -106,10 +106,10 @@ func TestOwnerInstructionOutcomeFixtures(t *testing.T) {
 		if normalized.Projection != DemandProjection {
 			t.Errorf("%s: projection = %q, want the pinned demand lane %q", fixture.instruction, normalized.Projection, DemandProjection)
 		}
-		if !EligibleDemand(&normalized, registered, fixture.matching) {
+		if !EligibleDemand(&normalized, fixture.matching) {
 			t.Errorf("%s: matching demand refused: %+v", fixture.instruction, fixture.matching)
 		}
-		if EligibleDemand(&normalized, registered, fixture.nonmatching) {
+		if EligibleDemand(&normalized, fixture.nonmatching) {
 			t.Errorf("%s: nonmatching demand admitted: %+v", fixture.instruction, fixture.nonmatching)
 		}
 		// Ordinary chatter — same work item, same origin, but not a demand
@@ -117,7 +117,7 @@ func TestOwnerInstructionOutcomeFixtures(t *testing.T) {
 		// LCP2-B1 failure scenario: a listener configured for "everything"
 		// must not react to unrelated activity.
 		chatter := demandEnvelope(func(e *DemandEnvelope) { e.EventKind = "agent.status" })
-		if EligibleDemand(&normalized, registered, chatter) {
+		if EligibleDemand(&normalized, chatter) {
 			t.Errorf("%s: ordinary chatter admitted as demand", fixture.instruction)
 		}
 	}
@@ -140,7 +140,7 @@ func TestEligibleDemandPredicateSemantics(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			policy := Policy{Predicates: []PredicateWire{c.predicate}, Capabilities: registered}
-			if got := EligibleDemand(&policy, registered, c.env); got != c.want {
+			if got := EligibleDemand(&policy, c.env); got != c.want {
 				t.Errorf("EligibleDemand = %v, want %v", got, c.want)
 			}
 		})
@@ -148,19 +148,17 @@ func TestEligibleDemandPredicateSemantics(t *testing.T) {
 
 	t.Run("unknown predicate vocabulary fails closed", func(t *testing.T) {
 		policy := Policy{Predicates: []PredicateWire{{Kind: "vibes"}}, Capabilities: registered}
-		if EligibleDemand(&policy, registered, demandEnvelope()) {
+		if EligibleDemand(&policy, demandEnvelope()) {
 			t.Error("un-taught predicate vocabulary admitted demand")
 		}
 	})
-	t.Run("nil policy listens to all eligible demand for registered capabilities", func(t *testing.T) {
-		if !EligibleDemand(nil, registered, demandEnvelope()) {
-			t.Error("nil-policy registration refused eligible demand")
-		}
-		if EligibleDemand(nil, registered, demandEnvelope(func(e *DemandEnvelope) { e.EventKind = "agent.status" })) {
-			t.Error("nil-policy registration admitted chatter")
-		}
-		if EligibleDemand(nil, registered, demandEnvelope(func(e *DemandEnvelope) { e.Capability = "capability.unoffered" })) {
-			t.Error("nil-policy registration admitted an unregistered capability")
+	t.Run("no policy means no contract: not routable", func(t *testing.T) {
+		// LCP2-R2-B3: a registration whose admin has not yet established the
+		// intended lens must not receive ANY demand — otherwise a listener
+		// meant for one actor or topic is briefly broad-routable in the gap
+		// between registration and its first policy.
+		if EligibleDemand(nil, demandEnvelope()) {
+			t.Error("policy-less registration admitted demand")
 		}
 	})
 }

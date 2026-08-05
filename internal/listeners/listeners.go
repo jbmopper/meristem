@@ -46,9 +46,25 @@ type Registration struct {
 	Policy                   *Policy
 	PolicyFingerprint        string
 	PolicyEventID            *uuid.UUID
+	StateEventID             uuid.UUID
 	RetiredAt                *time.Time
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
+}
+
+// eventDiscriminator distinguishes distinct logical actions whose event
+// payloads legitimately repeat — policy A -> B -> A cycles and credential
+// rebinding cycles (LCP2-R2-B1). Under the idempotency contract it is the
+// caller's (token, scope, key) identity: stable across retries of ONE action,
+// distinct across actions. Direct service calls outside that contract fall
+// back to the current state/policy predecessor event id, which advances with
+// every accepted mutation, so a repeated payload after intervening change is
+// a new event rather than a silent collapse onto the old one.
+func listenerEventDiscriminator(ctx context.Context, label string, predecessor uuid.UUID) string {
+	if disc, ok := idempotency.EventDiscriminator(ctx); ok {
+		return disc
+	}
+	return label + ":" + predecessor.String()
 }
 
 type Service struct {
@@ -171,15 +187,21 @@ func (s *Service) BindCredential(ctx context.Context, id uuid.UUID, principalTok
 	if reg.RetiredAt != nil {
 		return Registration{}, fmt.Errorf("%w: %s", ErrRetired, id)
 	}
+	if reg.PrincipalTokenID == principalTokenID {
+		// Rebinding the already-bound principal is an idempotent no-op:
+		// nothing rotates, so no event is minted.
+		return reg, tx.Commit(ctx)
+	}
 	if err := s.requireLiveToken(ctx, tx, principalTokenID); err != nil {
 		return Registration{}, err
 	}
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind:  domain.SubjectListener,
-		SubjectID:    id,
-		Kind:         domain.EventListenerCredentialBound,
-		Source:       domain.SourceHuman,
-		ActorTokenID: &actor.ID,
+		SubjectKind:   domain.SubjectListener,
+		SubjectID:     id,
+		Kind:          domain.EventListenerCredentialBound,
+		Source:        domain.SourceHuman,
+		ActorTokenID:  &actor.ID,
+		Discriminator: listenerEventDiscriminator(ctx, "listener_binding", reg.StateEventID),
 		Payload: map[string]any{
 			"payload_version":    1,
 			"principal_token_id": principalTokenID,
@@ -267,13 +289,22 @@ func (s *Service) SetPolicy(ctx context.Context, id uuid.UUID, in SetPolicyInput
 		"focus":                      normalized.Focus,
 		"predicate_fingerprint":      fingerprint,
 	}
+	// The policy predecessor advances with every accepted revision (the
+	// initial revision descends from the registration state event), so an
+	// A -> B -> A cycle mints three distinct events and the projector runs
+	// for each; the idempotency identity still collapses genuine retries.
+	predecessor := reg.StateEventID
+	if reg.PolicyEventID != nil {
+		predecessor = *reg.PolicyEventID
+	}
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind:  domain.SubjectListener,
-		SubjectID:    id,
-		Kind:         domain.EventListenerPolicySet,
-		Source:       sourceForActor(in.Actor),
-		ActorTokenID: &in.Actor.ID,
-		Payload:      payload,
+		SubjectKind:   domain.SubjectListener,
+		SubjectID:     id,
+		Kind:          domain.EventListenerPolicySet,
+		Source:        sourceForActor(in.Actor),
+		ActorTokenID:  &in.Actor.ID,
+		Discriminator: listenerEventDiscriminator(ctx, "listener_policy", predecessor),
+		Payload:       payload,
 	}); err != nil {
 		return Registration{}, err
 	}
@@ -403,7 +434,7 @@ func scanRegistrationQuery(ctx context.Context, q queryer, id uuid.UUID, forUpda
 	query := `
 		SELECT id, name, principal_token_id, provider, capabilities,
 		       max_concurrent_assignments, policy, policy_fingerprint,
-		       policy_event_id, retired_at, created_at, updated_at
+		       policy_event_id, state_event_id, retired_at, created_at, updated_at
 		FROM listener_registrations
 		WHERE id = $1`
 	if forUpdate {
@@ -420,7 +451,7 @@ func scanRegistrationQuery(ctx context.Context, q queryer, id uuid.UUID, forUpda
 	err := q.QueryRow(ctx, query, id).Scan(
 		&reg.ID, &reg.Name, &reg.PrincipalTokenID, &reg.Provider, &capabilities,
 		&reg.MaxConcurrentAssignments, &policyRaw, &fingerprint,
-		&policyEvent, &retiredAt, &reg.CreatedAt, &reg.UpdatedAt,
+		&policyEvent, &reg.StateEventID, &retiredAt, &reg.CreatedAt, &reg.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Registration{}, fmt.Errorf("%w: %s", ErrNotFound, id)

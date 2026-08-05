@@ -36,9 +36,11 @@ func TestEventPayloadVersionDispatch(t *testing.T) {
 		wantErr bool
 	}{
 		{"absent version is v1", map[string]any{"name": "x"}, 1, false},
-		{"null version is v1", map[string]any{"payload_version": nil}, 1, false},
 		{"explicit v1", map[string]any{"payload_version": 1}, 1, false},
 		{"unknown v99 decodes for the gate to refuse", map[string]any{"payload_version": 99}, 99, false},
+		// Presence-aware contract: absence means v1, but a PRESENT
+		// payload_version must be an integer — explicit null is malformed.
+		{"explicit null is malformed", map[string]any{"payload_version": nil}, 0, true},
 		{"fractional version is malformed", map[string]any{"payload_version": 1.5}, 0, true},
 		{"string version is malformed", map[string]any{"payload_version": "one"}, 0, true},
 	}
@@ -71,6 +73,7 @@ func TestProjectorsRefuseUnknownPayloadVersions(t *testing.T) {
 		for _, payload := range []map[string]any{
 			{"payload_version": 99},
 			{"payload_version": "two"},
+			{"payload_version": nil},
 		} {
 			err := registry.Apply(context.Background(), nil, listenerEvent(kind, payload))
 			if err == nil {

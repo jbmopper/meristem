@@ -10,16 +10,18 @@ package listeners
 //     whatever the predicates say.
 //   - Predicates evaluate against the DemandEnvelope, not the raw event row.
 //     In particular the actor predicate matches the demand's ORIGINATING
-//     principal (the creator of the work item whose demand this is), never
-//     the event author — dispatch.requested is system-authored, so matching
-//     authorship would make "listen to Fable" unsatisfiable.
-//   - The envelope's origin and lineage are derived server-side from the
-//     canonical work-item projections at evaluation time. They are never
-//     caller-asserted: a producer cannot forge its way into a listener's
-//     lens by claiming someone else's origin.
+//     principal — the last non-system principal that advanced the work item,
+//     recorded on the dispatch event by the reconciler — never the event
+//     author: dispatch.requested is system-authored, so matching authorship
+//     would make "listen to Fable" unsatisfiable.
+//   - Resolution binds to a DURABLE demand event: capability and origin come
+//     from that event's payload (written by the reconciler), lineage from the
+//     canonical relations projection. Nothing is caller-asserted, so a
+//     producer cannot forge its way into a listener's lens.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -55,28 +57,30 @@ type DemandEnvelope struct {
 	// Lineage is WorkItemID plus every ancestor up to its root(s); the
 	// work_item_tree predicate tests membership here.
 	Lineage []uuid.UUID
-	// OriginTokenID is the originating principal of the demand — the creator
-	// of the work item — NOT the (system) author of the demand event.
+	// OriginTokenID is the originating principal of the demand — the last
+	// non-system principal that advanced the work item, as recorded on the
+	// demand event — NOT the (system) author of the demand event.
 	OriginTokenID uuid.UUID
 }
 
 // EligibleDemand is the pure reduction: does envelope match this listener's
-// listening contract? policy may be nil (a registration whose base policy the
-// admin has not initialized yet listens to all eligible demand for its
-// registered capabilities). Fail-closed: unknown predicate kinds refuse.
-func EligibleDemand(policy *Policy, registeredCapabilities []string, env DemandEnvelope) bool {
+// listening contract? A registration with NO base policy has no contract yet
+// and is not routable (LCP2-R2-B3) — administration establishes the intended
+// lens before any demand can reach the listener, so a listener meant for one
+// actor or topic can never receive broad demand in the gap between
+// registration and its first policy. Fail-closed throughout: unknown
+// predicate kinds refuse. (A normalized policy always carries its effective
+// capability set — an empty submission normalizes to the registered set — so
+// the policy alone is the whole contract.)
+func EligibleDemand(policy *Policy, env DemandEnvelope) bool {
+	if policy == nil {
+		return false
+	}
 	if !slices.Contains(DemandProjectionKinds, env.EventKind) {
 		return false
 	}
-	offered := registeredCapabilities
-	if policy != nil {
-		offered = policy.Capabilities
-	}
-	if !slices.Contains(offered, env.Capability) {
+	if !slices.Contains(policy.Capabilities, env.Capability) {
 		return false
-	}
-	if policy == nil {
-		return true
 	}
 	for _, predicate := range policy.Predicates {
 		if !predicateMatchesDemand(predicate, env) {
@@ -118,34 +122,22 @@ func predicateMatchesDemand(w PredicateWire, env DemandEnvelope) bool {
 	}
 }
 
-// DemandInput names one demand for resolution. Origin and lineage are NOT
-// inputs — the service derives them from the canonical projections.
-type DemandInput struct {
-	Capability string
-	EventKind  string
-	WorkItemID uuid.UUID
-}
-
 // ResolveForDemand is the deterministic router seam (slice-2 exit): producers
-// present a demand — capability plus the demand event's kind and work item —
-// never a bearer UUID. Selection is a pure reduction: live registrations
-// whose listening contract admits the envelope, ordered by (created_at, id);
-// the first is the route. Eligibility beyond the contract (scopes, capacity,
-// review state) is re-validated at claim time, so this choice can be
-// optimistic.
-func (s *Service) ResolveForDemand(ctx context.Context, in DemandInput) (Registration, error) {
-	capability := strings.TrimSpace(in.Capability)
-	if capability == "" {
-		return Registration{}, fmt.Errorf("%w: capability is required", ErrInvalidRequest)
+// present the id of a DURABLE demand event, never a bearer UUID and never
+// caller-asserted routing fields (LCP2-R2-B2). The service loads the event,
+// verifies its kind is in the demand lane, and derives capability, origin,
+// work item, and lineage from its event-backed payload and the canonical
+// relations projection — so a producer cannot forge its way into a listener's
+// lens by claiming someone else's capability or origin. Selection is a pure
+// reduction: live registrations whose listening contract admits the envelope,
+// ordered by (created_at, id); the first is the route. Eligibility beyond the
+// contract (scopes, capacity, review state) is re-validated at claim time, so
+// this choice can be optimistic.
+func (s *Service) ResolveForDemand(ctx context.Context, demandEventID uuid.UUID) (Registration, error) {
+	if demandEventID == uuid.Nil {
+		return Registration{}, fmt.Errorf("%w: demand event id is required", ErrInvalidRequest)
 	}
-	kind := strings.TrimSpace(in.EventKind)
-	if !slices.Contains(DemandProjectionKinds, kind) {
-		return Registration{}, fmt.Errorf("%w: %q is not an eligible demand kind", ErrInvalidRequest, in.EventKind)
-	}
-	if in.WorkItemID == uuid.Nil {
-		return Registration{}, fmt.Errorf("%w: work_item_id is required", ErrInvalidRequest)
-	}
-	env, err := s.demandEnvelope(ctx, capability, kind, in.WorkItemID)
+	env, err := s.demandEnvelope(ctx, demandEventID)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -154,27 +146,59 @@ func (s *Service) ResolveForDemand(ctx context.Context, in DemandInput) (Registr
 		return Registration{}, err
 	}
 	for _, reg := range regs {
-		if EligibleDemand(reg.Policy, reg.Capabilities, env) {
+		if EligibleDemand(reg.Policy, env) {
 			return reg, nil
 		}
 	}
-	return Registration{}, fmt.Errorf("%w: no live listener's contract admits capability %q for this demand", ErrNotFound, capability)
+	return Registration{}, fmt.Errorf("%w: no live listener's contract admits capability %q for demand %s", ErrNotFound, env.Capability, demandEventID)
 }
 
-// demandEnvelope resolves the envelope's origin (work item creator) and tree
-// lineage from the canonical projections.
-func (s *Service) demandEnvelope(ctx context.Context, capability, kind string, workItemID uuid.UUID) (DemandEnvelope, error) {
-	var createdBy *uuid.UUID
-	err := s.pool.QueryRow(ctx, `SELECT created_by FROM work_items WHERE id=$1`, workItemID).Scan(&createdBy)
+// demandEnvelope loads the durable demand event and normalizes it. The
+// capability and originating principal come from the event payload — written
+// by the dispatch reconciler, never by the resolving caller — and lineage
+// comes from the canonical relations projection. Every gap fails closed: a
+// missing event, a non-demand kind, or a payload without routing metadata
+// refuses rather than guessing.
+func (s *Service) demandEnvelope(ctx context.Context, demandEventID uuid.UUID) (DemandEnvelope, error) {
+	var (
+		kind       string
+		subjectID  uuid.UUID
+		payloadRaw []byte
+	)
+	err := s.pool.QueryRow(ctx, `SELECT kind, subject_id, payload FROM events WHERE id=$1`, demandEventID).
+		Scan(&kind, &subjectID, &payloadRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return DemandEnvelope{}, fmt.Errorf("%w: demand work item %s", ErrNotFound, workItemID)
+		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s", ErrNotFound, demandEventID)
 	}
 	if err != nil {
-		return DemandEnvelope{}, fmt.Errorf("listeners: resolve demand origin: %w", err)
+		return DemandEnvelope{}, fmt.Errorf("listeners: load demand event: %w", err)
 	}
-	env := DemandEnvelope{Capability: capability, EventKind: kind, WorkItemID: workItemID}
-	if createdBy != nil {
-		env.OriginTokenID = *createdBy
+	if !slices.Contains(DemandProjectionKinds, kind) {
+		return DemandEnvelope{}, fmt.Errorf("%w: event %s is %q, not an eligible demand kind", ErrInvalidRequest, demandEventID, kind)
+	}
+	var payload struct {
+		Capability    string    `json:"capability"`
+		OriginTokenID uuid.UUID `json:"origin_token_id"`
+		WorkItemID    uuid.UUID `json:"work_item_id"`
+	}
+	if err := json.Unmarshal(payloadRaw, &payload); err != nil {
+		return DemandEnvelope{}, fmt.Errorf("listeners: decode demand payload: %w", err)
+	}
+	if strings.TrimSpace(payload.Capability) == "" {
+		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s carries no capability", ErrInvalidRequest, demandEventID)
+	}
+	if payload.OriginTokenID == uuid.Nil {
+		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s carries no originating principal", ErrInvalidRequest, demandEventID)
+	}
+	workItemID := payload.WorkItemID
+	if workItemID == uuid.Nil {
+		workItemID = subjectID
+	}
+	env := DemandEnvelope{
+		Capability:    strings.TrimSpace(payload.Capability),
+		EventKind:     kind,
+		WorkItemID:    workItemID,
+		OriginTokenID: payload.OriginTokenID,
 	}
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE lineage(id) AS (

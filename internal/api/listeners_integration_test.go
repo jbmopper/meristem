@@ -214,30 +214,92 @@ func jsonHasListener(t *testing.T, body []byte, name string) bool {
 	return false
 }
 
+// TestListenerPolicyIdempotencyDiscriminator pins the transport half of
+// LCP2-R2-B1: under the idempotency contract the event discriminator is the
+// caller's (token, scope, key) identity, so a RETRY of one logical action
+// (same key) replays without a second event, while a REPEATED action with a
+// fresh key mints a distinct event even when the event payload is identical
+// to an earlier revision (the A -> B -> A cycle).
+func TestListenerPolicyIdempotencyDiscriminator(t *testing.T) {
+	f := newListenerFixture(t)
+	h := f.server.Handler()
+
+	createBody := []byte(`{"name":"cycle-rest","principal_token_id":"` + f.principal.Token.ID.String() + `","provider":"codex","capabilities":["review.exact_artifact","review.complementary"]}`)
+	rec := doREST(t, h, http.MethodPost, "/v1/listeners", f.admin.Secret, uuid.NewString(), createBody)
+	assertRESTStatus(t, rec, http.StatusCreated)
+	listenerID, _ := decodeListenerResponse(t, rec.Body.Bytes())["id"].(string)
+
+	countPolicyEvents := func() int {
+		t.Helper()
+		var n int
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM events WHERE subject_kind='listener' AND subject_id=$1 AND kind=$2`,
+			listenerID, domain.EventListenerPolicySet).Scan(&n); err != nil {
+			t.Fatalf("count policy events: %v", err)
+		}
+		return n
+	}
+	setPolicy := func(key, body string) string {
+		t.Helper()
+		rec := doREST(t, h, http.MethodPost, "/v1/listeners/"+listenerID+"/policy", f.admin.Secret, key, []byte(body))
+		assertRESTStatus(t, rec, http.StatusOK)
+		id, _ := decodeListenerResponse(t, rec.Body.Bytes())["policy_event_id"].(string)
+		return id
+	}
+
+	policyA := `{"policy":{"predicates":[],"capabilities":["review.exact_artifact"],"max_concurrent_assignments":1}`
+	policyB := `{"policy":{"predicates":[],"capabilities":["review.complementary"],"max_concurrent_assignments":1}`
+	eventA1 := setPolicy(uuid.NewString(), policyA+`}`)
+	eventB := setPolicy(uuid.NewString(), policyB+`,"observed_policy_event_id":"`+eventA1+`"}`)
+	// The A -> B -> A cycle: identical event payload to A1, fresh key —
+	// must be a THIRD event and the projection must land on A, not stay B.
+	finalKey := uuid.NewString()
+	finalBody := policyA + `,"observed_policy_event_id":"` + eventB + `"}`
+	eventA2 := setPolicy(finalKey, finalBody)
+	if eventA2 == eventA1 {
+		t.Fatalf("repeated policy payload collapsed onto the first event id %s", eventA1)
+	}
+	if got := countPolicyEvents(); got != 3 {
+		t.Fatalf("policy_set events = %d, want 3", got)
+	}
+
+	// Retrying the SAME logical action (same key, same body) replays the
+	// recorded response and appends nothing.
+	if retried := setPolicy(finalKey, finalBody); retried != eventA2 {
+		t.Fatalf("retry returned a different revision: %s != %s", retried, eventA2)
+	}
+	if got := countPolicyEvents(); got != 3 {
+		t.Fatalf("retry appended an event: policy_set = %d, want 3", got)
+	}
+}
+
 // TestListenerDemandResolutionIntegration is the slice-2 exit: a producer
-// presents a DEMAND — capability plus the demand event's kind and work item —
-// never a bearer UUID. Resolution is deterministic (registration order),
-// policy capability narrowing reroutes, persisted predicates evaluate against
-// the envelope's origin and lineage, and non-demand kinds never resolve.
-// (The pure outcome fixtures for the four owner instructions live in
+// presents the id of a DURABLE dispatch demand event — never a bearer UUID
+// and never caller-asserted routing fields. Resolution derives capability and
+// origin from the event payload, lineage from relations; it is deterministic
+// (registration order), capability narrowing reroutes, a policy-less
+// registration is not routable, and non-demand events never resolve. (The
+// pure outcome fixtures for the four owner instructions live in
 // internal/listeners/demand_test.go.)
 func TestListenerDemandResolutionIntegration(t *testing.T) {
 	f := newListenerFixture(t)
 	svc := listeners.NewService(f.pool, f.writer)
 
-	// Demand context: a work item created by a "Fable" principal inside a
-	// tree, and a second item created by someone else in a different tree.
+	// Demand context: a HUMAN-created tree where Fable (an agent) authored
+	// the latest substantive work — codex's LCP2-R2-B2 scenario: the demand
+	// must attribute to Fable, not the human creator and not the system
+	// author of the dispatch event.
 	authSvc := auth.NewService(f.pool, f.writer)
-	fable, err := authSvc.CreateToken(f.ctx, auth.CreateTokenInput{Name: "demand-origin-fable", Source: domain.SourceHuman, Actor: &f.root.Token})
+	fable, err := authSvc.CreateToken(f.ctx, auth.CreateTokenInput{Name: "demand-origin-fable", Source: domain.SourceAgent, Actor: &f.root.Token})
 	if err != nil {
 		t.Fatalf("create fable origin: %v", err)
 	}
 	workSvc := workitems.NewService(f.pool, f.writer)
-	tree, err := workSvc.Create(f.ctx, workitems.CreateInput{Title: "demand-tree", Actor: fable.Token})
+	tree, err := workSvc.Create(f.ctx, workitems.CreateInput{Title: "demand-tree", Actor: f.root.Token})
 	if err != nil {
 		t.Fatalf("create tree: %v", err)
 	}
-	fableItem, err := workSvc.SpawnChild(f.ctx, tree.ID, workitems.CreateInput{Title: "demand-item", Actor: fable.Token})
+	fableItem, err := workSvc.SpawnChild(f.ctx, tree.ID, workitems.CreateInput{Title: "demand-item", Actor: f.root.Token})
 	if err != nil {
 		t.Fatalf("spawn demand item: %v", err)
 	}
@@ -245,9 +307,47 @@ func TestListenerDemandResolutionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create other item: %v", err)
 	}
-	demandFor := func(capability string, workItemID uuid.UUID) listeners.DemandInput {
-		return listeners.DemandInput{Capability: capability, EventKind: domain.EventDispatchRequested, WorkItemID: workItemID}
+
+	// appendDemand writes the durable dispatch event the way the reconciler
+	// does: system-authored, with capability and originating principal in the
+	// payload.
+	appendDemand := func(itemID uuid.UUID, capability string, origin uuid.UUID, extra map[string]any) uuid.UUID {
+		t.Helper()
+		payload := map[string]any{
+			"work_item_id":           itemID,
+			"cultivar":               capability,
+			"capability":             capability,
+			"reason":                 "listener-demand-fixture",
+			"source_reconciler_pass": "dispatch",
+		}
+		if origin != uuid.Nil {
+			payload["origin_token_id"] = origin
+		}
+		for k, v := range extra {
+			payload[k] = v
+		}
+		tx, err := f.pool.Begin(f.ctx)
+		if err != nil {
+			t.Fatalf("begin demand tx: %v", err)
+		}
+		defer func() { _ = tx.Rollback(f.ctx) }()
+		id, _, err := f.writer.Append(f.ctx, tx, events.Spec{
+			SubjectKind: domain.SubjectWorkItem,
+			SubjectID:   itemID,
+			Kind:        domain.EventDispatchRequested,
+			Source:      domain.SourceSystem,
+			Payload:     payload,
+		})
+		if err != nil {
+			t.Fatalf("append demand: %v", err)
+		}
+		if err := tx.Commit(f.ctx); err != nil {
+			t.Fatalf("commit demand: %v", err)
+		}
+		return id
 	}
+	fableDemand := appendDemand(fableItem.ID, "review.complementary", fable.Token.ID, nil)
+	humanDemand := appendDemand(otherItem.ID, "review.complementary", f.root.Token.ID, nil)
 
 	first, err := svc.Register(f.ctx, listeners.RegisterInput{
 		Name: "codex-listener", PrincipalTokenID: f.principal.Token.ID,
@@ -264,50 +364,77 @@ func TestListenerDemandResolutionIntegration(t *testing.T) {
 		t.Fatalf("register second: %v", err)
 	}
 
-	got, err := svc.ResolveForDemand(f.ctx, demandFor("review.complementary", fableItem.ID))
+	// LCP2-R2-B3: neither registration has a policy yet, so neither is
+	// routable — no broad-routing gap between registration and the intended
+	// lens.
+	if _, err := svc.ResolveForDemand(f.ctx, fableDemand); err == nil {
+		t.Fatal("policy-less registrations resolved demand")
+	}
+
+	// Admin establishes both lenses; the first-registered eligible listener
+	// wins deterministically.
+	broadPolicy := listeners.Policy{Capabilities: []string{"review.complementary"}, MaxConcurrentAssignments: 1}
+	if _, err := svc.SetPolicy(f.ctx, first.ID, listeners.SetPolicyInput{Policy: broadPolicy, Actor: f.admin.Token}); err != nil {
+		t.Fatalf("set first policy: %v", err)
+	}
+	if _, err := svc.SetPolicy(f.ctx, second.ID, listeners.SetPolicyInput{Policy: broadPolicy, Actor: f.admin.Token}); err != nil {
+		t.Fatalf("set second policy: %v", err)
+	}
+	got, err := svc.ResolveForDemand(f.ctx, fableDemand)
 	if err != nil || got.ID != first.ID {
 		t.Fatalf("resolution = %v (%v), want first-registered %s", got.ID, err, first.ID)
 	}
 
 	// Narrowing the first listener's policy to implement.go removes it from
 	// review routing; resolution deterministically falls to the second.
+	reg1, err := svc.Get(f.ctx, first.ID)
+	if err != nil {
+		t.Fatalf("read first: %v", err)
+	}
 	if _, err := svc.SetPolicy(f.ctx, first.ID, listeners.SetPolicyInput{
-		Policy: listeners.Policy{Capabilities: []string{"implement.go"}, MaxConcurrentAssignments: 1},
-		Actor:  f.admin.Token,
+		Policy:                listeners.Policy{Capabilities: []string{"implement.go"}, MaxConcurrentAssignments: 1},
+		ObservedPolicyEventID: reg1.PolicyEventID,
+		Actor:                 f.admin.Token,
 	}); err != nil {
 		t.Fatalf("narrow first policy: %v", err)
 	}
-	got, err = svc.ResolveForDemand(f.ctx, demandFor("review.complementary", fableItem.ID))
+	got, err = svc.ResolveForDemand(f.ctx, fableDemand)
 	if err != nil || got.ID != second.ID {
 		t.Fatalf("post-narrowing resolution = %v (%v), want %s", got.ID, err, second.ID)
 	}
 
-	// "Listen to Fable": the actor predicate evaluates against the demand's
-	// ORIGINATING principal (the work item creator) — the dispatch event
-	// itself is system-authored, so authorship matching would never fire.
+	// "Listen to Fable": the actor predicate evaluates against the
+	// originating principal recorded ON the demand event — Fable authored
+	// the work even though a human created the item and the system authored
+	// the dispatch. Human-originated demand refuses.
+	reg2, err := svc.Get(f.ctx, second.ID)
+	if err != nil {
+		t.Fatalf("read second: %v", err)
+	}
 	if _, err := svc.SetPolicy(f.ctx, second.ID, listeners.SetPolicyInput{
 		Policy: listeners.Policy{
 			Predicates:               []listeners.PredicateWire{{Kind: "actor", TokenIDs: []string{fable.Token.ID.String()}}},
 			Capabilities:             []string{"review.complementary"},
 			MaxConcurrentAssignments: 1,
 		},
-		Actor: f.admin.Token,
+		ObservedPolicyEventID: reg2.PolicyEventID,
+		Actor:                 f.admin.Token,
 	}); err != nil {
 		t.Fatalf("set actor policy: %v", err)
 	}
-	got, err = svc.ResolveForDemand(f.ctx, demandFor("review.complementary", fableItem.ID))
+	got, err = svc.ResolveForDemand(f.ctx, fableDemand)
 	if err != nil || got.ID != second.ID {
-		t.Fatalf("fable-origin demand = %v (%v), want %s", got.ID, err, second.ID)
+		t.Fatalf("fable-authored demand = %v (%v), want %s", got.ID, err, second.ID)
 	}
-	if _, err := svc.ResolveForDemand(f.ctx, demandFor("review.complementary", otherItem.ID)); err == nil {
-		t.Fatal("demand originated by another principal resolved through the Fable-only contract")
+	if _, err := svc.ResolveForDemand(f.ctx, humanDemand); err == nil {
+		t.Fatal("human-originated demand resolved through the Fable-only contract")
 	}
 
 	// Tree lineage: pinning the contract to the tree still admits demand on
 	// the CHILD item (lineage membership), and refuses out-of-tree demand.
-	reg2, err := svc.Get(f.ctx, second.ID)
+	reg2, err = svc.Get(f.ctx, second.ID)
 	if err != nil {
-		t.Fatalf("read second: %v", err)
+		t.Fatalf("re-read second: %v", err)
 	}
 	if _, err := svc.SetPolicy(f.ctx, second.ID, listeners.SetPolicyInput{
 		Policy: listeners.Policy{
@@ -320,23 +447,29 @@ func TestListenerDemandResolutionIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set tree policy: %v", err)
 	}
-	got, err = svc.ResolveForDemand(f.ctx, demandFor("review.complementary", fableItem.ID))
+	got, err = svc.ResolveForDemand(f.ctx, fableDemand)
 	if err != nil || got.ID != second.ID {
 		t.Fatalf("in-tree child demand = %v (%v), want %s", got.ID, err, second.ID)
 	}
-	if _, err := svc.ResolveForDemand(f.ctx, demandFor("review.complementary", otherItem.ID)); err == nil {
+	if _, err := svc.ResolveForDemand(f.ctx, humanDemand); err == nil {
 		t.Fatal("out-of-tree demand resolved through a tree-pinned contract")
 	}
 
-	if _, err := svc.ResolveForDemand(f.ctx, demandFor("capability.nobody-offers", fableItem.ID)); err == nil {
-		t.Fatal("resolution of unoffered capability should refuse")
+	// Fail-closed refusals: no such demand event; an event that is not
+	// demand (the listener registration event); a demand whose recorded
+	// capability nobody offers; a demand missing its originating principal.
+	if _, err := svc.ResolveForDemand(f.ctx, uuid.New()); err == nil {
+		t.Fatal("nonexistent demand event resolved")
 	}
-
-	// Ordinary chatter is not demand: the same work item and capability with
-	// a non-demand kind refuses at the envelope gate.
-	if _, err := svc.ResolveForDemand(f.ctx, listeners.DemandInput{
-		Capability: "review.complementary", EventKind: "agent.status", WorkItemID: fableItem.ID,
-	}); err == nil {
+	if _, err := svc.ResolveForDemand(f.ctx, first.StateEventID); err == nil {
 		t.Fatal("non-demand event kind resolved to a listener")
+	}
+	unofferedDemand := appendDemand(fableItem.ID, "capability.nobody-offers", fable.Token.ID, nil)
+	if _, err := svc.ResolveForDemand(f.ctx, unofferedDemand); err == nil {
+		t.Fatal("recorded-but-unoffered capability resolved")
+	}
+	orphanDemand := appendDemand(fableItem.ID, "review.complementary", uuid.Nil, map[string]any{"reason": "no-origin-fixture"})
+	if _, err := svc.ResolveForDemand(f.ctx, orphanDemand); err == nil {
+		t.Fatal("demand without an originating principal resolved")
 	}
 }

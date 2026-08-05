@@ -162,8 +162,9 @@ func (retiredProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event
 
 // requirePayloadVersion is the per-event version gate, called before any
 // transaction use so an unsupported version can never reach a projection
-// write. An absent or null payload_version is v1 by contract; a non-integral,
-// non-numeric, or unknown version fails replay closed.
+// write. The repository contract is presence-aware (LCP2-R2-B4): an ABSENT
+// payload_version is v1; a PRESENT one must be an integer, so explicit null,
+// strings, and fractions are malformed and fail replay closed.
 func requirePayloadVersion(event domain.Event, supported int) error {
 	version, err := eventPayloadVersion(event)
 	if err != nil {
@@ -180,20 +181,23 @@ func eventPayloadVersion(event domain.Event) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("listeners: re-encode %s payload: %w", event.Kind, err)
 	}
-	var probe struct {
-		PayloadVersion *json.Number `json:"payload_version"`
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return 0, fmt.Errorf("listeners: decode %s payload: %w", event.Kind, err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&probe); err != nil {
-		return 0, fmt.Errorf("listeners: decode %s payload_version: %w", event.Kind, err)
-	}
-	if probe.PayloadVersion == nil {
+	field, present := probe["payload_version"]
+	if !present {
 		return 1, nil
 	}
-	version, err := probe.PayloadVersion.Int64()
+	var number json.Number
+	decoder := json.NewDecoder(bytes.NewReader(field))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err != nil || number == "" {
+		return 0, fmt.Errorf("listeners: %s payload_version %s is present but not an integer", event.Kind, field)
+	}
+	version, err := number.Int64()
 	if err != nil {
-		return 0, fmt.Errorf("listeners: %s payload_version %q is not an integer", event.Kind, probe.PayloadVersion.String())
+		return 0, fmt.Errorf("listeners: %s payload_version %q is not an integer", event.Kind, number.String())
 	}
 	return int(version), nil
 }
