@@ -2,6 +2,7 @@ package crossnode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/domain"
@@ -119,6 +121,66 @@ type ReadOutcome struct {
 	StatusCode   int
 	Body         []byte
 	Attempts     []Attempt
+}
+
+// SourceRemoteHome is the discriminant on every remote read result. It is a
+// constant rather than a bool so the shape stays extensible without a future
+// value being mistaken for "local".
+const SourceRemoteHome = "remote_home"
+
+// RemoteReadEnvelope wraps a remote read so a caller cannot mistake it for a
+// local projection. Per docs/network-layer-spec.md §2 a remote response is
+// evidence of the home node's outcome at that moment, not a second
+// authoritative projection of the object.
+//
+// The discriminant travels in the body, not in an HTTP header, because the
+// header is lost the moment a result is serialized into an MCP tool response —
+// which is exactly where the mistake would be made and would be invisible.
+//
+// Three rules bind consumers of this type, and they are the point of it:
+// the wrapped item is never inserted into the local work_items projection;
+// it is never labelled local, cached, or replayed; and the envelope is never
+// unwrapped into the bare local response shape. Local bare-UUID reads keep
+// their existing shape untouched — only the qualified-ref path is wrapped, so
+// nothing that reads a local item changes.
+type RemoteReadEnvelope struct {
+	// Source is always SourceRemoteHome. Present so a deserialized envelope is
+	// self-describing even after it has left this process.
+	Source string `json:"source"`
+	// HomeNodeID is the node that authoritatively owns the object.
+	HomeNodeID string `json:"home_node_id"`
+	// CanonicalRef is the mrs:// form, which is the durable spelling. It is
+	// carried so the result remains re-resolvable without reconstructing a
+	// reference from parts.
+	CanonicalRef string `json:"canonical_ref"`
+	// ObservedAt is when the home's response was received. A remote read is
+	// evidence with a timestamp, not a fact without one.
+	ObservedAt time.Time `json:"observed_at"`
+	// Body is the home's response, verbatim and undigested. It is deliberately
+	// not decoded into a local work-item type: decoding here would invite
+	// exactly the confusion this envelope exists to prevent.
+	Body json.RawMessage `json:"body"`
+}
+
+// NewRemoteReadEnvelope builds an envelope for a completed remote read. It
+// fails closed rather than emitting a half-identified result: a missing home,
+// an unformattable canonical reference, or an empty body would each produce an
+// envelope whose provenance claim is not backed by anything.
+func NewRemoteReadEnvelope(homeNodeID string, id uuid.UUID, observedAt time.Time, body []byte) (RemoteReadEnvelope, error) {
+	ref, ok := domain.FormatCanonicalRef(homeNodeID, id)
+	if !ok {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: cannot format canonical ref for home %q", ErrInvalidQualifiedRef, homeNodeID)
+	}
+	if len(body) == 0 {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: home returned an empty body", ErrInvalidQualifiedRef)
+	}
+	return RemoteReadEnvelope{
+		Source:       SourceRemoteHome,
+		HomeNodeID:   homeNodeID,
+		CanonicalRef: ref,
+		ObservedAt:   observedAt.UTC(),
+		Body:         json.RawMessage(body),
+	}, nil
 }
 
 // ReadWorkItem reads a remotely-homed work item. The ref may be either
