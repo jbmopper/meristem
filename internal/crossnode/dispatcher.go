@@ -153,6 +153,11 @@ type RemoteReadEnvelope struct {
 	// carried so the result remains re-resolvable without reconstructing a
 	// reference from parts.
 	CanonicalRef string `json:"canonical_ref"`
+	// StatusCode is the home's HTTP status. It is carried rather than dropped
+	// so a 404 or a refusal stays visibly a 404 or a refusal: without it, every
+	// response body flattens into the same apparent-success shape and a caller
+	// cannot tell the home's "no" from its "yes".
+	StatusCode int `json:"status_code"`
 	// ObservedAt is when the home's response was received. A remote read is
 	// evidence with a timestamp, not a fact without one.
 	ObservedAt time.Time `json:"observed_at"`
@@ -163,21 +168,37 @@ type RemoteReadEnvelope struct {
 }
 
 // NewRemoteReadEnvelope builds an envelope for a completed remote read. It
-// fails closed rather than emitting a half-identified result: a missing home,
-// an unformattable canonical reference, or an empty body would each produce an
-// envelope whose provenance claim is not backed by anything.
-func NewRemoteReadEnvelope(homeNodeID string, id uuid.UUID, observedAt time.Time, body []byte) (RemoteReadEnvelope, error) {
+// fails closed rather than emitting a half-identified result, because the
+// envelope's whole job is to assert provenance and a half-backed assertion is
+// worse than an error — downstream code trusts the assertion, not the gaps.
+//
+// Every field is validated at construction, so a returned envelope is always
+// serializable. That matters more than it looks: this value's destination is an
+// MCP tool result, and a body that fails json.Marshal later would turn a
+// successful remote read into an opaque failure at the point of delivery,
+// after the network call has already happened.
+func NewRemoteReadEnvelope(homeNodeID string, id uuid.UUID, statusCode int, observedAt time.Time, body []byte) (RemoteReadEnvelope, error) {
 	ref, ok := domain.FormatCanonicalRef(homeNodeID, id)
 	if !ok {
 		return RemoteReadEnvelope{}, fmt.Errorf("%w: cannot format canonical ref for home %q", ErrInvalidQualifiedRef, homeNodeID)
 	}
-	if len(body) == 0 {
-		return RemoteReadEnvelope{}, fmt.Errorf("%w: home returned an empty body", ErrInvalidQualifiedRef)
+	if statusCode < 100 || statusCode > 599 {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: implausible home status %d", ErrInvalidQualifiedRef, statusCode)
+	}
+	if observedAt.IsZero() {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: observation time is zero", ErrInvalidQualifiedRef)
+	}
+	// json.Valid rather than len > 0: a non-JSON body is what makes the
+	// envelope unmarshalable downstream, and whitespace-only passes a length
+	// check while carrying no evidence at all.
+	if !json.Valid(body) {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: home body is not valid JSON", ErrInvalidQualifiedRef)
 	}
 	return RemoteReadEnvelope{
 		Source:       SourceRemoteHome,
 		HomeNodeID:   homeNodeID,
 		CanonicalRef: ref,
+		StatusCode:   statusCode,
 		ObservedAt:   observedAt.UTC(),
 		Body:         json.RawMessage(body),
 	}, nil

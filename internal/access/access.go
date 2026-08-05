@@ -84,7 +84,27 @@ var ErrDenied = errors.New("access: denied")
 // there is nothing local to bound the blast radius. An operator granting
 // cross-node reach should have to say so, once, in the token.
 func RemoteReadAllowed(actor domain.Token) bool {
-	return scopeSet(actor.Scopes)[ScopeCrossNodeWorkItemsRead]
+	return crossNodeActorEligible(actor) && scopeSet(actor.Scopes)[ScopeCrossNodeWorkItemsRead]
+}
+
+// crossNodeActorEligible is the identity precondition both cross-node reducers
+// share. Holding the exact scope string is necessary but not sufficient: the
+// scope has to be attached to a credential that could legitimately carry it.
+//
+//   - A nil id is an unidentified actor. Cross-node authority is a relation
+//     between two named parties; there is no such relation for a caller this
+//     node cannot name.
+//   - Root mints and revokes tokens. It is not a work credential, and letting
+//     it carry cross-node reach — even when explicitly scoped — reinstates the
+//     "broad authority held implicitly" shape these scopes exist to remove.
+//   - A revoked token is not a credential at all. Scope checks that ignore
+//     revocation are how a withdrawn token keeps working.
+//
+// Source is deliberately NOT constrained. Agent and system actors are exactly
+// who performs cross-node execution; requiring a human source here would make
+// the scope unusable for its purpose.
+func crossNodeActorEligible(actor domain.Token) bool {
+	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil
 }
 
 // RemoteMutationAllowed reports cross-node write authority. Passing it is
@@ -92,7 +112,7 @@ func RemoteReadAllowed(actor domain.Token) bool {
 // mutation reducer for the anchored operation, because a cross-node scope
 // widens where an action may land, never what the actor may do.
 func RemoteMutationAllowed(actor domain.Token) bool {
-	return scopeSet(actor.Scopes)[ScopeCrossNodeWorkItemsWrite]
+	return crossNodeActorEligible(actor) && scopeSet(actor.Scopes)[ScopeCrossNodeWorkItemsWrite]
 }
 
 // CanBindOAuthClient and CanRevokeOAuthClient are intentionally strict: the

@@ -2,6 +2,9 @@ package access
 
 import (
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
 )
@@ -14,7 +17,7 @@ import (
 // must never reach the network at all.
 
 func crossNodeActor(scopes ...string) domain.Token {
-	return domain.Token{Scopes: scopes}
+	return domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: scopes}
 }
 
 func TestRemoteReadRequiresExplicitScope(t *testing.T) {
@@ -86,6 +89,43 @@ func TestCrossNodeScopesAreNotPrefixMatched(t *testing.T) {
 	} {
 		if RemoteReadAllowed(crossNodeActor(scope)) {
 			t.Errorf("scope %q granted cross-node read", scope)
+		}
+	}
+}
+
+// TestCrossNodeScopeOnAnIneligibleCredentialIsRefused is XNODE-P1-B1. Holding
+// the exact scope string is necessary and not sufficient — the scope has to sit
+// on a credential that could legitimately carry it. The earlier version checked
+// only the scope, so a root or revoked token that DID carry it passed, which
+// contradicted the documented contract and is the fail-open direction.
+func TestCrossNodeScopeOnAnIneligibleCredentialIsRefused(t *testing.T) {
+	revokedAt := time.Now()
+	both := []string{ScopeCrossNodeWorkItemsRead, ScopeCrossNodeWorkItemsWrite}
+	cases := map[string]domain.Token{
+		"root carrying both cross-node scopes": {ID: uuid.New(), IsRoot: true, Scopes: both},
+		"revoked token carrying both scopes":   {ID: uuid.New(), RevokedAt: &revokedAt, Scopes: both},
+		"unidentified actor with both scopes":  {ID: uuid.Nil, Scopes: both},
+		"revoked root with both scopes":        {ID: uuid.New(), IsRoot: true, RevokedAt: &revokedAt, Scopes: both},
+	}
+	for name, actor := range cases {
+		if RemoteReadAllowed(actor) {
+			t.Errorf("%s: RemoteReadAllowed = true, want false", name)
+		}
+		if RemoteMutationAllowed(actor) {
+			t.Errorf("%s: RemoteMutationAllowed = true, want false", name)
+		}
+	}
+}
+
+// TestCrossNodeScopeAdmitsScopedNonHumanActors pins the other side of the same
+// rule. Source is deliberately unconstrained: agent and system actors are
+// exactly who performs cross-node execution, so narrowing to human credentials
+// would make the scope unusable for the thing it exists to authorize.
+func TestCrossNodeScopeAdmitsScopedNonHumanActors(t *testing.T) {
+	for _, source := range []domain.Source{domain.SourceAgent, domain.SourceSystem, domain.SourceHuman} {
+		actor := domain.Token{ID: uuid.New(), Source: source, Scopes: []string{ScopeCrossNodeWorkItemsRead}}
+		if !RemoteReadAllowed(actor) {
+			t.Errorf("source %s with the exact scope was denied cross-node read", source)
 		}
 	}
 }
