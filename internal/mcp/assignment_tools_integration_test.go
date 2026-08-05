@@ -184,4 +184,24 @@ func TestAssignmentToolAdvertisementScopes(t *testing.T) {
 	if !access.ToolVisible(readAgent, "work_items.get_assignment") {
 		t.Errorf("read-scoped agent missing work_items.get_assignment")
 	}
+
+	// Listener administration is its own non-root human surface: no
+	// work-item scope implies it, and reads stay open to ordinary readers.
+	adminHuman := domain.Token{ID: uuid.New(), Source: domain.SourceHuman, Scopes: []string{access.ScopeListenersAdmin}}
+	for _, tool := range []string{"listeners.create", "listeners.bind_credential", "listeners.retire"} {
+		if !access.ToolVisible(adminHuman, tool) {
+			t.Errorf("listener admin missing %s", tool)
+		}
+		for _, actor := range []domain.Token{writeAgent, trackerAgent, readAgent} {
+			if access.ToolVisible(actor, tool) {
+				t.Errorf("work-item-scoped actor must not see %s", tool)
+			}
+		}
+	}
+	if !access.ToolVisible(writeAgent, "listeners.set_policy") {
+		t.Errorf("write-scoped principal missing listeners.set_policy (self-narrowing path)")
+	}
+	if !access.ToolVisible(readAgent, "listeners.list") || !access.ToolVisible(readAgent, "listeners.get") {
+		t.Errorf("read-scoped agent missing listener reads")
+	}
 }

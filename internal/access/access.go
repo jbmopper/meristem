@@ -37,6 +37,11 @@ const (
 	// assigned/addressed lane of one other token without inheriting that
 	// token's write authority. The ordinary tree scope still bounds content.
 	scopeFeedListenForPrefix = "feed.listen_for:"
+	// Listener administration (registration, credential binding, retirement,
+	// wide policy replacement) is its own dedicated non-root human surface —
+	// deliberately not implied by any work-item or tracker scope, and never
+	// granted to sealed provider profiles.
+	ScopeListenersAdmin      = "listeners.admin"
 	ScopeInboxCapture        = "inbox.capture"
 	ScopePolicyProfileSwitch = "policy_profile.switch"
 	ScopeRegistryWrite       = "registry.write"
@@ -148,6 +153,17 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		// sealed provider tracker profiles must not gain lease authority as a
 		// side effect of this case list growing.
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
+	case "listeners.create", "listeners.bind_credential", "listeners.retire":
+		return scopes[ScopeListenersAdmin]
+	case "listeners.set_policy":
+		// Wide replacement needs the admin surface; the service additionally
+		// permits the listener's own principal to NARROW its policy, so the
+		// tool is visible to ordinary write-scoped principals too. The
+		// widen/narrow decision is the service's, never the transport's.
+		return scopes[ScopeListenersAdmin] || scopes[ScopeWorkItemsWriteAll] ||
+			(scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
+	case "listeners.list", "listeners.get", "listeners.resolve":
+		return scopes[ScopeListenersAdmin] || (canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor)))
 	case "convergence.propose_checks", "registry.activate_cultivar", "approvals.request", "connectors.http_request":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:

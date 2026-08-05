@@ -485,11 +485,11 @@ func TestRunFeedWatchSSEDeliversInOrderAndAdvancesLastID(t *testing.T) {
 // so the server can replay anything that landed during the gap.
 func TestRunFeedWatchSSEReconnectsWithLastEventID(t *testing.T) {
 	var (
-		mu             sync.Mutex
-		connectCount   int
-		secondLEI      string
-		secondLEIOnce  sync.Once
-		secondReached  = make(chan struct{})
+		mu            sync.Mutex
+		connectCount  int
+		secondLEI     string
+		secondLEIOnce sync.Once
+		secondReached = make(chan struct{})
 	)
 	srv := sseTestServer(t, func(t *testing.T, r *http.Request, write func(id, data string), closeFn func()) {
 		mu.Lock()
@@ -557,16 +557,17 @@ func TestRunFeedWatchSSEReconnectsWithLastEventID(t *testing.T) {
 // causes a short gap, not a crash.
 //
 // Connection sequence:
-//   1: stream one event with id=STALECURSOR, drop
-//   2: receive STALECURSOR, return 400 invalid_cursor
-//   3: receive empty LEI (recovery dropped it), stream post-recovery event
+//
+//	1: stream one event with id=STALECURSOR, drop
+//	2: receive STALECURSOR, return 400 invalid_cursor
+//	3: receive empty LEI (recovery dropped it), stream post-recovery event
 func TestRunFeedWatchSSERecoversFromInvalidCursor(t *testing.T) {
 	var (
-		mu               sync.Mutex
-		connects         int
-		thirdLEI         string
-		thirdLEIOnce     sync.Once
-		thirdReached     = make(chan struct{})
+		mu           sync.Mutex
+		connects     int
+		thirdLEI     string
+		thirdLEIOnce sync.Once
+		thirdReached = make(chan struct{})
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -824,12 +825,12 @@ func TestConsumeStreamSendsLastEventIDAndAuth(t *testing.T) {
 
 func TestParseMentions(t *testing.T) {
 	cases := map[string][]string{
-		"":                       nil,
-		"agent-A":                {"agent-A"},
-		"agent-A,agent-B":        {"agent-A", "agent-B"},
-		" agent-A , agent-B ":    {"agent-A", "agent-B"},
-		"a,,b":                   {"a", "b"},
-		strings.Repeat(",", 10):  nil,
+		"":                      nil,
+		"agent-A":               {"agent-A"},
+		"agent-A,agent-B":       {"agent-A", "agent-B"},
+		" agent-A , agent-B ":   {"agent-A", "agent-B"},
+		"a,,b":                  {"a", "b"},
+		strings.Repeat(",", 10): nil,
 	}
 	for in, want := range cases {
 		got := parseMentions(in)

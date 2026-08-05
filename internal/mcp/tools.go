@@ -81,6 +81,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolWorkItemsGetAssignment(),
 		s.toolWorkItemsYield(),
 	}
+	tools = append(tools, s.listenerTools()...)
 	for i := range tools {
 		if tools[i].Mutates {
 			tools[i].InputSchema = schemaWithIdempotencyKey(tools[i].InputSchema)

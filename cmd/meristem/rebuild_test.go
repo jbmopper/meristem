@@ -78,6 +78,7 @@ func TestProjectionTables_Coverage(t *testing.T) {
 		"http_connector_actions":         true,
 		"nodes":                          true,
 		"registry_snapshot_state":        true,
+		"listener_registrations":         true,
 		"command_queue":                  true,
 		"crossnode_outcome_observations": true,
 		"crossnode_outcome_cursors":      true,

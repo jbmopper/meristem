@@ -82,6 +82,14 @@ var ExcludedKinds = []string{
 	// Assigned Lane defines their filtered/default-feed projection.
 	domain.EventWorkItemAssigned,
 	domain.EventWorkItemAssignmentReleased,
+	// Listener registration/policy/binding is control-plane administration,
+	// not the human activity narrative. The supervisor's stable control lane
+	// (listener control plane, slice 3) defines their lane projection exactly
+	// as the assigned lane does for assignment events above.
+	domain.EventListenerRegistered,
+	domain.EventListenerCredentialBound,
+	domain.EventListenerPolicySet,
+	domain.EventListenerRetired,
 	// Node registry maintenance is fleet-topology audit, not the human
 	// activity narrative; it belongs to the log, not /v1/feed.
 	domain.EventNodeRegistered,
