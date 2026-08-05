@@ -161,12 +161,13 @@ func (s *Service) ResolveForDemand(ctx context.Context, demandEventID uuid.UUID)
 // refuses rather than guessing.
 func (s *Service) demandEnvelope(ctx context.Context, demandEventID uuid.UUID) (DemandEnvelope, error) {
 	var (
-		kind       string
-		subjectID  uuid.UUID
-		payloadRaw []byte
+		kind        string
+		subjectKind string
+		subjectID   uuid.UUID
+		payloadRaw  []byte
 	)
-	err := s.pool.QueryRow(ctx, `SELECT kind, subject_id, payload FROM events WHERE id=$1`, demandEventID).
-		Scan(&kind, &subjectID, &payloadRaw)
+	err := s.pool.QueryRow(ctx, `SELECT kind, subject_kind, subject_id, payload FROM events WHERE id=$1`, demandEventID).
+		Scan(&kind, &subjectKind, &subjectID, &payloadRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s", ErrNotFound, demandEventID)
 	}
@@ -175,6 +176,9 @@ func (s *Service) demandEnvelope(ctx context.Context, demandEventID uuid.UUID) (
 	}
 	if !slices.Contains(DemandProjectionKinds, kind) {
 		return DemandEnvelope{}, fmt.Errorf("%w: event %s is %q, not an eligible demand kind", ErrInvalidRequest, demandEventID, kind)
+	}
+	if subjectKind != domain.SubjectWorkItem {
+		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s has subject kind %q, not a work item", ErrInvalidRequest, demandEventID, subjectKind)
 	}
 	var payload struct {
 		Capability    string    `json:"capability"`
@@ -190,10 +194,14 @@ func (s *Service) demandEnvelope(ctx context.Context, demandEventID uuid.UUID) (
 	if payload.OriginTokenID == uuid.Nil {
 		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s carries no originating principal", ErrInvalidRequest, demandEventID)
 	}
-	workItemID := payload.WorkItemID
-	if workItemID == uuid.Nil {
-		workItemID = subjectID
+	// The payload's work_item_id is redundant routing metadata; if present it
+	// must AGREE with the event's subject — otherwise a malformed durable
+	// event could evaluate policy against a different tree than the event is
+	// actually about.
+	if payload.WorkItemID != uuid.Nil && payload.WorkItemID != subjectID {
+		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s names work item %s but is about %s", ErrInvalidRequest, demandEventID, payload.WorkItemID, subjectID)
 	}
+	workItemID := subjectID
 	env := DemandEnvelope{
 		Capability:    strings.TrimSpace(payload.Capability),
 		EventKind:     kind,

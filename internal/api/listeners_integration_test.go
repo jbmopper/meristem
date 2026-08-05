@@ -472,4 +472,16 @@ func TestListenerDemandResolutionIntegration(t *testing.T) {
 	if _, err := svc.ResolveForDemand(f.ctx, orphanDemand); err == nil {
 		t.Fatal("demand without an originating principal resolved")
 	}
+
+	// A malformed durable event cannot redirect evaluation: a payload
+	// work_item_id that disagrees with the event's subject refuses instead
+	// of evaluating policy against a different tree. (A demand-kind event on
+	// a non-work-item subject is already rejected at APPEND time by the
+	// jobqueue projector; resolution keeps its own subject-kind check as
+	// defense-in-depth.)
+	redirected := appendDemand(otherItem.ID, "review.complementary", fable.Token.ID,
+		map[string]any{"work_item_id": fableItem.ID})
+	if _, err := svc.ResolveForDemand(f.ctx, redirected); err == nil {
+		t.Fatal("demand whose payload work_item_id disagrees with its subject resolved")
+	}
 }

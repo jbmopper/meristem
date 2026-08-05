@@ -22,6 +22,7 @@ import (
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/testutil/pgtest"
@@ -128,5 +129,45 @@ func TestListenerStateCyclesDoNotCollapse(t *testing.T) {
 	}
 	if got := countListenerEvents(t, ctx, pool, reg.ID, domain.EventListenerCredentialBound); got != 3 {
 		t.Fatalf("no-op rebind appended an event: credential_bound = %d, want 3", got)
+	}
+
+	// LCP2-R3-B1 regression: an ABSENT payload_version is v1 by contract, and
+	// the projected policy must SAY v1 — not the decoded zero value. Append a
+	// complete policy_set with no payload_version the way a compatible v1
+	// writer would, and read the projection back.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin absent-version tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind:   domain.SubjectListener,
+		SubjectID:     reg.ID,
+		Kind:          domain.EventListenerPolicySet,
+		Source:        domain.SourceHuman,
+		ActorTokenID:  &admin.Token.ID,
+		Discriminator: "listener_policy:absent-version-fixture",
+		Payload: map[string]any{
+			"listener_id":                reg.ID,
+			"projection":                 listeners.DemandProjection,
+			"predicates":                 []any{},
+			"capabilities":               []string{"review.complementary"},
+			"max_concurrent_assignments": 1,
+			"focus":                      listeners.FocusClaimedWorkItemTree,
+			"predicate_fingerprint":      "",
+		},
+	}); err != nil {
+		t.Fatalf("append absent-version policy: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit absent-version policy: %v", err)
+	}
+	projected, err := svc.Get(ctx, reg.ID)
+	if err != nil {
+		t.Fatalf("read projected policy: %v", err)
+	}
+	if projected.Policy == nil || projected.Policy.PayloadVersion != listeners.PolicyVersion {
+		t.Fatalf("absent-version policy projected as version %d, want %d",
+			projected.Policy.PayloadVersion, listeners.PolicyVersion)
 	}
 }

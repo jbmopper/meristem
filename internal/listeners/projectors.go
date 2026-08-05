@@ -104,7 +104,6 @@ func (policySetProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Eve
 		return err
 	}
 	var payload struct {
-		PayloadVersion           int             `json:"payload_version"`
 		ListenerID               uuid.UUID       `json:"listener_id"`
 		Projection               string          `json:"projection"`
 		Predicates               json.RawMessage `json:"predicates"`
@@ -116,8 +115,12 @@ func (policySetProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Eve
 	if err := decodePayload(event, &payload); err != nil {
 		return err
 	}
+	// The version gate above admitted exactly v1 (absence means v1 by the
+	// repository contract), so persist the NORMALIZED version — never the
+	// decoded field, whose zero value would misproject an absent-version v1
+	// event as version 0 (LCP2-R3-B1).
 	policy := Policy{
-		PayloadVersion:           payload.PayloadVersion,
+		PayloadVersion:           PolicyVersion,
 		ListenerID:               event.SubjectID,
 		Projection:               payload.Projection,
 		Capabilities:             payload.Capabilities,
