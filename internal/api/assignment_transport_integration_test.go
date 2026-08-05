@@ -137,6 +137,28 @@ func TestAssignmentTransportLifecycleIntegration(t *testing.T) {
 		t.Fatalf("same-holder retry changed generation: %v -> %v", assignmentEventID, again["assignment_event_id"])
 	}
 
+	// Restart derivation (slice 3): the holder's own held-assignments listing
+	// carries the active generation; a non-holder's listing is empty.
+	heldOf := func(secret string) []map[string]any {
+		t.Helper()
+		rec := doREST(t, f.server.Handler(), http.MethodGet, "/v1/assignments/held", secret, "", nil)
+		assertRESTStatus(t, rec, http.StatusOK)
+		var payload struct {
+			Assignments []map[string]any `json:"assignments"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode held assignments: %v (%s)", err, rec.Body.String())
+		}
+		return payload.Assignments
+	}
+	if held := heldOf(holderA.Secret); len(held) != 1 ||
+		held[0]["work_item_id"] != item.ID.String() || held[0]["assignment_event_id"] != assignmentEventID {
+		t.Fatalf("holder's held assignments = %v, want exactly the claimed generation", held)
+	}
+	if held := heldOf(holderB.Secret); len(held) != 0 {
+		t.Fatalf("non-holder's held assignments = %v, want empty", held)
+	}
+
 	// Competing claim: typed conflict carrying holder identity, and — because
 	// the refusal is pure — the loser's idempotency key stays usable.
 	loserKey := uuid.NewString()

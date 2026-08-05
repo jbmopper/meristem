@@ -208,6 +208,40 @@ func (s *Service) GetAssignment(ctx context.Context, id uuid.UUID) (domain.WorkI
 	return *state.Assignment, nil
 }
 
+// ListAssignmentsForHolder is the restart-derivation read (listener control
+// plane, slice 3): the active assignments a principal currently holds,
+// ordered deterministically by (claimed_at, work_item_id). A restarted
+// supervisor derives IDLE/FOCUSED from this projection — never from process
+// memory. Expiry stays worker-owned: an expired-but-unreleased lease is still
+// returned here (the holder resumes FOCUSED and observes the release), so a
+// supervisor cannot silently double-claim during the expiry window.
+func (s *Service) ListAssignmentsForHolder(ctx context.Context, holder uuid.UUID) ([]domain.WorkItemAssignment, error) {
+	if holder == uuid.Nil {
+		return nil, fmt.Errorf("workitems: holder token id is required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT work_item_id, mode, assignment_event_id, claimed_at, expires_at, updated_at
+		FROM work_item_assignment_state
+		WHERE holder_token_id = $1
+		ORDER BY claimed_at, work_item_id`, holder)
+	if err != nil {
+		return nil, fmt.Errorf("workitems: list assignments for holder: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.WorkItemAssignment
+	for rows.Next() {
+		assignment := domain.WorkItemAssignment{HolderTokenID: holder}
+		var mode string
+		if err := rows.Scan(&assignment.WorkItemID, &mode, &assignment.AssignmentEventID,
+			&assignment.ClaimedAt, &assignment.ExpiresAt, &assignment.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("workitems: scan holder assignment: %w", err)
+		}
+		assignment.Mode = domain.WorkItemAssignmentMode(mode)
+		out = append(out, assignment)
+	}
+	return out, rows.Err()
+}
+
 // ExpireAssignment is the worker-owned cleanup seam. It revalidates one
 // candidate under the global work_item -> assignment-state lock order and
 // releases only when the exact persisted lease is due. The projection makes

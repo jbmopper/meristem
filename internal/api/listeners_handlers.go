@@ -155,6 +155,46 @@ func (s *Server) handleGetListenerByName(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"listener": toListenerResponse(reg)})
 }
 
+// handleListDemandCandidates is the supervisor's snapshot read (slice 3):
+// open eligible demand for the listener's STORED policy, deterministic order.
+// Gated to the listener's bound principal or listener administration — the
+// listing spans trees, so ordinary readers do not get it.
+func (s *Server) handleListDemandCandidates(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	reg, err := s.listeners.Get(r.Context(), id)
+	if err != nil {
+		writeListenerError(w, r, err)
+		return
+	}
+	if actor.ID != reg.PrincipalTokenID && !access.CanAdminListeners(actor) {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "demand candidates are visible to the listener's bound principal or listener administration")
+		return
+	}
+	candidates, err := s.listeners.ListDemandCandidates(r.Context(), id)
+	if err != nil {
+		writeListenerError(w, r, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, map[string]any{
+			"demand_event_id":  c.DemandEventID,
+			"demand_event_seq": c.DemandEventSeq,
+			"work_item_id":     c.Envelope.WorkItemID,
+			"capability":       c.Envelope.Capability,
+			"origin_token_id":  c.Envelope.OriginTokenID,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": out})
+}
+
 func (s *Server) handleSetListenerPolicy(w http.ResponseWriter, r *http.Request) {
 	actor, ok := authenticatedToken(w, r)
 	if !ok {

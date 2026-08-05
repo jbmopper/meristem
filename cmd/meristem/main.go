@@ -90,6 +90,8 @@ func main() {
 		err = runSpoke(ctx, logger, args, processBuild)
 	case "feed":
 		err = runFeed(ctx, logger, args)
+	case "listener":
+		err = runListener(ctx, logger, args)
 	case "safety":
 		err = runSafety(ctx, logger, args)
 	case "git":
@@ -174,6 +176,7 @@ usage:
   meristem worker --once     run one deterministic reconciler tick
   meristem spoke             run the pull-only outbound poll loop (drains the hub command queue; reads MERISTEM_HUB_URL/NODE_ID/HUB_TOKEN/TOKEN)
   meristem feed [--watch]    human-readable terminal view of the activity log
+  meristem listener --name X run the idle/focused supervisor for a registered listener address
   meristem export-context    deterministically materialize an allow/deny repo slice (operator-side; no API calls)
   meristem safety check      validate deterministic resource-safety controls
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)

@@ -155,7 +155,7 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "registry.list", "registry.get", "projections.list", "projections.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
-	case "work_items.list", "work_items.get", "work_items.get_assignment":
+	case "work_items.list", "work_items.get", "work_items.get_assignment", "work_items.held_assignments":
 		return canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor))
 	case "approvals.get", "approvals.list_for_work_item":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))

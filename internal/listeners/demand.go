@@ -153,6 +153,89 @@ func (s *Service) ResolveForDemand(ctx context.Context, demandEventID uuid.UUID)
 	return Registration{}, fmt.Errorf("%w: no live listener's contract admits capability %q for demand %s", ErrNotFound, env.Capability, demandEventID)
 }
 
+// DemandCandidate is one open eligible demand as the supervisor's snapshot
+// sees it: the durable demand event plus its normalized envelope, ordered by
+// the design's deterministic candidate order (dispatch_event_seq,
+// work_item_id).
+type DemandCandidate struct {
+	DemandEventID  uuid.UUID
+	DemandEventSeq int64
+	Envelope       DemandEnvelope
+}
+
+// ListDemandCandidates is the snapshot half of mint-before-snapshot (slice
+// 3): every OPEN eligible demand for this listener's stored policy, in
+// deterministic candidate order. Openness mirrors the claim gate — the work
+// item is nonterminal, not blocked or awaiting approval, not human-review
+// blocked, and carries no unexpired assignment — so a candidate returned
+// here is claimable unless a racer wins first (the claim conflict reducer
+// collapses that race). Per work item only the LATEST demand event counts.
+// Eligibility is evaluated against the STORED policy server-side; a
+// policy-less or retired registration has no candidates. A malformed durable
+// demand event (missing capability or origin) is skipped, never guessed at.
+func (s *Service) ListDemandCandidates(ctx context.Context, listenerID uuid.UUID) ([]DemandCandidate, error) {
+	reg, err := scanRegistration(ctx, s.pool, listenerID)
+	if err != nil {
+		return nil, err
+	}
+	if reg.RetiredAt != nil || reg.Policy == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT d.id, d.seq FROM (
+			SELECT DISTINCT ON (e.subject_id) e.id, e.seq, e.subject_id
+			FROM events e
+			JOIN work_items wi ON wi.id = e.subject_id
+			LEFT JOIN work_item_assignment_state a ON a.work_item_id = wi.id
+			WHERE e.kind = $1 AND e.subject_kind = $2
+			  AND wi.state <> ALL($3::text[])
+			  AND wi.human_review_status <> $4
+			  AND (a.holder_token_id IS NULL OR a.expires_at <= clock_timestamp())
+			ORDER BY e.subject_id, e.seq DESC
+		) d
+		ORDER BY d.seq, d.subject_id`,
+		domain.EventDispatchRequested, domain.SubjectWorkItem,
+		[]string{
+			string(domain.WorkItemDone), string(domain.WorkItemFailed), string(domain.WorkItemCanceled),
+			string(domain.WorkItemBlocked), string(domain.WorkItemAwaitingApproval),
+		},
+		string(domain.HumanReviewBlocked),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listeners: list demand candidates: %w", err)
+	}
+	defer rows.Close()
+	type row struct {
+		id  uuid.UUID
+		seq int64
+	}
+	var candidates []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.seq); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []DemandCandidate
+	for _, c := range candidates {
+		env, err := s.demandEnvelope(ctx, c.id)
+		if err != nil {
+			if errors.Is(err, ErrInvalidRequest) || errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if EligibleDemand(reg.Policy, env) {
+			out = append(out, DemandCandidate{DemandEventID: c.id, DemandEventSeq: c.seq, Envelope: env})
+		}
+	}
+	return out, nil
+}
+
 // demandEnvelope loads the durable demand event and normalizes it. The
 // capability and originating principal come from the event payload — written
 // by the dispatch reconciler, never by the resolving caller — and lineage

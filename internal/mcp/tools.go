@@ -79,6 +79,7 @@ func (s *Server) buildTools() []Tool {
 		s.toolWorkItemsTransition(),
 		s.toolWorkItemsClaim(),
 		s.toolWorkItemsGetAssignment(),
+		s.toolWorkItemsHeldAssignments(),
 		s.toolWorkItemsYield(),
 	}
 	tools = append(tools, s.listenerTools()...)
@@ -1599,6 +1600,29 @@ func (s *Server) toolWorkItemsGetAssignment() Tool {
 				return nil, assignmentToolErr(err, id)
 			}
 			return map[string]any{"assignment": toAssignmentDTO(assignment)}, nil
+		},
+	}
+}
+
+func (s *Server) toolWorkItemsHeldAssignments() Tool {
+	return Tool{
+		Name:        "work_items.held_assignments",
+		Description: "List the active assignments the calling principal currently holds (restart derivation for supervisors). Own holdings only.",
+		Mutates:     false,
+		InputSchema: schemaObject(nil, map[string]any{}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.WorkItems == nil {
+				return nil, errors.New("workitems service not configured")
+			}
+			assignments, err := s.deps.WorkItems.ListAssignmentsForHolder(ctx, actor.ID)
+			if err != nil {
+				return nil, workItemToolErr(err, nil)
+			}
+			out := make([]map[string]any, 0, len(assignments))
+			for _, a := range assignments {
+				out = append(out, toAssignmentDTO(a))
+			}
+			return map[string]any{"assignments": out}, nil
 		},
 	}
 }

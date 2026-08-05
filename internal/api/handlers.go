@@ -1125,6 +1125,31 @@ func toAssignmentResponse(a domain.WorkItemAssignment) map[string]any {
 	}
 }
 
+// handleListHeldAssignments is the restart-derivation read (listener control
+// plane, slice 3): the authenticated principal's OWN active assignments only
+// — there is no cross-principal listing on this surface, so it needs no
+// object-level check beyond ordinary assignment-read visibility.
+func (s *Server) handleListHeldAssignments(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !access.ToolVisible(actor, "work_items.get_assignment") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read assignments")
+		return
+	}
+	assignments, err := s.workItems.ListAssignmentsForHolder(r.Context(), actor.ID)
+	if err != nil {
+		writeAssignmentError(w, r, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(assignments))
+	for _, a := range assignments {
+		out = append(out, toAssignmentResponse(a))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignments": out})
+}
+
 func (s *Server) handleClaimWorkItem(w http.ResponseWriter, r *http.Request) {
 	actor, ok := authenticatedToken(w, r)
 	if !ok {
