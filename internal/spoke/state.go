@@ -38,7 +38,7 @@ type pgCursorStore struct {
 // but its Save fails closed. New wiring must use NewEventCursorStore with a
 // resolved local actor so every cursor mutation is fully attributed.
 func NewCursorStore(pool *pgxpool.Pool, hubBaseURL string) CursorStore {
-	return &pgCursorStore{pool: pool, key: "hub_feed_cursor:" + hubBaseURL}
+	return &pgCursorStore{pool: pool, key: LegacyHubCursorKey(hubBaseURL)}
 }
 
 // NewEventCursorStore constructs an event-backed CursorStore. Root wiring must
@@ -47,7 +47,7 @@ func NewCursorStore(pool *pgxpool.Pool, hubBaseURL string) CursorStore {
 func NewEventCursorStore(pool *pgxpool.Pool, writer *events.Writer, hubBaseURL string, actorID uuid.UUID, source domain.Source) CursorStore {
 	return &pgCursorStore{
 		pool:    pool,
-		key:     "hub_feed_cursor:" + hubBaseURL,
+		key:     LegacyHubCursorKey(hubBaseURL),
 		service: NewCursorService(pool, writer),
 		actorID: actorID,
 		source:  source,
