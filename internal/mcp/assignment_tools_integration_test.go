@@ -7,6 +7,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -92,6 +93,15 @@ func TestAssignmentToolsParityIntegration(t *testing.T) {
 			t.Fatalf("claim response missing %q: %s", field, text)
 		}
 	}
+	var claimResult struct {
+		Assignment struct {
+			AssignmentEventID string `json:"assignment_event_id"`
+		} `json:"assignment"`
+	}
+	if err := json.Unmarshal([]byte(text), &claimResult); err != nil || claimResult.Assignment.AssignmentEventID == "" {
+		t.Fatalf("decode claim generation: %v (%s)", err, text)
+	}
+	generation := claimResult.Assignment.AssignmentEventID
 
 	// Rival conflict is a typed pure refusal: tool error carrying the holder,
 	// no event appended, and the SAME idempotency key stays usable.
@@ -113,14 +123,20 @@ func TestAssignmentToolsParityIntegration(t *testing.T) {
 		t.Fatalf("get_assignment: isError=%t text=%q", isError, text)
 	}
 
-	// Yield by non-holder refuses purely; by holder succeeds.
+	// Yield by non-holder refuses purely; a stale generation refuses purely;
+	// the holder naming the exact generation succeeds.
 	if isError, text = callToolForTest(t, rivalServer, "work_items.yield", map[string]any{
-		"id": item.ID.String(), "idempotency_key": uuid.NewString(),
+		"id": item.ID.String(), "assignment_event_id": generation, "idempotency_key": uuid.NewString(),
 	}); !isError || !strings.Contains(text, "held by another token") {
 		t.Fatalf("rival yield: isError=%t text=%q", isError, text)
 	}
 	if isError, text = callToolForTest(t, holderServer, "work_items.yield", map[string]any{
-		"id": item.ID.String(), "idempotency_key": uuid.NewString(),
+		"id": item.ID.String(), "assignment_event_id": uuid.NewString(), "idempotency_key": uuid.NewString(),
+	}); !isError || !strings.Contains(text, "stale assignment generation") {
+		t.Fatalf("stale-generation yield: isError=%t text=%q", isError, text)
+	}
+	if isError, text = callToolForTest(t, holderServer, "work_items.yield", map[string]any{
+		"id": item.ID.String(), "assignment_event_id": generation, "idempotency_key": uuid.NewString(),
 	}); isError {
 		t.Fatalf("holder yield failed: %s", text)
 	}

@@ -24,6 +24,11 @@ var (
 	ErrAssignmentNotFound     = errors.New("workitems: no active assignment")
 	ErrAssignmentNotHeld      = errors.New("workitems: assignment is held by another token")
 	ErrAssignmentStateMissing = errors.New("workitems: assignment-state projection missing")
+	// ErrStaleAssignmentGeneration refuses a yield naming an assignment event
+	// that is not the CURRENT generation. A delayed yield from a released
+	// epoch must never close a newer lease — even one held by the same token
+	// after reacquiring (review finding LCP-B1).
+	ErrStaleAssignmentGeneration = errors.New("workitems: yield names a stale assignment generation")
 )
 
 // ClaimHeldError reports the current holder without granting a takeover. It
@@ -136,15 +141,21 @@ func (s *Service) Claim(ctx context.Context, id uuid.UUID, actor domain.Token) (
 	return assignment, nil
 }
 
-// Yield releases the caller's active assignment. Yield is holder-only and is
-// the sole voluntary release reason; terminal transitions and the worker own
+// Yield releases the caller's active assignment. Yield is holder-only AND
+// generation-fenced: the caller names the exact work_item.assigned event it
+// intends to release, so a delayed stale yield appends nothing even when the
+// same token has since reacquired the item under a new lease. Yield is the
+// sole voluntary release reason; terminal transitions and the worker own
 // done and expired respectively.
-func (s *Service) Yield(ctx context.Context, id uuid.UUID, actor domain.Token) (domain.WorkItemAssignment, error) {
+func (s *Service) Yield(ctx context.Context, id uuid.UUID, assignmentEventID uuid.UUID, actor domain.Token) (domain.WorkItemAssignment, error) {
 	if actor.ID == uuid.Nil {
 		return domain.WorkItemAssignment{}, fmt.Errorf("%w: actor token id is required", ErrInvalidRequest)
 	}
 	if actor.IsRoot {
 		return domain.WorkItemAssignment{}, fmt.Errorf("%w: root token is mint/revoke-only", ErrClaimUnavailable)
+	}
+	if assignmentEventID == uuid.Nil {
+		return domain.WorkItemAssignment{}, fmt.Errorf("%w: assignment_event_id is required", ErrInvalidRequest)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -163,6 +174,10 @@ func (s *Service) Yield(ctx context.Context, id uuid.UUID, actor domain.Token) (
 	}
 	if state.Assignment.HolderTokenID != actor.ID {
 		return domain.WorkItemAssignment{}, ErrAssignmentNotHeld
+	}
+	if state.Assignment.AssignmentEventID != assignmentEventID {
+		return domain.WorkItemAssignment{}, fmt.Errorf("%w: current=%s named=%s",
+			ErrStaleAssignmentGeneration, state.Assignment.AssignmentEventID, assignmentEventID)
 	}
 	assignment := *state.Assignment
 	releasedAt, err := readAssignmentClock(ctx, tx)

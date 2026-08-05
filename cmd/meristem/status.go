@@ -38,6 +38,14 @@ func runStatus(ctx context.Context, _ *slog.Logger, args []string, build buildgu
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
+	var workItemID *uuid.UUID
+	if *workItemFlag != "" {
+		id, err := uuid.Parse(*workItemFlag)
+		if err != nil {
+			return fmt.Errorf("status: --work-item must be a uuid: %w", err)
+		}
+		workItemID = &id
+	}
 
 	report := map[string]any{
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
@@ -76,12 +84,8 @@ func runStatus(ctx context.Context, _ *slog.Logger, args []string, build buildgu
 		dbReport["head_seq"] = *headSeq
 	}
 
-	if *workItemFlag != "" {
-		id, err := uuid.Parse(*workItemFlag)
-		if err != nil {
-			return fmt.Errorf("status: --work-item must be a uuid: %w", err)
-		}
-		assignment, err := readAssignmentStatus(ctx, pool, id)
+	if workItemID != nil {
+		assignment, err := readAssignmentStatus(ctx, pool, *workItemID)
 		if err != nil {
 			return err
 		}

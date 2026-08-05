@@ -164,11 +164,12 @@ func TestAssignmentTransportLifecycleIntegration(t *testing.T) {
 		t.Fatalf("get assignment = %v, want generation %s", got, assignmentEventID)
 	}
 
-	rec = doREST(t, f.server.Handler(), http.MethodPost, base+"/yield", holderB.Secret, uuid.NewString(), nil)
+	yieldBody := []byte(`{"assignment_event_id":"` + assignmentEventID + `"}`)
+	rec = doREST(t, f.server.Handler(), http.MethodPost, base+"/yield", holderB.Secret, uuid.NewString(), yieldBody)
 	assertRESTStatus(t, rec, http.StatusConflict)
 	assertErrorCode(t, rec, "assignment_not_held")
 
-	rec = doREST(t, f.server.Handler(), http.MethodPost, base+"/yield", holderA.Secret, uuid.NewString(), nil)
+	rec = doREST(t, f.server.Handler(), http.MethodPost, base+"/yield", holderA.Secret, uuid.NewString(), yieldBody)
 	assertRESTStatus(t, rec, http.StatusOK)
 	if released := decodeAssignmentResponse(t, rec.Body.Bytes()); released["assignment_event_id"] != assignmentEventID {
 		t.Fatalf("yield released %v, want generation %s", released["assignment_event_id"], assignmentEventID)
@@ -202,6 +203,58 @@ func TestAssignmentTransportLifecycleIntegration(t *testing.T) {
 	if strings.Contains(rootFeed.Body.String(), "work_item.assigned") {
 		t.Errorf("default feed narrative unexpectedly includes assignment lifecycle: %s", rootFeed.Body.String())
 	}
+}
+
+// TestAssignmentTransportStaleYieldRegression pins review finding LCP-B1:
+// yield is generation-fenced, not merely holder-fenced. A delayed yield
+// naming a released generation must append nothing even though the SAME
+// token holds the item again under a new lease.
+func TestAssignmentTransportStaleYieldRegression(t *testing.T) {
+	f := newAssignmentTransportFixture(t)
+	item := f.spawnClaimable(t, "stale-yield")
+	holder := f.scopedAgent(t, "assignment-stale-yield-holder")
+	base := "/v1/work-items/" + item.ID.String()
+
+	rec := doREST(t, f.server.Handler(), http.MethodPost, base+"/claim", holder.Secret, uuid.NewString(), nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	g1, _ := decodeAssignmentResponse(t, rec.Body.Bytes())["assignment_event_id"].(string)
+
+	rec = doREST(t, f.server.Handler(), http.MethodPost, base+"/yield", holder.Secret, uuid.NewString(),
+		[]byte(`{"assignment_event_id":"`+g1+`"}`))
+	assertRESTStatus(t, rec, http.StatusOK)
+
+	rec = doREST(t, f.server.Handler(), http.MethodPost, base+"/claim", holder.Secret, uuid.NewString(), nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	g2, _ := decodeAssignmentResponse(t, rec.Body.Bytes())["assignment_event_id"].(string)
+	if g2 == g1 {
+		t.Fatalf("reacquired lease reused generation %s", g1)
+	}
+
+	// The delayed stale yield for G1 arrives with a fresh key: pure typed
+	// conflict, no release event, G2 stays active.
+	releasesBefore := countReleaseEvents(t, f, item.ID)
+	rec = doREST(t, f.server.Handler(), http.MethodPost, base+"/yield", holder.Secret, uuid.NewString(),
+		[]byte(`{"assignment_event_id":"`+g1+`"}`))
+	assertRESTStatus(t, rec, http.StatusConflict)
+	assertErrorCode(t, rec, "stale_assignment_generation")
+	if after := countReleaseEvents(t, f, item.ID); after != releasesBefore {
+		t.Fatalf("stale yield appended a release event: before=%d after=%d", releasesBefore, after)
+	}
+	rec = doREST(t, f.server.Handler(), http.MethodGet, base+"/assignment", holder.Secret, "", nil)
+	assertRESTStatus(t, rec, http.StatusOK)
+	if got := decodeAssignmentResponse(t, rec.Body.Bytes()); got["assignment_event_id"] != g2 {
+		t.Fatalf("stale yield disturbed the active generation: %v, want %s", got["assignment_event_id"], g2)
+	}
+}
+
+func countReleaseEvents(t *testing.T, f assignmentTransportFixture, itemID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE subject_id=$1 AND kind=$2`,
+		itemID, domain.EventWorkItemAssignmentReleased).Scan(&n); err != nil {
+		t.Fatalf("count release events: %v", err)
+	}
+	return n
 }
 
 func TestAssignmentTransportRaceIntegration(t *testing.T) {

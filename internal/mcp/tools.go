@@ -1605,17 +1605,19 @@ func (s *Server) toolWorkItemsGetAssignment() Tool {
 func (s *Server) toolWorkItemsYield() Tool {
 	return Tool{
 		Name:        "work_items.yield",
-		Description: "Voluntarily release the caller's active assignment on a work item.",
+		Description: "Voluntarily release the caller's active assignment on a work item. Names the exact assignment_event_id it releases; a stale generation is a pure conflict that appends nothing.",
 		Mutates:     true,
-		InputSchema: schemaObject([]string{"id"}, map[string]any{
-			"id": schemaString("Work item uuid."),
+		InputSchema: schemaObject([]string{"id", "assignment_event_id"}, map[string]any{
+			"id":                  schemaString("Work item uuid."),
+			"assignment_event_id": schemaString("The work_item.assigned event uuid of the lease being released."),
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.WorkItems == nil {
 				return nil, errors.New("workitems service not configured")
 			}
 			var args struct {
-				ID string `json:"id"`
+				ID                string `json:"id"`
+				AssignmentEventID string `json:"assignment_event_id"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
 				return nil, err
@@ -1624,10 +1626,14 @@ func (s *Server) toolWorkItemsYield() Tool {
 			if err != nil {
 				return nil, err
 			}
+			assignmentEventID, err := parseUUID(args.AssignmentEventID, "assignment_event_id")
+			if err != nil {
+				return nil, err
+			}
 			if err := s.canWriteWorkItem(ctx, actor, id); err != nil {
 				return nil, err
 			}
-			assignment, err := s.deps.WorkItems.Yield(ctx, id, actor)
+			assignment, err := s.deps.WorkItems.Yield(ctx, id, assignmentEventID, actor)
 			if err != nil {
 				return nil, assignmentToolErr(err, id)
 			}
@@ -1662,7 +1668,8 @@ func assignmentToolErr(err error, id uuid.UUID) error {
 	switch {
 	case errors.As(err, &held),
 		errors.Is(err, workitems.ErrClaimUnavailable),
-		errors.Is(err, workitems.ErrAssignmentNotHeld):
+		errors.Is(err, workitems.ErrAssignmentNotHeld),
+		errors.Is(err, workitems.ErrStaleAssignmentGeneration):
 		return replayableToolErr(pureToolErr(err))
 	case errors.Is(err, workitems.ErrAssignmentNotFound):
 		return replayableToolErr(notFoundToolError{msg: fmt.Sprintf("assignment_not_found: no active assignment on work item %s", id)})

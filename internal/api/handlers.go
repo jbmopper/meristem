@@ -1171,7 +1171,19 @@ func (s *Server) handleYieldWorkItem(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	assignment, err := s.workItems.Yield(r.Context(), id, actor)
+	var req struct {
+		AssignmentEventID string `json:"assignment_event_id"`
+	}
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	assignmentEventID, err := uuid.Parse(req.AssignmentEventID)
+	if err != nil {
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusBadRequest, "invalid_assignment_event_id", "yield must name the exact assignment_event_id it releases")
+		return
+	}
+	assignment, err := s.workItems.Yield(r.Context(), id, assignmentEventID, actor)
 	if err != nil {
 		writeAssignmentError(w, r, err)
 		return
@@ -1210,6 +1222,9 @@ func writeAssignmentError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, workitems.ErrAssignmentNotHeld):
 		idempotency.MarkRefusalUnconsumed(r.Context())
 		writeAPIError(w, http.StatusConflict, "assignment_not_held", err.Error())
+	case errors.Is(err, workitems.ErrStaleAssignmentGeneration):
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusConflict, "stale_assignment_generation", err.Error())
 	case errors.Is(err, workitems.ErrAssignmentStateMissing):
 		writeAPIError(w, http.StatusInternalServerError, "assignment_state_missing", err.Error())
 	default:
