@@ -110,6 +110,17 @@ func ParseQualifiedRef(ref string) (nodeID string, id uuid.UUID, ok bool) {
 // percent-encoding — are exactly the ones that let two different strings name
 // the same object, or one string appear to name a different one.
 func parseCanonicalRef(ref string) (nodeID string, id uuid.UUID, ok bool) {
+	// The fragment delimiter is checked on the raw string, not on the parsed
+	// components, because net/url represents a *trailing bare* '#' with both
+	// Fragment and RawFragment empty — the decoration is real but invisible
+	// downstream. A component-level check therefore accepts `...<uuid>#` and
+	// returns the same tuple as the undecorated form, which is precisely the
+	// two-strings-for-one-object failure the canonical form exists to prevent.
+	// Rejecting the delimiter outright also covers every populated fragment,
+	// so no separate component check is needed.
+	if strings.Contains(ref, "#") {
+		return "", uuid.Nil, false
+	}
 	u, err := url.Parse(ref)
 	if err != nil {
 		return "", uuid.Nil, false
@@ -119,7 +130,7 @@ func parseCanonicalRef(ref string) (nodeID string, id uuid.UUID, ok bool) {
 	if u.Scheme != RefScheme || u.Opaque != "" {
 		return "", uuid.Nil, false
 	}
-	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" {
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
 		return "", uuid.Nil, false
 	}
 	// A non-empty RawPath means the escaped path differs from the default

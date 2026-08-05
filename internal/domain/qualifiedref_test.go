@@ -187,15 +187,24 @@ func TestBareUUIDStaysLocalAgainstCanonicalForm(t *testing.T) {
 func TestCanonicalRefFailsClosed(t *testing.T) {
 	id := uuid.MustParse("60959376-e0ff-5207-9270-dacfb403333e").String()
 	bad := map[string]string{
-		"wrong scheme":             "http://den/work-items/" + id,
-		"unknown scheme":           "meristem://den/work-items/" + id,
-		"wrong object kind":        "mrs://den/tropisms/" + id,
-		"missing object kind":      "mrs://den/" + id,
-		"extra path segment":       "mrs://den/work-items/" + id + "/events",
-		"trailing slash":           "mrs://den/work-items/" + id + "/",
-		"query string":             "mrs://den/work-items/" + id + "?replica=2",
-		"bare query marker":        "mrs://den/work-items/" + id + "?",
-		"fragment":                 "mrs://den/work-items/" + id + "#top",
+		"wrong scheme":        "http://den/work-items/" + id,
+		"unknown scheme":      "meristem://den/work-items/" + id,
+		"wrong object kind":   "mrs://den/tropisms/" + id,
+		"missing object kind": "mrs://den/" + id,
+		"extra path segment":  "mrs://den/work-items/" + id + "/events",
+		"trailing slash":      "mrs://den/work-items/" + id + "/",
+		"query string":        "mrs://den/work-items/" + id + "?replica=2",
+		"bare query marker":   "mrs://den/work-items/" + id + "?",
+		"fragment":            "mrs://den/work-items/" + id + "#top",
+		// A trailing bare '#' is the case a component-level fragment check
+		// cannot see: net/url leaves both Fragment and RawFragment empty, so
+		// the decorated and undecorated strings parsed to the same tuple and
+		// the URI stopped being one-string-per-object. QREF-R1-B1.
+		"bare fragment marker":     "mrs://den/work-items/" + id + "#",
+		"doubled fragment marker":  "mrs://den/work-items/" + id + "##",
+		"empty query and fragment": "mrs://den/work-items/" + id + "?#",
+		"empty userinfo":           "mrs://@den/work-items/" + id,
+		"empty userinfo and colon": "mrs://:@den/work-items/" + id,
 		"userinfo":                 "mrs://operator@den/work-items/" + id,
 		"userinfo with password":   "mrs://operator:secret@den/work-items/" + id,
 		"port":                     "mrs://den:8080/work-items/" + id,

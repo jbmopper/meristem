@@ -171,12 +171,20 @@ type CredentialRequest struct {
 	// CausingWorkItemID is the origin-homed work item whose policy owns this
 	// call, when there is one. Nil for calls with no owning item.
 	CausingWorkItemID *uuid.UUID
-	// AssignmentID is reserved for assignment-bound temporary authority (work
-	// item 37d442e8) and is nil in every current caller. It is declared now so
-	// that landing token exchange does not have to re-widen this struct and
-	// churn every call site again. A resolver must not treat a nil value as
-	// permission to broaden — absent context means less authority, never more.
-	AssignmentID *uuid.UUID
+	// AssignmentEventID is reserved for assignment-bound temporary authority
+	// (work item 37d442e8) and is nil in every current caller. It is declared
+	// now so that landing token exchange does not have to re-widen this struct
+	// and churn every call site again.
+	//
+	// It names the exact assignment *event* — a generation, not a stable
+	// work-item identity. Assignment authority is fenced per generation:
+	// re-assigning the same item mints new authority, and a credential scoped
+	// to an earlier generation must not survive that. Keying on the item id
+	// would silently outlive the fence.
+	//
+	// A resolver must not treat a nil value as permission to broaden — absent
+	// context means less authority, never more.
+	AssignmentEventID *uuid.UUID
 }
 
 // BearerResolver returns the credential for one HTTP attempt, given the full
