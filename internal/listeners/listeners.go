@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
@@ -59,9 +60,12 @@ func NewService(pool *pgxpool.Pool, writer *events.Writer) *Service {
 	return &Service{pool: pool, writer: writer}
 }
 
-// listenerAdminActor pins the separation of duties: registration, credential
-// binding, and retirement are owner-side operations for a human, non-root
-// credential. Root stays mint/revoke-only; agents cannot mint addresses.
+// listenerAdminActor pins the separation of duties as a DOMAIN invariant
+// (LCP2-B3): registration, credential binding, retirement, and wide policy
+// replacement are authorized by the single access.CanAdminListeners reducer —
+// an explicitly scoped, non-root human credential. Enforcing it here, not in
+// the transports, means an internal caller (reconciler, CLI, future adapter)
+// cannot bypass the scope by calling the service directly.
 func listenerAdminActor(actor domain.Token) error {
 	if actor.ID == uuid.Nil {
 		return fmt.Errorf("%w: actor token id is required", ErrInvalidRequest)
@@ -69,8 +73,8 @@ func listenerAdminActor(actor domain.Token) error {
 	if actor.IsRoot {
 		return fmt.Errorf("%w: root token is mint/revoke-only", ErrNotAuthorized)
 	}
-	if actor.Source != domain.SourceHuman {
-		return fmt.Errorf("%w: listener administration requires a human credential", ErrNotAuthorized)
+	if !access.CanAdminListeners(actor) {
+		return fmt.Errorf("%w: listener administration requires a non-root human credential holding %s", ErrNotAuthorized, access.ScopeListenersAdmin)
 	}
 	return nil
 }
@@ -196,14 +200,14 @@ func (s *Service) BindCredential(ctx context.Context, id uuid.UUID, principalTok
 
 // SetPolicy replaces the base policy. ObservedPolicyEventID is the caller's
 // read of the current policy revision: a mismatch is a pure conflict that
-// appends nothing. The listener's own principal may replace the policy only
-// when the replacement Narrows the prior one; the wider move requires the
-// listener-administration surface (transport-gated) with a human actor.
+// appends nothing. The listener's own principal may replace an EXISTING
+// policy only when the replacement Narrows the prior one; the initial policy
+// and every wider move require access.CanAdminListeners — decided here from
+// the actor token alone, never from a caller-supplied surface flag.
 type SetPolicyInput struct {
 	Policy                Policy
 	ObservedPolicyEventID *uuid.UUID
 	Actor                 domain.Token
-	ActorIsAdminSurface   bool
 }
 
 func (s *Service) SetPolicy(ctx context.Context, id uuid.UUID, in SetPolicyInput) (Registration, error) {
@@ -235,23 +239,19 @@ func (s *Service) SetPolicy(ctx context.Context, id uuid.UUID, in SetPolicyInput
 	if err != nil {
 		return Registration{}, err
 	}
-	if normalized.Projection != "" {
-		var known bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM projections WHERE name=$1)`, normalized.Projection).Scan(&known); err != nil {
-			return Registration{}, fmt.Errorf("listeners: check projection: %w", err)
-		}
-		if !known {
-			return Registration{}, fmt.Errorf("%w: unknown projection %q", ErrInvalidPolicy, normalized.Projection)
-		}
-	}
 	switch {
-	case in.ActorIsAdminSurface && in.Actor.Source == domain.SourceHuman:
+	case access.CanAdminListeners(in.Actor):
 		// Listener administration: full replacement allowed, wider included.
 	case in.Actor.ID == reg.PrincipalTokenID:
-		// The listener's own principal may only narrow — an admin-surface
-		// call from a non-human self-principal lands here too, so an agent
-		// can never widen its own lens whatever route it took.
-		if reg.Policy != nil && !Narrows(*reg.Policy, normalized) {
+		// The listener's own principal may only NARROW an existing policy —
+		// the reducer above never admits a non-human, so an agent can never
+		// widen its own lens whatever route it took. The INITIAL policy is
+		// the baseline being narrowed, so it requires administration too: a
+		// principal cannot invent its own starting lens (LCP2-B2).
+		if reg.Policy == nil {
+			return Registration{}, fmt.Errorf("%w: the initial base policy requires listener administration", ErrNotAuthorized)
+		}
+		if !Narrows(*reg.Policy, normalized) {
 			return Registration{}, fmt.Errorf("%w: a listener may narrow its own policy but not widen it", ErrNotAuthorized)
 		}
 	default:
@@ -370,35 +370,6 @@ func (s *Service) List(ctx context.Context, includeRetired bool) ([]Registration
 		out = append(out, reg)
 	}
 	return out, nil
-}
-
-// ResolveForCapability is the deterministic router seam (slice-2 exit):
-// producers request a capability, never a bearer UUID. Selection is a pure
-// reduction — live registrations offering the capability (by policy when one
-// is set, else by registration), ordered by (created_at, id); the first is
-// the route. Eligibility beyond capability (scopes, capacity, review state)
-// is re-validated at claim time, so this choice can be optimistic.
-func (s *Service) ResolveForCapability(ctx context.Context, capability string) (Registration, error) {
-	capability = strings.TrimSpace(capability)
-	if capability == "" {
-		return Registration{}, fmt.Errorf("%w: capability is required", ErrInvalidRequest)
-	}
-	regs, err := s.List(ctx, false)
-	if err != nil {
-		return Registration{}, err
-	}
-	for _, reg := range regs {
-		offered := reg.Capabilities
-		if reg.Policy != nil {
-			offered = reg.Policy.Capabilities
-		}
-		for _, c := range offered {
-			if c == capability {
-				return reg, nil
-			}
-		}
-	}
-	return Registration{}, fmt.Errorf("%w: no live listener offers capability %q", ErrNotFound, capability)
 }
 
 func (s *Service) requireLiveToken(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {

@@ -550,6 +550,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/listeners", s.commandWithAccess(s.canUseListenerTool("listeners.create"), http.HandlerFunc(s.handleCreateListener)))
 	s.mux.Handle("GET /v1/listeners", s.protected(http.HandlerFunc(s.handleListListeners)))
 	s.mux.Handle("GET /v1/listeners/{id}", s.protected(http.HandlerFunc(s.handleGetListener)))
+	s.mux.Handle("GET /v1/listeners/by-name/{name}", s.protected(http.HandlerFunc(s.handleGetListenerByName)))
 	s.mux.Handle("POST /v1/listeners/{id}/policy", s.commandWithAccess(s.canUseListenerTool("listeners.set_policy"), http.HandlerFunc(s.handleSetListenerPolicy)))
 	s.mux.Handle("POST /v1/listeners/{id}/credential-bindings", s.commandWithAccess(s.canUseListenerTool("listeners.bind_credential"), http.HandlerFunc(s.handleBindListenerCredential)))
 	s.mux.Handle("POST /v1/listeners/{id}/retire", s.commandWithAccess(s.canUseListenerTool("listeners.retire"), http.HandlerFunc(s.handleRetireListener)))

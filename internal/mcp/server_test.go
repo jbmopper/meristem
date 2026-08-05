@@ -46,6 +46,24 @@ func newTestServer(t *testing.T) *Server {
 	return s
 }
 
+// fullCatalogScopes makes the test actor see EVERY advertised tool via
+// explicit scopes. The legacy-unscoped shortcut no longer covers listener
+// administration — that surface is CanAdminListeners exactly — so the
+// full-catalog golden authenticates a maximally scoped human instead.
+func fullCatalogScopes() []string {
+	return []string{
+		access.ScopePolicyProfileSwitch,
+		access.ScopeInboxCapture,
+		access.ScopeFeedRead,
+		access.ScopeWorkItemsReadAll,
+		access.ScopeWorkItemsWriteAll,
+		access.ScopeRegistryWrite,
+		access.ScopeApprovalsDecide,
+		access.ScopeListenersAdmin,
+		"logs.read",
+	}
+}
+
 // This test previously codified the pre-2026 echo-any-version behavior
 // (2024-11-05 was echoed back). The 2026-core consensus replaces echo with
 // negotiation: an unsupported proposal is answered with a supported version,
@@ -323,6 +341,7 @@ func TestServer_Run_AcceptsMultilineJSON(t *testing.T) {
 
 func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 	s := newTestServer(t)
+	s.actor.Scopes = fullCatalogScopes()
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if resp.Error != nil {
 		t.Fatalf("tools/list returned error: %+v", resp.Error)
@@ -396,6 +415,7 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 
 func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	s := newTestServer(t)
+	s.actor.Scopes = fullCatalogScopes()
 	s.SetToolNameMode(ToolNameModeCursor)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if resp.Error != nil {

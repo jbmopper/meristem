@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/listeners"
 )
@@ -191,7 +190,6 @@ func (s *Server) toolListenersSetPolicy() Tool {
 				Policy:                args.Policy,
 				ObservedPolicyEventID: observed,
 				Actor:                 actor,
-				ActorIsAdminSurface:   actorHasScope(actor, access.ScopeListenersAdmin),
 			})
 			if err != nil {
 				return nil, listenerToolErr(err)
@@ -293,15 +291,6 @@ func toListenerDTO(reg listeners.Registration) map[string]any {
 		out["retired_at"] = reg.RetiredAt.UTC().Format(time.RFC3339Nano)
 	}
 	return out
-}
-
-func actorHasScope(actor domain.Token, scope string) bool {
-	for _, s := range actor.Scopes {
-		if s == scope {
-			return true
-		}
-	}
-	return false
 }
 
 // listenerToolErr: every listener-service refusal is pure — validation

@@ -152,6 +152,18 @@ func NormalizePolicy(p Policy, listenerID uuid.UUID, registeredCapabilities []st
 		// the registration offers.
 		capabilities = append([]string(nil), registeredCapabilities...)
 	}
+	// The projection selects what counts as eligible demand. In this release
+	// it is pinned to the immutable dispatch demand lane: an absent projection
+	// defaults there, anything else fails closed. A listener therefore never
+	// observes general activity — only demand events pass the projection gate,
+	// and predicates can only narrow within it (LCP2-B1).
+	projection := strings.TrimSpace(p.Projection)
+	if projection == "" {
+		projection = DemandProjection
+	}
+	if projection != DemandProjection {
+		return Policy{}, "", fmt.Errorf("%w: projection %q is not the demand lane; this release pins listener policies to %q", ErrInvalidPolicy, p.Projection, DemandProjection)
+	}
 	preds, err := feedPredicates(p.Predicates)
 	if err != nil {
 		return Policy{}, "", err
@@ -163,7 +175,7 @@ func NormalizePolicy(p Policy, listenerID uuid.UUID, registeredCapabilities []st
 	out := Policy{
 		PayloadVersion:           PolicyVersion,
 		ListenerID:               listenerID,
-		Projection:               strings.TrimSpace(p.Projection),
+		Projection:               projection,
 		Predicates:               wirePredicates(normalized.Predicates),
 		Capabilities:             capabilities,
 		MaxConcurrentAssignments: 1,
@@ -174,14 +186,23 @@ func NormalizePolicy(p Policy, listenerID uuid.UUID, registeredCapabilities []st
 
 // Narrows reports whether next only narrows prior: predicates AND together,
 // so a superset of predicates narrows; capabilities may only shrink; the
-// projection and concurrency may not change. This is the deterministic rule
-// that lets a listener's own principal replace its policy without the admin
-// scope — anything else requires listener administration authority.
+// projection and concurrency may not change; focus may only tighten. This is
+// the deterministic rule that lets a listener's own principal replace its
+// policy without the admin scope — anything else requires listener
+// administration authority.
 func Narrows(prior, next Policy) bool {
 	if prior.Projection != next.Projection {
 		return false
 	}
 	if next.MaxConcurrentAssignments > prior.MaxConcurrentAssignments {
+		return false
+	}
+	// Focus order (LCP2-B2): claimed_work_item_tree drops the base lens while
+	// an assignment is held; retain_base keeps it. Moving to retain_base is a
+	// WIDENING — the listener would keep consuming base-lane demand while
+	// assigned — so a principal may only move retain_base -> claimed tree,
+	// never the reverse.
+	if prior.Focus != next.Focus && !(prior.Focus == FocusRetainBase && next.Focus == FocusClaimedWorkItemTree) {
 		return false
 	}
 	nextKeys := predicateKeySet(next.Predicates)

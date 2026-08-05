@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/access"
-	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/listeners"
 )
@@ -131,6 +130,31 @@ func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"listener": toListenerResponse(reg)})
 }
 
+// handleGetListenerByName is the canonical name-resolution shape MCP's
+// listeners.get name form mirrors: names are stable operator-facing
+// addresses, so both transports resolve them, REST first.
+func (s *Server) handleGetListenerByName(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !access.ToolVisible(actor, "listeners.get") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read listeners")
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		writeAPIError(w, http.StatusBadRequest, "invalid_listener_request", "listener name is required")
+		return
+	}
+	reg, err := s.listeners.GetByName(r.Context(), name)
+	if err != nil {
+		writeListenerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"listener": toListenerResponse(reg)})
+}
+
 func (s *Server) handleSetListenerPolicy(w http.ResponseWriter, r *http.Request) {
 	actor, ok := authenticatedToken(w, r)
 	if !ok {
@@ -161,7 +185,6 @@ func (s *Server) handleSetListenerPolicy(w http.ResponseWriter, r *http.Request)
 		Policy:                req.Policy,
 		ObservedPolicyEventID: observed,
 		Actor:                 actor,
-		ActorIsAdminSurface:   hasListenersAdminScope(actor),
 	})
 	if err != nil {
 		writeListenerError(w, r, err)
@@ -220,15 +243,6 @@ func (s *Server) handleRetireListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"listener": toListenerResponse(reg)})
-}
-
-func hasListenersAdminScope(actor domain.Token) bool {
-	for _, scope := range actor.Scopes {
-		if scope == access.ScopeListenersAdmin {
-			return true
-		}
-	}
-	return false
 }
 
 // writeListenerError maps listener-service refusals. Every branch is a pure

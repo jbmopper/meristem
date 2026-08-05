@@ -74,6 +74,17 @@ func canAdminOAuthClient(actor domain.Token, scope string) bool {
 	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil && actor.Source == domain.SourceHuman && hasScope(actor, scope)
 }
 
+// CanAdminListeners is the single authority reducer for listener
+// administration (registration, credential binding, retirement, wide policy
+// replacement). Like OAuth-client administration it is intentionally strict:
+// an explicitly scoped, non-root human credential — the legacy unscoped-token
+// compatibility path does not apply, root stays mint/revoke-only, and agents
+// never administer addresses. Every transport AND the listeners service
+// itself must call this reducer; no caller-supplied boolean substitutes.
+func CanAdminListeners(actor domain.Token) bool {
+	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil && actor.Source == domain.SourceHuman && hasScope(actor, ScopeListenersAdmin)
+}
+
 // Service evaluates access decisions that need projection reads.
 type Service struct {
 	pool *pgxpool.Pool
@@ -115,6 +126,11 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		}
 		return hasScope(actor, ScopeRegistryWrite)
 	}
+	if canonicalTool == "listeners.create" || canonicalTool == "listeners.bind_credential" || canonicalTool == "listeners.retire" {
+		// Evaluated before the root/legacy shortcut: listener administration
+		// is CanAdminListeners exactly, for advertisement and execution alike.
+		return CanAdminListeners(actor)
+	}
 	if canonicalTool == "approvals.decide" {
 		if actor.Source != domain.SourceHuman || actor.IsRoot {
 			return false
@@ -153,17 +169,15 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		// sealed provider tracker profiles must not gain lease authority as a
 		// side effect of this case list growing.
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
-	case "listeners.create", "listeners.bind_credential", "listeners.retire":
-		return scopes[ScopeListenersAdmin]
 	case "listeners.set_policy":
-		// Wide replacement needs the admin surface; the service additionally
+		// Wide replacement needs the admin reducer; the service additionally
 		// permits the listener's own principal to NARROW its policy, so the
 		// tool is visible to ordinary write-scoped principals too. The
 		// widen/narrow decision is the service's, never the transport's.
-		return scopes[ScopeListenersAdmin] || scopes[ScopeWorkItemsWriteAll] ||
+		return CanAdminListeners(actor) || scopes[ScopeWorkItemsWriteAll] ||
 			(scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	case "listeners.list", "listeners.get", "listeners.resolve":
-		return scopes[ScopeListenersAdmin] || (canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor)))
+		return CanAdminListeners(actor) || (canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor)))
 	case "convergence.propose_checks", "registry.activate_cultivar", "approvals.request", "connectors.http_request":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
@@ -31,7 +32,7 @@ func TestListenerLifecycleRebuildHonesty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "listener-rebuild-admin", Source: domain.SourceHuman, Actor: &root.Token})
+	admin, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "listener-rebuild-admin", Source: domain.SourceHuman, Scopes: []string{access.ScopeListenersAdmin}, Actor: &root.Token})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func TestListenerLifecycleRebuildHonesty(t *testing.T) {
 			Capabilities:             []string{"review.complementary"},
 			MaxConcurrentAssignments: 1,
 		},
-		Actor: admin.Token, ActorIsAdminSurface: true,
+		Actor: admin.Token,
 	})
 	if err != nil {
 		t.Fatalf("set policy: %v", err)

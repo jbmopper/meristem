@@ -4,8 +4,16 @@ package listeners
 // is byte-for-byte deterministic: every field written derives from the event
 // row alone (payload, id, seq, occurred_at), never from wall clocks or prior
 // process state.
+//
+// Version dispatch (LCP2-B4): every projector decodes payload_version FIRST
+// and fails replay closed on anything it was not built for — absence means
+// v1, v1 dispatches to the v1 handler (kept permanently), and any other or
+// malformed version is an error BEFORE any projection write. An older binary
+// therefore halts on a newer listener event instead of silently misprojecting
+// it as v1 and reporting a clean but false rebuild.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,6 +37,9 @@ type registeredProjector struct{}
 func (registeredProjector) Kind() string { return domain.EventListenerRegistered }
 
 func (registeredProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if err := requirePayloadVersion(event, 1); err != nil {
+		return err
+	}
 	var payload struct {
 		Name                     string    `json:"name"`
 		PrincipalTokenID         uuid.UUID `json:"principal_token_id"`
@@ -64,6 +75,9 @@ type credentialBoundProjector struct{}
 func (credentialBoundProjector) Kind() string { return domain.EventListenerCredentialBound }
 
 func (credentialBoundProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if err := requirePayloadVersion(event, 1); err != nil {
+		return err
+	}
 	var payload struct {
 		PrincipalTokenID uuid.UUID `json:"principal_token_id"`
 	}
@@ -86,6 +100,9 @@ type policySetProjector struct{}
 func (policySetProjector) Kind() string { return domain.EventListenerPolicySet }
 
 func (policySetProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if err := requirePayloadVersion(event, 1); err != nil {
+		return err
+	}
 	var payload struct {
 		PayloadVersion           int             `json:"payload_version"`
 		ListenerID               uuid.UUID       `json:"listener_id"`
@@ -131,6 +148,9 @@ type retiredProjector struct{}
 func (retiredProjector) Kind() string { return domain.EventListenerRetired }
 
 func (retiredProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event) error {
+	if err := requirePayloadVersion(event, 1); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `
 		UPDATE listener_registrations
 		SET retired_at=$2, state_event_id=$3, state_event_seq=$4, updated_at=$2
@@ -138,6 +158,44 @@ func (retiredProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event
 		event.SubjectID, event.OccurredAt, event.ID, event.Seq,
 	)
 	return err
+}
+
+// requirePayloadVersion is the per-event version gate, called before any
+// transaction use so an unsupported version can never reach a projection
+// write. An absent or null payload_version is v1 by contract; a non-integral,
+// non-numeric, or unknown version fails replay closed.
+func requirePayloadVersion(event domain.Event, supported int) error {
+	version, err := eventPayloadVersion(event)
+	if err != nil {
+		return err
+	}
+	if version != supported {
+		return fmt.Errorf("listeners: %s payload_version %d is not supported by this binary (supported: %d)", event.Kind, version, supported)
+	}
+	return nil
+}
+
+func eventPayloadVersion(event domain.Event) (int, error) {
+	raw, err := json.Marshal(event.Payload)
+	if err != nil {
+		return 0, fmt.Errorf("listeners: re-encode %s payload: %w", event.Kind, err)
+	}
+	var probe struct {
+		PayloadVersion *json.Number `json:"payload_version"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&probe); err != nil {
+		return 0, fmt.Errorf("listeners: decode %s payload_version: %w", event.Kind, err)
+	}
+	if probe.PayloadVersion == nil {
+		return 1, nil
+	}
+	version, err := probe.PayloadVersion.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("listeners: %s payload_version %q is not an integer", event.Kind, probe.PayloadVersion.String())
+	}
+	return int(version), nil
 }
 
 func decodePayload(event domain.Event, out any) error {
