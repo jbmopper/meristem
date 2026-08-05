@@ -63,15 +63,16 @@ func (snapshotObservedProjector) Apply(ctx context.Context, tx pgx.Tx, event dom
 		return fmt.Errorf("registry_snapshot.observed: clear nodes: %w", err)
 	}
 	for _, entry := range normalized.Nodes {
-		relay, err := json.Marshal(entry.RelayVia)
+		relay, err := json.Marshal(entry.QueueVia)
 		if err != nil {
-			return fmt.Errorf("registry_snapshot.observed: relay: %w", err)
+			return fmt.Errorf("registry_snapshot.observed: queue_via: %w", err)
 		}
+		// relay_via mirrors queue_via for the expand window (migration 0037).
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO nodes (
-				node_id, base_url, direct_url, relay_via, status,
+				node_id, base_url, direct_url, queue_via, relay_via, status,
 				created_at, updated_at, registry_revision
-			) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $6, $7)
+			) VALUES ($1, $2, $3, $4::jsonb, $4::jsonb, $5, $6, $6, $7)
 		`, entry.NodeID, entry.BaseURL, entry.DirectURL, relay, string(entry.Status), event.OccurredAt, entry.RegistryRevision); err != nil {
 			return fmt.Errorf("registry_snapshot.observed: insert node %s: %w", entry.NodeID, err)
 		}

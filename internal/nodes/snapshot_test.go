@@ -15,8 +15,8 @@ func TestNormalizeSnapshotCanonicalizesAndSorts(t *testing.T) {
 		SourceNodeID:   "hub",
 		SourceRevision: 12,
 		Nodes: []SnapshotEntry{
-			{NodeID: "spoke", DirectURL: &direct, RelayVia: []string{"hub"}, Status: domain.NodeStatusActive, RegistryRevision: 11},
-			{NodeID: "hub", BaseURL: &base, RelayVia: nil, Status: domain.NodeStatusActive, RegistryRevision: 10},
+			{NodeID: "spoke", DirectURL: &direct, QueueVia: []string{"hub"}, Status: domain.NodeStatusActive, RegistryRevision: 11},
+			{NodeID: "hub", BaseURL: &base, QueueVia: nil, Status: domain.NodeStatusActive, RegistryRevision: 10},
 		},
 	}, "hub")
 	if err != nil {
@@ -31,8 +31,8 @@ func TestNormalizeSnapshotCanonicalizesAndSorts(t *testing.T) {
 	if got.Nodes[1].DirectURL == nil || *got.Nodes[1].DirectURL != "https://spoke.example:8443" {
 		t.Fatalf("direct_url = %v", got.Nodes[1].DirectURL)
 	}
-	if got.Nodes[0].RelayVia == nil {
-		t.Fatal("nil relay_via was not normalized")
+	if got.Nodes[0].QueueVia == nil {
+		t.Fatal("nil queue_via was not normalized")
 	}
 }
 
@@ -47,7 +47,7 @@ func TestNormalizeSnapshotRefusesMalformedTopology(t *testing.T) {
 	tests := []RegistrySnapshot{
 		{PayloadVersion: 1, SourceNodeID: "other", SourceRevision: 2, Nodes: base.Nodes},
 		{PayloadVersion: 1, SourceNodeID: "hub", SourceRevision: 2, Nodes: []SnapshotEntry{{NodeID: "hub", BaseURL: &httpsPath, Status: domain.NodeStatusActive, RegistryRevision: 1}}},
-		{PayloadVersion: 1, SourceNodeID: "hub", SourceRevision: 2, Nodes: []SnapshotEntry{{NodeID: "hub", RelayVia: []string{"missing"}, Status: domain.NodeStatusActive, RegistryRevision: 1}}},
+		{PayloadVersion: 1, SourceNodeID: "hub", SourceRevision: 2, Nodes: []SnapshotEntry{{NodeID: "hub", QueueVia: []string{"missing"}, Status: domain.NodeStatusActive, RegistryRevision: 1}}},
 		{PayloadVersion: 1, SourceNodeID: "hub", SourceRevision: 2, Nodes: []SnapshotEntry{{NodeID: "hub", Status: domain.NodeStatus("unreachable"), RegistryRevision: 1}}},
 	}
 	for i, snapshot := range tests {

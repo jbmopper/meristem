@@ -28,7 +28,10 @@ func TestNodeCommandPaths(t *testing.T) {
 	writer := app.NewEventWriter()
 	actor := createCmdSystemToken(t, ctx, pool, writer, "node-itest")
 
-	// register: hub with an ingress base_url and a relay hop, no direct route.
+	// register: hub with an ingress base_url and a queue hop, no direct route.
+	// This path uses the deprecated --relay-via alias on purpose; the canonical
+	// --queue-via flag is covered by TestNodeRegisterCanonicalQueueViaFlag, and
+	// the alias equivalence by TestNodeRegisterFlagAliasIsEquivalent.
 	if err := registerNode(ctx, pool, writer, actor, []string{
 		"--node-id", "m4",
 		"--base-url", "https://ingress.example",
@@ -47,7 +50,7 @@ func TestNodeCommandPaths(t *testing.T) {
 		t.Fatalf("direct_url column = %q, want -", row[2])
 	}
 	if row[3] != "den" {
-		t.Fatalf("relay_via column = %q, want den", row[3])
+		t.Fatalf("queue_via column = %q, want den", row[3])
 	}
 	if row[4] != "active" {
 		t.Fatalf("status column = %q, want active", row[4])
@@ -100,7 +103,7 @@ func TestNodeCommandPaths(t *testing.T) {
 		t.Fatalf("direct_url after update-route = %q", after[2])
 	}
 	if after[3] != "-" {
-		t.Fatalf("relay_via after update-route = %q, want cleared (-)", after[3])
+		t.Fatalf("queue_via after update-route = %q, want cleared (-)", after[3])
 	}
 	if after[4] != "active" {
 		t.Fatalf("status after update-route = %q, want active", after[4])
@@ -137,6 +140,73 @@ func TestNodeCommandPaths(t *testing.T) {
 	final := listRow(t, ctx, pool, "m4")
 	if final[2] != "https://m4.peer.example" || final[3] != "-" || final[4] != "active" {
 		t.Fatalf("final route A not restored: %v", final)
+	}
+}
+
+// TestNodeRegisterCanonicalQueueViaFlag covers --queue-via directly. The
+// broader command-path test drives the deprecated alias, which would let the
+// canonical flag regress unnoticed even though it is the one the rename exists
+// to introduce.
+func TestNodeRegisterCanonicalQueueViaFlag(t *testing.T) {
+	ctx := context.Background()
+	pool := newCmdIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	writer := app.NewEventWriter()
+	actor := createCmdSystemToken(t, ctx, pool, writer, "queue-via-flag-itest")
+
+	if err := registerNode(ctx, pool, writer, actor, []string{
+		"--node-id", "m4",
+		"--base-url", "https://ingress.example",
+		"--queue-via", "den",
+		"--queue-via", "hub",
+		"--status", "active",
+	}); err != nil {
+		t.Fatalf("registerNode --queue-via: %v", err)
+	}
+	if got := listRow(t, ctx, pool, "m4")[3]; got != "den,hub" {
+		t.Fatalf("queue_via column = %q, want den,hub", got)
+	}
+
+	// update-route must accept the canonical flag too, and hop order is
+	// meaningful: it is the order Select tries queue hosts in.
+	if err := updateNodeRoute(ctx, pool, writer, actor, []string{
+		"--node-id", "m4",
+		"--queue-via", "hub",
+		"--queue-via", "den",
+		"--status", "active",
+	}); err != nil {
+		t.Fatalf("updateNodeRoute --queue-via: %v", err)
+	}
+	if got := listRow(t, ctx, pool, "m4")[3]; got != "hub,den" {
+		t.Fatalf("queue_via after update-route = %q, want hub,den", got)
+	}
+}
+
+// TestNodeRegisterFlagAliasIsEquivalent pins that --relay-via is an alias, not
+// a second independent list: mixing the two spellings must append to one
+// ordered allowlist rather than silently dropping either.
+func TestNodeRegisterFlagAliasIsEquivalent(t *testing.T) {
+	ctx := context.Background()
+	pool := newCmdIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	writer := app.NewEventWriter()
+	actor := createCmdSystemToken(t, ctx, pool, writer, "queue-via-alias-itest")
+
+	if err := registerNode(ctx, pool, writer, actor, []string{
+		"--node-id", "m4",
+		"--base-url", "https://ingress.example",
+		"--queue-via", "den",
+		"--relay-via", "hub",
+		"--status", "active",
+	}); err != nil {
+		t.Fatalf("registerNode mixed flags: %v", err)
+	}
+	if got := listRow(t, ctx, pool, "m4")[3]; got != "den,hub" {
+		t.Fatalf("mixed --queue-via/--relay-via = %q, want den,hub", got)
 	}
 }
 

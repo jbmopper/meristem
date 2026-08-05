@@ -39,7 +39,7 @@ func TestRegistrySnapshotProjectionRebuildsFromObservedEvent(t *testing.T) {
 		SourceRevision: sourceRevision,
 		Nodes: []nodes.SnapshotEntry{{
 			NodeID:           "hub",
-			RelayVia:         []string{},
+			QueueVia:         []string{},
 			Status:           domain.NodeStatusActive,
 			RegistryRevision: entryRevision,
 		}},

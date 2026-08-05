@@ -10,9 +10,9 @@
 // action), matching how `seed v1` resolves its actor.
 //
 //	meristem node register --node-id m4 --base-url URL [--direct-url URL]
-//	                       [--relay-via ID ...] [--status active]
+//	                       [--queue-via ID ...] [--status active]
 //	meristem node update-route --node-id m4 [--direct-url URL]
-//	                           [--relay-via ID ...] [--status active]
+//	                           [--queue-via ID ...] [--status active]
 //	meristem node list
 //	meristem node sync-registry [--once] [--interval 30s]
 //	meristem node sync-outcomes [--once] [--interval 30s]
@@ -21,7 +21,7 @@
 // declared state; an identical re-run collapses onto the same event (the
 // payload is the idempotency key, as in seed.go) while any changed field
 // appends a fresh event. update-route declares the full replacement
-// reachability state (direct_url, relay_via, status): repeating the current
+// reachability state (direct_url, queue_via, status): repeating the current
 // declaration is a no-op, while returning to an earlier state appends a new
 // node.route_updated event. Fields the operator omits are cleared, per the
 // projector's replacement contract. list is read-only.
@@ -307,10 +307,11 @@ func registerNode(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer
 	nodeID := fs.String("node-id", "", "DNS-safe fleet node id (required)")
 	statusFlag := fs.String("status", string(domain.NodeStatusActive), "reachability status")
 	var baseURL, directURL optionalStringFlag
-	var relayVia stringSliceFlag
+	var queueVia stringSliceFlag
 	fs.Var(&baseURL, "base-url", "registered ingress base URL (optional)")
 	fs.Var(&directURL, "direct-url", "direct peer route URL (optional)")
-	fs.Var(&relayVia, "relay-via", "legacy queue-host node id; repeatable")
+	fs.Var(&queueVia, "queue-via", "queue-host node id; repeatable")
+	fs.Var(&queueVia, "relay-via", "deprecated alias for --queue-via")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -330,7 +331,7 @@ func registerNode(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer
 		NodeID:    *nodeID,
 		BaseURL:   base,
 		DirectURL: direct,
-		RelayVia:  relayVia,
+		QueueVia:  queueVia,
 		Status:    *statusFlag,
 	})
 	if err != nil {
@@ -347,16 +348,17 @@ func registerNode(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer
 
 // updateNodeRoute parses update-route flags and appends a node.route_updated
 // event carrying the full replacement route state. Omitted --direct-url and
-// --relay-via clear those columns; that is the projector's contract, not a bug.
+// --queue-via clear those columns; that is the projector's contract, not a bug.
 func updateNodeRoute(ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, args []string) error {
 	fs := flag.NewFlagSet("node update-route", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	nodeID := fs.String("node-id", "", "DNS-safe fleet node id (required)")
 	statusFlag := fs.String("status", string(domain.NodeStatusActive), "reachability status")
 	var directURL optionalStringFlag
-	var relayVia stringSliceFlag
+	var queueVia stringSliceFlag
 	fs.Var(&directURL, "direct-url", "direct peer route URL (optional; omitted clears it)")
-	fs.Var(&relayVia, "relay-via", "legacy queue-host node id; repeatable (omitted clears the list)")
+	fs.Var(&queueVia, "queue-via", "queue-host node id; repeatable (omitted clears the list)")
+	fs.Var(&queueVia, "relay-via", "deprecated alias for --queue-via")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -371,7 +373,7 @@ func updateNodeRoute(ctx context.Context, pool *pgxpool.Pool, writer *events.Wri
 	payload, err := nodes.BuildRouteUpdatedPayload(nodes.RouteParams{
 		NodeID:    *nodeID,
 		DirectURL: direct,
-		RelayVia:  relayVia,
+		QueueVia:  queueVia,
 		Status:    *statusFlag,
 	})
 	if err != nil {
@@ -404,6 +406,9 @@ func appendNodeRouteEvent(ctx context.Context, pool *pgxpool.Pool, writer *event
 		currentRelay  []byte
 		currentStatus string
 	)
+	// relay_via, not queue_via, for the expand window — see nodes.List. Reading
+	// the new column here would compare the desired route against a stale value
+	// and wrongly collapse a real change into a no-op.
 	if err := tx.QueryRow(ctx, `
 		SELECT direct_url, relay_via, status
 		FROM nodes
@@ -418,7 +423,7 @@ func appendNodeRouteEvent(ctx context.Context, pool *pgxpool.Pool, writer *event
 
 	var desired struct {
 		DirectURL *string  `json:"direct_url"`
-		RelayVia  []string `json:"relay_via"`
+		QueueVia  []string `json:"queue_via"`
 		Status    string   `json:"status"`
 	}
 	b, err := json.Marshal(payload)
@@ -430,9 +435,9 @@ func appendNodeRouteEvent(ctx context.Context, pool *pgxpool.Pool, writer *event
 	}
 	var relay []string
 	if err := json.Unmarshal(currentRelay, &relay); err != nil {
-		return false, fmt.Errorf("decode current relay_via: %w", err)
+		return false, fmt.Errorf("decode current queue_via: %w", err)
 	}
-	if optionalStringsEqual(currentDirect, desired.DirectURL) && stringSlicesEqual(relay, desired.RelayVia) && currentStatus == desired.Status {
+	if optionalStringsEqual(currentDirect, desired.DirectURL) && stringSlicesEqual(relay, desired.QueueVia) && currentStatus == desired.Status {
 		return false, nil
 	}
 
@@ -482,8 +487,8 @@ func stringSlicesEqual(a, b []string) bool {
 }
 
 // listNodes prints the nodes projection: one tab-separated row per node with
-// node_id, base_url, direct_url, relay_via, status, updated_at. Absent URLs
-// and an empty relay chain render as "-".
+// node_id, base_url, direct_url, queue_via, status, updated_at. Absent URLs
+// and an empty queue_via render as "-".
 func listNodes(ctx context.Context, pool *pgxpool.Pool, w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("node list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -496,8 +501,8 @@ func listNodes(ctx context.Context, pool *pgxpool.Pool, w io.Writer, args []stri
 	}
 	for _, n := range rows {
 		relay := "-"
-		if len(n.RelayVia) > 0 {
-			relay = strings.Join(n.RelayVia, ",")
+		if len(n.QueueVia) > 0 {
+			relay = strings.Join(n.QueueVia, ",")
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			n.NodeID,
@@ -617,8 +622,8 @@ func (s *stringSliceFlag) Set(v string) error {
 
 func nodeUsage(w io.Writer) {
 	fmt.Fprint(w, `usage:
-  MERISTEM_TOKEN=mrs_<system> meristem node register --node-id ID [--base-url URL] [--direct-url URL] [--relay-via ID ...] [--status active]
-  MERISTEM_TOKEN=mrs_<system> meristem node update-route --node-id ID [--direct-url URL] [--relay-via ID ...] [--status active]
+  MERISTEM_TOKEN=mrs_<system> meristem node register --node-id ID [--base-url URL] [--direct-url URL] [--queue-via ID ...] [--status active]
+  MERISTEM_TOKEN=mrs_<system> meristem node update-route --node-id ID [--direct-url URL] [--queue-via ID ...] [--status active]
   meristem node list
   MERISTEM_REGISTRY_HOME_URL=https://registry.example \
     MERISTEM_REGISTRY_HOME_NODE_ID=registry \
@@ -635,7 +640,7 @@ Appends node.registered / node.route_updated events to the fleet node registry
 and prints the resulting projection. Connects directly via MERISTEM_DATABASE_URL;
 writes require a system-source MERISTEM_TOKEN. Re-running an identical
 registration is a no-op; a changed field appends a new event. update-route fully
-replaces the route state (direct_url, relay_via, status) — omitted fields clear.
+replaces the route state (direct_url, queue_via, status) — omitted fields clear.
 
 sync-registry performs authenticated outbound GETs against the pinned registry
 home and appends validated snapshots to this node's own log. It never pushes to

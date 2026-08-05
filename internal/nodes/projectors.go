@@ -73,17 +73,21 @@ func applyRegistered(ctx context.Context, tx pgx.Tx, event domain.Event, strictO
 			return fmt.Errorf("node.registered: %w", err)
 		}
 	}
-	relay, err := normalizeRelayVia(p.RelayVia)
+	relay, err := normalizeQueueVia(p.QueueVia)
 	if err != nil {
 		return fmt.Errorf("node.registered: %w", err)
 	}
+	// relay_via is written alongside queue_via for the expand window (migration
+	// 0037): a stale binary still reads the legacy column. Both are folded from
+	// the same payload value, so the projection stays a pure fold either way.
 	_, err = tx.Exec(ctx, `
-		INSERT INTO nodes (node_id, base_url, direct_url, relay_via, status, created_at, updated_at, registry_revision)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $6, $7)
+		INSERT INTO nodes (node_id, base_url, direct_url, queue_via, relay_via, status, created_at, updated_at, registry_revision)
+		VALUES ($1, $2, $3, $4::jsonb, $4::jsonb, $5, $6, $6, $7)
 		ON CONFLICT (node_id) DO UPDATE SET
 			base_url = EXCLUDED.base_url,
 			direct_url = EXCLUDED.direct_url,
-			relay_via = EXCLUDED.relay_via,
+			queue_via = EXCLUDED.queue_via,
+			relay_via = EXCLUDED.queue_via,
 			status = EXCLUDED.status,
 			updated_at = EXCLUDED.updated_at,
 			registry_revision = EXCLUDED.registry_revision
@@ -99,7 +103,7 @@ type routeUpdatedProjector struct{}
 func (routeUpdatedProjector) Kind() string { return domain.EventNodeRouteUpdated }
 
 // Apply folds a node.route_updated event into the `nodes` table as an update
-// of the reachability columns (direct_url, relay_via, status) for an already
+// of the reachability columns (direct_url, queue_via, status) for an already
 // registered node. base_url and created_at are untouched. An update targeting
 // an unregistered node matches zero rows and is a no-op — on a clean rebuild
 // the node.registered event always precedes its route updates in seq order.
@@ -144,13 +148,16 @@ func applyRouteUpdated(ctx context.Context, tx pgx.Tx, event domain.Event, stric
 			return fmt.Errorf("node.route_updated: %w", err)
 		}
 	}
-	relay, err := normalizeRelayVia(p.RelayVia)
+	relay, err := normalizeQueueVia(p.QueueVia)
 	if err != nil {
 		return fmt.Errorf("node.route_updated: %w", err)
 	}
+	// relay_via mirrors queue_via for the expand window; see the registered
+	// projector above and migration 0037.
 	_, err = tx.Exec(ctx, `
 		UPDATE nodes SET
 			direct_url = $2,
+			queue_via = $3::jsonb,
 			relay_via = $3::jsonb,
 			status = $4,
 			updated_at = $5,
@@ -170,19 +177,19 @@ func validateNodeID(nodeID string) error {
 	return nil
 }
 
-// normalizeRelayVia validates every relay hop is a DNS-safe node_id and
+// normalizeQueueVia validates every queue-host hop is a DNS-safe node_id and
 // returns the JSONB-encoded array. A nil/empty input encodes as `[]` so the
 // column's default is honoured on every write path.
-func normalizeRelayVia(relay []string) ([]byte, error) {
-	if relay == nil {
-		relay = []string{}
+func normalizeQueueVia(queueVia []string) ([]byte, error) {
+	if queueVia == nil {
+		queueVia = []string{}
 	}
-	if err := validateRelayVia(relay); err != nil {
+	if err := validateQueueVia(queueVia); err != nil {
 		return nil, err
 	}
-	b, err := json.Marshal(relay)
+	b, err := json.Marshal(queueVia)
 	if err != nil {
-		return nil, fmt.Errorf("marshal relay_via: %w", err)
+		return nil, fmt.Errorf("marshal queue_via: %w", err)
 	}
 	return b, nil
 }

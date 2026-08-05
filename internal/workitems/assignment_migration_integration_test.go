@@ -18,6 +18,33 @@ import (
 	"github.com/jbmopper/meristem/internal/testutil/pgtest"
 )
 
+// migrateDownTo rolls migrations back until version is the newest applied one.
+//
+// These tests reconstruct the pre-0035 and pre-0036 database states an older
+// binary would present at upgrade time. That is a property of *which*
+// migrations are applied, not of how many MigrateDown calls it takes to get
+// there: counting rollbacks silently retargets the moment any later migration
+// lands, and the guarded-upgrade assertions then pass or fail against the
+// wrong file. Naming the version keeps the fixture pinned to its intent.
+func migrateDownTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, version int64) {
+	t.Helper()
+	for {
+		var head int64
+		if err := pool.QueryRow(ctx, `SELECT coalesce(max(version), 0) FROM schema_migrations`).Scan(&head); err != nil {
+			t.Fatalf("read schema_migrations head: %v", err)
+		}
+		if head == version {
+			return
+		}
+		if head < version {
+			t.Fatalf("schema_migrations head is %d, already below target %d", head, version)
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("roll back migration %d: %v", head, err)
+		}
+	}
+}
+
 func TestAssignmentMigrationBackfillsNonterminalItemFromCreatedEvent(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t, "assignment_migration_nonterminal")
@@ -37,12 +64,7 @@ func TestAssignmentMigrationBackfillsNonterminalItemFromCreatedEvent(t *testing.
 	if err != nil {
 		t.Fatalf("create actor: %v", err)
 	}
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back terminal addressee migration: %v", err)
-	}
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back assignment migration: %v", err)
-	}
+	migrateDownTo(t, ctx, pool, 34)
 
 	legacyRegistry := projections.NewRegistry()
 	legacyRegistry.Register(preAssignmentCreatedProjector{})
@@ -146,9 +168,7 @@ func TestTerminalAddresseeMigrationBackfillsActiveEpochOnly(t *testing.T) {
 	// Dropping 0036 erases only the new projection column. The events and
 	// 0035 lifecycle rows left behind are exactly the state an older binary
 	// would present at guarded upgrade time.
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back terminal addressee migration: %v", err)
-	}
+	migrateDownTo(t, ctx, pool, 35)
 	// Legacy producers omitted payload.from. Append both a terminal entry and a
 	// terminal same-state no-op in that historical shape, then fold the exact
 	// 0035 pointers in the same transaction. The no-op must not become a second
@@ -347,9 +367,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		if _, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "first terminal entry", closer); err != nil {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownTo(t, ctx, pool, 35)
 
 		// Model corrupted pre-0036 history without running today's fail-closed
 		// projector: a later event attempts to change one terminal into another.
@@ -415,9 +433,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		if _, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "terminal entry done", closer); err != nil {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownTo(t, ctx, pool, 35)
 		// Simulate pre-upgrade projection drift. The migration must abort rather
 		// than silently bind a done event to a failed terminal sentinel.
 		if _, err := pool.Exec(ctx, `
@@ -442,9 +458,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		if _, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "terminal entry done", closer); err != nil {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownTo(t, ctx, pool, 35)
 		// A terminal work_item with a nonterminal assignment sentinel cannot be
 		// repaired safely by guessing. The guarded cutover must reject it before
 		// deriving an address from history.
@@ -467,9 +481,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		ctx := context.Background()
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "missing assignment placeholder")
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownTo(t, ctx, pool, 35)
 		if _, err := pool.Exec(ctx, `DELETE FROM work_item_assignment_state WHERE work_item_id=$1`, item.ID); err != nil {
 			t.Fatalf("remove assignment placeholder fixture: %v", err)
 		}
@@ -484,9 +496,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		ctx := context.Background()
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "nonterminal lifecycle drift")
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownTo(t, ctx, pool, 35)
 		if _, err := pool.Exec(ctx, `UPDATE work_items SET state='planned' WHERE id=$1`, item.ID); err != nil {
 			t.Fatalf("prepare nonterminal lifecycle drift fixture: %v", err)
 		}
@@ -522,9 +532,7 @@ func migrateMalformedPriorAssignedFixture(t *testing.T, assigneeValue string) er
 	ctx := context.Background()
 	pool, writer, _, actor, _ := newAssignmentTestStack(t, ctx)
 	item := createClaimableItem(t, ctx, NewService(pool, writer), actor, "malformed prior assigned control")
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back terminal addressee migration: %v", err)
-	}
+	migrateDownTo(t, ctx, pool, 35)
 
 	legacyWriter := events.NewWriter(projections.NewRegistry())
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})

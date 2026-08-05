@@ -149,7 +149,7 @@ func appendRegistryNode(t *testing.T, ctx context.Context, pool interface {
 	if baseURL != "" {
 		base = &baseURL
 	}
-	payload, err := nodes.BuildRegisteredPayload(nodes.RegisterParams{NodeID: nodeID, BaseURL: base, RelayVia: relay, Status: string(domain.NodeStatusActive)})
+	payload, err := nodes.BuildRegisteredPayload(nodes.RegisterParams{NodeID: nodeID, BaseURL: base, QueueVia: relay, Status: string(domain.NodeStatusActive)})
 	if err != nil {
 		t.Fatalf("build node %s: %v", nodeID, err)
 	}

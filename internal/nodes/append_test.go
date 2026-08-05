@@ -28,7 +28,7 @@ func TestBuildRegisteredPayloadFull(t *testing.T) {
 		NodeID:    "m4",
 		BaseURL:   strptr("https://ingress.example"),
 		DirectURL: strptr("https://m4.peer.example"),
-		RelayVia:  []string{"den"},
+		QueueVia:  []string{"den"},
 		Status:    "active",
 	})
 	if err != nil {
@@ -47,9 +47,9 @@ func TestBuildRegisteredPayloadFull(t *testing.T) {
 	if m["status"] != "active" {
 		t.Errorf("status = %v, want active", m["status"])
 	}
-	relay, ok := m["relay_via"].([]any)
+	relay, ok := m["queue_via"].([]any)
 	if !ok || len(relay) != 1 || relay[0] != "den" {
-		t.Errorf("relay_via = %v, want [den]", m["relay_via"])
+		t.Errorf("queue_via = %v, want [den]", m["queue_via"])
 	}
 	if m["payload_version"] != float64(routePayloadVersion) {
 		t.Errorf("payload_version = %v, want %d", m["payload_version"], routePayloadVersion)
@@ -76,8 +76,8 @@ func TestBuildRegisteredPayloadOmitsAbsentURLs(t *testing.T) {
 	if _, present := m["direct_url"]; present {
 		t.Errorf("direct_url should be omitted, got %v", m["direct_url"])
 	}
-	if _, present := m["relay_via"]; present {
-		t.Errorf("relay_via should be omitted when empty, got %v", m["relay_via"])
+	if _, present := m["queue_via"]; present {
+		t.Errorf("queue_via should be omitted when empty, got %v", m["queue_via"])
 	}
 }
 
@@ -150,10 +150,10 @@ func TestBuildRegisteredPayloadRequiresStatus(t *testing.T) {
 	}
 }
 
-func TestBuildRegisteredPayloadRejectsBadRelayHop(t *testing.T) {
-	_, err := BuildRegisteredPayload(RegisterParams{NodeID: "m4", Status: "active", RelayVia: []string{"den", "BAD"}})
-	if err == nil || !strings.Contains(err.Error(), "relay_via[1]") {
-		t.Errorf("expected relay_via hop error, got %v", err)
+func TestBuildRegisteredPayloadRejectsBadQueueHop(t *testing.T) {
+	_, err := BuildRegisteredPayload(RegisterParams{NodeID: "m4", Status: "active", QueueVia: []string{"den", "BAD"}})
+	if err == nil || !strings.Contains(err.Error(), "queue_via[1]") {
+		t.Errorf("expected queue_via hop error, got %v", err)
 	}
 }
 
@@ -162,7 +162,7 @@ func TestBuildRouteUpdatedPayloadOmitsBaseURL(t *testing.T) {
 	payload, err := BuildRouteUpdatedPayload(RouteParams{
 		NodeID:    "m4",
 		DirectURL: strptr("https://m4.peer.example"),
-		RelayVia:  []string{},
+		QueueVia:  []string{},
 		Status:    "unreachable",
 	})
 	if err != nil {

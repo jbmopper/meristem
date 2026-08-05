@@ -99,7 +99,7 @@ const (
 	// docs/network-layer-spec.md §2 "Naming" and §6 stage 0.
 	EventNodeRegistered = "node.registered"
 	// EventNodeRouteUpdated records a change to how a registered node is
-	// reached — its direct_url, relay_via chain, and/or status — without
+	// reached — its direct_url, queue_via list, and/or status — without
 	// re-registering it. §2b of the network spec models route changes as
 	// node.route_updated events folded into the same `nodes` row.
 	EventNodeRouteUpdated = "node.route_updated"
@@ -562,7 +562,7 @@ type Node struct {
 	NodeID    string
 	BaseURL   *string
 	DirectURL *string
-	RelayVia  []string
+	QueueVia  []string
 	Status    NodeStatus
 	CreatedAt time.Time
 	UpdatedAt time.Time

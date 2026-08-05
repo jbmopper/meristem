@@ -11,7 +11,7 @@ import (
 // current time, it returns the fixed-order candidate list a sender walks:
 //
 //  1. Direct — the target's own direct_url, if registered.
-//  2. Durable queue — for each active node R in the target's relay_via IN
+//  2. Durable queue — for each active node R in the target's queue_via IN
 //     ORDER that has its own direct_url, a KindQueue candidate at R's
 //     direct_url asks R to durably park the command for the target.
 //
@@ -64,7 +64,7 @@ func Select(nodes []domain.Node, target string, cooldowns map[string]time.Time, 
 
 	// 2. Durable queue: each reachable queue host, in order, that can park the
 	//    command for the (inbound-less) target to drain by outbound poll.
-	for _, via := range targetNode.RelayVia {
+	for _, via := range targetNode.QueueVia {
 		relay, ok := byID[via]
 		if !ok || relay.Status != domain.NodeStatusActive {
 			continue

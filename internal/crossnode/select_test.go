@@ -14,7 +14,7 @@ func node(id string, direct *string, relay ...string) domain.Node {
 	return domain.Node{
 		NodeID:    id,
 		DirectURL: direct,
-		RelayVia:  relay,
+		QueueVia:  relay,
 		Status:    domain.NodeStatusActive,
 	}
 }
@@ -106,7 +106,7 @@ func TestSelect(t *testing.T) {
 			wantErr: ErrNoRoute,
 		},
 		{
-			name: "unknown relay id in relay_via is ignored",
+			name: "unknown relay id in queue_via is ignored",
 			nodes: []domain.Node{
 				node("m4", nil, "gone", "hub"),
 				node("hub", ptr(hub)),

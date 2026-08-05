@@ -30,13 +30,60 @@ var (
 
 // SnapshotEntry is one complete routing-intent row from the registry home.
 // RegistryRevision is an events.seq cursor meaningful only at SourceNodeID.
+//
+// QueueVia serializes as relay_via, and the struct deliberately has no
+// queue_via field at all. This is the exact opposite of the node event wire,
+// which emits both spellings — and the asymmetry is load-bearing. Snapshot
+// consumers decode with DisallowUnknownFields (registry_sync.go), so an
+// additive queue_via key does not get ignored by an old peer: it rejects the
+// entire snapshot and cross-node registry sync hard-fails. Additive fields are
+// only safe where the decoder tolerates unknown ones. queue_via reaches this
+// wire when a negotiated snapshot v2 exists, not before — and bumping
+// SnapshotPayloadVersion alone is not that negotiation.
+//
+// UnmarshalJSON still ACCEPTS either spelling on input, so a peer already
+// emitting queue_via is understood; only output is constrained.
 type SnapshotEntry struct {
 	NodeID           string            `json:"node_id"`
 	BaseURL          *string           `json:"base_url,omitempty"`
 	DirectURL        *string           `json:"direct_url,omitempty"`
-	RelayVia         []string          `json:"relay_via"`
+	QueueVia         []string          `json:"relay_via"`
 	Status           domain.NodeStatus `json:"status"`
 	RegistryRevision int64             `json:"registry_revision"`
+}
+
+func (e *SnapshotEntry) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		NodeID           string            `json:"node_id"`
+		BaseURL          *string           `json:"base_url,omitempty"`
+		DirectURL        *string           `json:"direct_url,omitempty"`
+		QueueVia         *[]string         `json:"queue_via"`
+		LegacyRelayVia   *[]string         `json:"relay_via"`
+		Status           domain.NodeStatus `json:"status"`
+		RegistryRevision int64             `json:"registry_revision"`
+	}
+	// A custom UnmarshalJSON bypasses the caller's DisallowUnknownFields, so
+	// re-assert it here or entries would silently become the one lax spot in an
+	// otherwise strict decode path.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var raw alias
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	resolved, err := resolveQueueVia(raw.QueueVia, raw.LegacyRelayVia)
+	if err != nil {
+		return fmt.Errorf("registry snapshot entry %q: %w", raw.NodeID, err)
+	}
+	*e = SnapshotEntry{
+		NodeID:           raw.NodeID,
+		BaseURL:          raw.BaseURL,
+		DirectURL:        raw.DirectURL,
+		QueueVia:         resolved,
+		Status:           raw.Status,
+		RegistryRevision: raw.RegistryRevision,
+	}
+	return nil
 }
 
 // RegistrySnapshot is the authenticated, complete registry distribution unit.
@@ -104,6 +151,7 @@ func (s *SnapshotService) Build(ctx context.Context, actor domain.Token, sourceN
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events`).Scan(&revision); err != nil {
 		return RegistrySnapshot{}, err
 	}
+	// relay_via, not queue_via, for the expand window — see nodes.List.
 	rows, err := tx.Query(ctx, `
 		SELECT node_id, base_url, direct_url, relay_via, status, registry_revision
 		FROM nodes ORDER BY node_id
@@ -119,7 +167,7 @@ func (s *SnapshotService) Build(ctx context.Context, actor domain.Token, sourceN
 			rows.Close()
 			return RegistrySnapshot{}, err
 		}
-		if err := json.Unmarshal(relayJSON, &entry.RelayVia); err != nil {
+		if err := json.Unmarshal(relayJSON, &entry.QueueVia); err != nil {
 			rows.Close()
 			return RegistrySnapshot{}, err
 		}
@@ -243,24 +291,24 @@ func NormalizeSnapshot(in RegistrySnapshot, expectedSource string) (RegistrySnap
 		if err != nil {
 			return RegistrySnapshot{}, err
 		}
-		relay := append([]string(nil), entry.RelayVia...)
-		if relay == nil {
-			relay = []string{}
+		qv := append([]string(nil), entry.QueueVia...)
+		if qv == nil {
+			qv = []string{}
 		}
-		seenRelay := make(map[string]bool, len(relay))
-		for _, target := range relay {
-			if !domain.ValidNodeID(target) || target == entry.NodeID || seenRelay[target] {
+		seenQV := make(map[string]bool, len(qv))
+		for _, target := range qv {
+			if !domain.ValidNodeID(target) || target == entry.NodeID || seenQV[target] {
 				return RegistrySnapshot{}, ErrInvalidSnapshot
 			}
-			seenRelay[target] = true
+			seenQV[target] = true
 		}
-		out.Nodes[i] = SnapshotEntry{NodeID: entry.NodeID, BaseURL: base, DirectURL: direct, RelayVia: relay, Status: entry.Status, RegistryRevision: entry.RegistryRevision}
+		out.Nodes[i] = SnapshotEntry{NodeID: entry.NodeID, BaseURL: base, DirectURL: direct, QueueVia: qv, Status: entry.Status, RegistryRevision: entry.RegistryRevision}
 	}
 	if !ids[in.SourceNodeID] {
 		return RegistrySnapshot{}, ErrInvalidSnapshot
 	}
 	for _, entry := range out.Nodes {
-		for _, target := range entry.RelayVia {
+		for _, target := range entry.QueueVia {
 			if !ids[target] {
 				return RegistrySnapshot{}, ErrInvalidSnapshot
 			}

@@ -30,9 +30,9 @@ Stage 1 has exactly two cross-node delivery paths:
    no inbound route. The target drains the queue by outbound polling.
 
 Application-level relay — a node accepting a request and forwarding it onward
-as an online proxy — is deferred. The existing `relay_via` selector and relay
-receipt path are prototype code, not part of Stage 1 acceptance. Before relay
-can ship, a separate contract must specify target binding, credential
+as an online proxy — is deferred. The reserved `KindRelay` candidate kind and
+relay receipt path are prototype code, not part of Stage 1 acceptance. Before
+relay can ship, a separate contract must specify target binding, credential
 selection, scope intersection, refusal propagation, loop prevention, payload
 limits, patience, and attribution. A direct request may fall back to a durable
 queue after a reachability failure; it must never silently become a forwarded
@@ -128,11 +128,35 @@ Both URL fields use one validator and canonicalizer:
 - Redirects are not followed across origins. The request's target node id is
   bound to the selected registry entry and checked again by the receiver.
 
-The current schema field named `relay_via` must not activate application relay
-in Stage 1. Until a migration gives the queue-host list its accurate
-`queue_via` name, implementations may interpret `relay_via` only as the
-ordered queue-host allowlist. Documentation and API responses must not promise
-online forwarding from that legacy name.
+The schema field `queue_via` (renamed from the legacy `relay_via`) is the
+ordered queue-host allowlist. It must not activate application relay in
+Stage 1. Documentation and API responses must not promise online forwarding
+from either name.
+
+The rename is mid-flight, and the two wire surfaces are deliberately
+asymmetric because their decoders differ:
+
+- **Node events** (`node.registered`, `node.route_updated`, `payload_version`
+  2) emit **both** `relay_via` and `queue_via` with equal values. The decoder
+  tolerates unknown fields, so the additive key is safe, and a pre-rename
+  binary replaying these events still reads a route instead of folding an
+  empty allowlist.
+- **Registry snapshots** (`payload_version` 1) emit **only** `relay_via`. The
+  consumer decodes with `DisallowUnknownFields`, so an additive `queue_via`
+  key is not ignored — it rejects the entire snapshot and cross-node registry
+  sync stops. `queue_via` reaches this wire only with a negotiated snapshot
+  v2; bumping the version number alone is not that negotiation.
+
+Decoders on both surfaces accept either spelling on input. Selection is by
+field **presence**, not by whether the list is empty: an explicit
+`"queue_via": []` means "no queue hosts" and must not fall back to a legacy
+value. A payload carrying both keys with different values is ambiguous and is
+rejected rather than resolved by precedence.
+
+The `nodes.relay_via` column follows the same discipline: the expand release
+writes both columns but still reads `relay_via`, because a drifted binary
+writes only the legacy column. Reads move to `queue_via` in the contract
+release, which also drops `relay_via`.
 
 Other nodes obtain the registry by authenticated outbound REST from the
 configured registry home. A snapshot has a source `node_id`, source

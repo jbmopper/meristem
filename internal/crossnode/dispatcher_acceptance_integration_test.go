@@ -193,7 +193,7 @@ func newDirectAcceptanceNode(t *testing.T, ctx context.Context, name string, log
 func appendDirectRegistryNode(t *testing.T, ctx context.Context, pool *pgxpool.Pool, actor domain.Token, nodeID, directURL string, queueVia []string) {
 	t.Helper()
 	payload, err := nodes.BuildRegisteredPayload(nodes.RegisterParams{
-		NodeID: nodeID, DirectURL: &directURL, RelayVia: queueVia, Status: string(domain.NodeStatusActive),
+		NodeID: nodeID, DirectURL: &directURL, QueueVia: queueVia, Status: string(domain.NodeStatusActive),
 	})
 	if err != nil {
 		t.Fatalf("build node %s: %v", nodeID, err)

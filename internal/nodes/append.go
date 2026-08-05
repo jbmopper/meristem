@@ -21,7 +21,7 @@ type RegisterParams struct {
 	NodeID    string
 	BaseURL   *string
 	DirectURL *string
-	RelayVia  []string
+	QueueVia  []string
 	Status    string
 }
 
@@ -37,7 +37,7 @@ func BuildRegisteredPayload(p RegisterParams) (any, error) {
 	if p.Status == "" {
 		return nil, fmt.Errorf("status is required")
 	}
-	if err := validateRelayVia(p.RelayVia); err != nil {
+	if err := validateQueueVia(p.QueueVia); err != nil {
 		return nil, err
 	}
 	baseURL, err := canonicalOrigin("base_url", p.BaseURL)
@@ -48,24 +48,30 @@ func BuildRegisteredPayload(p RegisterParams) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Emit both spellings at payload_version 2. A pre-rename binary decoding a
+	// v2 event reads relay_via only; dropping it would make that decoder fold an
+	// empty route on replay or rebuild — silent route loss, not a loud failure.
+	// The version does not bump because the two keys are required to be equal,
+	// so the payload is still exactly a v2 payload to any reader.
 	return registeredPayload{
 		PayloadVersion: routePayloadVersion,
 		NodeID:         p.NodeID,
 		BaseURL:        baseURL,
 		DirectURL:      directURL,
-		RelayVia:       p.RelayVia,
+		QueueVia:       p.QueueVia,
+		LegacyRelayVia: p.QueueVia,
 		Status:         p.Status,
 	}, nil
 }
 
 // RouteParams are the inputs to a node.route_updated event: a full replacement
-// of the reachability route state (direct_url, relay_via, status). base_url is
+// of the reachability route state (direct_url, queue_via, status). base_url is
 // deliberately absent — registration owns the ingress URL and a route update
 // never rewrites it.
 type RouteParams struct {
 	NodeID    string
 	DirectURL *string
-	RelayVia  []string
+	QueueVia  []string
 	Status    string
 }
 
@@ -78,18 +84,20 @@ func BuildRouteUpdatedPayload(p RouteParams) (any, error) {
 	if p.Status == "" {
 		return nil, fmt.Errorf("status is required")
 	}
-	if err := validateRelayVia(p.RelayVia); err != nil {
+	if err := validateQueueVia(p.QueueVia); err != nil {
 		return nil, err
 	}
 	directURL, err := canonicalOrigin("direct_url", p.DirectURL)
 	if err != nil {
 		return nil, err
 	}
+	// Both spellings, equal values — see BuildRegisteredPayload.
 	return routeUpdatedPayload{
 		PayloadVersion: routePayloadVersion,
 		NodeID:         p.NodeID,
 		DirectURL:      directURL,
-		RelayVia:       p.RelayVia,
+		QueueVia:       p.QueueVia,
+		LegacyRelayVia: p.QueueVia,
 		Status:         p.Status,
 	}, nil
 }
@@ -110,13 +118,14 @@ func canonicalOrigin(field string, value *string) (*string, error) {
 	return &canonical, nil
 }
 
-// validateRelayVia reports the first relay hop that is not a DNS-safe node_id.
-// Shared by the build path (fail fast in the CLI) and normalizeRelayVia (fail
-// closed in the projector) so both reject the same inputs.
-func validateRelayVia(relay []string) error {
-	for i, hop := range relay {
+// validateQueueVia reports the first queue-host hop that is not a DNS-safe
+// node_id. Shared by the build path (fail fast in the CLI) and
+// normalizeQueueVia (fail closed in the projector) so both reject the same
+// inputs.
+func validateQueueVia(queueVia []string) error {
+	for i, hop := range queueVia {
 		if !domain.ValidNodeID(hop) {
-			return fmt.Errorf("relay_via[%d] %q is not a DNS-safe node_id", i, hop)
+			return fmt.Errorf("queue_via[%d] %q is not a DNS-safe node_id", i, hop)
 		}
 	}
 	return nil
@@ -128,6 +137,10 @@ func validateRelayVia(relay []string) error {
 // stage-0 exit.
 func List(ctx context.Context, pool *pgxpool.Pool) ([]domain.Node, error) {
 	rows, err := pool.Query(ctx, `
+		-- Reads select relay_via, not queue_via, for the whole expand window:
+		-- a drifted pre-0037 binary updates only relay_via, and reading the new
+		-- column would silently serve its stale value. Reads flip to queue_via
+		-- in the contract release, once no old writer can still be running.
 		SELECT node_id, base_url, direct_url, relay_via, status, created_at, updated_at, registry_revision
 		FROM nodes
 		ORDER BY node_id
@@ -148,8 +161,8 @@ func List(ctx context.Context, pool *pgxpool.Pool) ([]domain.Node, error) {
 			return nil, fmt.Errorf("nodes: scan row: %w", err)
 		}
 		n.Status = domain.NodeStatus(status)
-		if err := json.Unmarshal(relay, &n.RelayVia); err != nil {
-			return nil, fmt.Errorf("nodes: decode relay_via: %w", err)
+		if err := json.Unmarshal(relay, &n.QueueVia); err != nil {
+			return nil, fmt.Errorf("nodes: decode queue_via: %w", err)
 		}
 		out = append(out, n)
 	}

@@ -65,15 +65,15 @@ func TestRegisteredProjectorRequiresStatus(t *testing.T) {
 	}
 }
 
-func TestRegisteredProjectorRejectsBadRelayHop(t *testing.T) {
+func TestRegisteredProjectorRejectsBadQueueHop(t *testing.T) {
 	ev := registeredEvent(map[string]any{
 		"node_id":   "m4",
 		"status":    "active",
 		"relay_via": []string{"den", "BAD"},
 	})
 	err := registeredProjector{}.Apply(context.Background(), nil, ev)
-	if err == nil || !strings.Contains(err.Error(), "relay_via[1]") {
-		t.Fatalf("expected relay_via hop error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "queue_via[1]") {
+		t.Fatalf("expected queue_via hop error, got %v", err)
 	}
 }
 
@@ -157,12 +157,12 @@ func TestNodeSubjectIDStable(t *testing.T) {
 	}
 }
 
-func TestNormalizeRelayViaDefaultsEmpty(t *testing.T) {
-	b, err := normalizeRelayVia(nil)
+func TestNormalizeQueueViaDefaultsEmpty(t *testing.T) {
+	b, err := normalizeQueueVia(nil)
 	if err != nil {
-		t.Fatalf("normalizeRelayVia(nil): %v", err)
+		t.Fatalf("normalizeQueueVia(nil): %v", err)
 	}
 	if string(b) != "[]" {
-		t.Fatalf("nil relay encoded as %q, want []", b)
+		t.Fatalf("nil queue_via encoded as %q, want []", b)
 	}
 }
