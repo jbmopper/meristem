@@ -67,12 +67,28 @@ func sampleCommand() Command {
 	}
 }
 
+// resolver keys on the terminating peer alone, which is all most tests care
+// about. Tests that assert on the rest of the requested relation use
+// recordingResolver instead.
 func resolver(tokens map[string]string) BearerResolver {
-	return func(_ context.Context, nodeID string) (string, error) {
-		if token := tokens[nodeID]; token != "" {
+	return func(_ context.Context, req CredentialRequest) (string, error) {
+		if token := tokens[req.TerminatingPeer]; token != "" {
 			return token, nil
 		}
-		return "", fmt.Errorf("no credential for %s", nodeID)
+		return "", fmt.Errorf("no credential for %s", req.TerminatingPeer)
+	}
+}
+
+// recordingResolver captures every CredentialRequest it is asked for, so a
+// test can assert on what the transport claimed the credential was for rather
+// than only on which bearer came back.
+func recordingResolver(tokens map[string]string, seen *[]CredentialRequest) BearerResolver {
+	return func(_ context.Context, req CredentialRequest) (string, error) {
+		*seen = append(*seen, req)
+		if token := tokens[req.TerminatingPeer]; token != "" {
+			return token, nil
+		}
+		return "", fmt.Errorf("no credential for %s", req.TerminatingPeer)
 	}
 }
 

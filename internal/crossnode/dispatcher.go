@@ -175,7 +175,21 @@ func (d *Dispatcher) readDirect(ctx context.Context, originNodeID, targetNodeID,
 	if d.credentials == nil {
 		return ReadOutcome{}, ErrMissingCredential
 	}
-	bearer, err := d.credentials(ctx, targetNodeID)
+	// A remote read only ever terminates at the home node — there is no queue
+	// hop on this path — so the terminating peer and the ultimate target are
+	// the same node here, and the resolver is told so explicitly rather than
+	// left to infer it.
+	endpoint := strings.TrimRight(candidate.URL, "/") + "/v1/work-items/" + workItemID
+	peerPath := "/v1/work-items/" + workItemID
+	bearer, err := d.credentials(ctx, CredentialRequest{
+		TerminatingPeer: targetNodeID,
+		UltimateTarget:  targetNodeID,
+		OriginNodeID:    originNodeID,
+		Route:           KindDirect,
+		Purpose:         PurposeRemoteRead,
+		Method:          http.MethodGet,
+		Path:            peerPath,
+	})
 	if err != nil || strings.TrimSpace(bearer) == "" {
 		return ReadOutcome{}, fmt.Errorf("%w for node %s", ErrMissingCredential, targetNodeID)
 	}
@@ -184,7 +198,6 @@ func (d *Dispatcher) readDirect(ctx context.Context, originNodeID, targetNodeID,
 	budget, cancelBudget := context.WithTimeout(ctx, policy.DirectPatience)
 	defer cancelBudget()
 	out := ReadOutcome{TargetNodeID: targetNodeID}
-	endpoint := strings.TrimRight(candidate.URL, "/") + "/v1/work-items/" + workItemID
 	for attemptNumber := 1; attemptNumber <= policy.DirectAttempts; attemptNumber++ {
 		attemptCtx, cancel := context.WithTimeout(budget, policy.AttemptTimeout)
 		req, reqErr := http.NewRequestWithContext(attemptCtx, http.MethodGet, endpoint, nil)
