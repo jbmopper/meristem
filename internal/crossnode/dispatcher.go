@@ -121,7 +121,14 @@ type ReadOutcome struct {
 	Attempts     []Attempt
 }
 
-// ReadWorkItem reads a remotely-homed work item named by `<node_id>:<uuid>`.
+// ReadWorkItem reads a remotely-homed work item. The ref may be either
+// qualified spelling — the canonical `mrs://<node_id>/work-items/<uuid>` or the
+// compact `<node_id>:<uuid>` — since both normalize to the same home and id. A
+// bare UUID is local and is rejected here rather than guessed at: a caller that
+// reached this method with an unqualified ref has lost track of where the
+// object lives, and dispatching it to an arbitrary node would be worse than
+// failing.
+//
 // It loads one registry snapshot and considers only the home's direct route;
 // queue candidates are mutation-only and are never used to fabricate remote
 // read availability.

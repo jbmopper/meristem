@@ -105,6 +105,53 @@ func TestDispatcherReadWorkItemUsesQualifiedHomeAndDirectRouteOnly(t *testing.T)
 	}
 }
 
+// TestDispatcherReadWorkItemAcceptsCanonicalURI pins that the canonical
+// reference form routes to exactly the same home and path as the compact alias.
+// The dispatcher is the first production caller that takes a reference from
+// outside, so if the two spellings diverged here the divergence would surface
+// as a read dispatched to the wrong node rather than as a parse error.
+func TestDispatcherReadWorkItemAcceptsCanonicalURI(t *testing.T) {
+	var gotPath, gotTarget string
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotTarget = r.URL.Path, r.Header.Get(HeaderTargetNode)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"work_item":{"id":"` + sampleWorkItemID + `"}}`))
+	}))
+	t.Cleanup(direct.Close)
+	registry := &countingRegistry{nodes: []domain.Node{node("m4", ptr(direct.URL))}}
+	dispatcher := NewDispatcherWithRegistry(registry, direct.Client(), resolver(map[string]string{"m4": "read-token"}), fastDeliveryPolicy())
+
+	out, err := dispatcher.ReadWorkItem(context.Background(), "den", "mrs://m4/work-items/"+sampleWorkItemID)
+	if err != nil {
+		t.Fatalf("ReadWorkItem(canonical): %v", err)
+	}
+	if out.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", out.StatusCode)
+	}
+	if gotPath != "/v1/work-items/"+sampleWorkItemID || gotTarget != "m4" {
+		t.Fatalf("canonical ref routed to %s (target %q), want /v1/work-items/%s (target m4)", gotPath, gotTarget, sampleWorkItemID)
+	}
+}
+
+// TestDispatcherReadWorkItemRejectsUnroutableRefs keeps the fail-closed edge
+// honest. A bare UUID is local, so reaching a remote read with one means the
+// caller lost the home; guessing a node would dispatch someone else's read.
+func TestDispatcherReadWorkItemRejectsUnroutableRefs(t *testing.T) {
+	registry := &countingRegistry{nodes: []domain.Node{node("m4", ptr("https://m4.example"))}}
+	dispatcher := NewDispatcherWithRegistry(registry, http.DefaultClient, resolver(nil), fastDeliveryPolicy())
+	for _, ref := range []string{
+		sampleWorkItemID,                                   // bare uuid: local, not remote
+		"mrs://m4/tropisms/" + sampleWorkItemID,            // wrong object kind
+		"mrs://m4/work-items/" + sampleWorkItemID + "?x=1", // decorated
+		"http://m4/work-items/" + sampleWorkItemID,         // wrong scheme
+		"MRS://M4/work-items/" + sampleWorkItemID,          // uppercase host is not a node id
+	} {
+		if _, err := dispatcher.ReadWorkItem(context.Background(), "den", ref); !errors.Is(err, ErrInvalidQualifiedRef) {
+			t.Errorf("ReadWorkItem(%q) err = %v, want ErrInvalidQualifiedRef", ref, err)
+		}
+	}
+}
+
 func TestDispatcherReadNeverUsesQueue(t *testing.T) {
 	queueCapture := &capture{}
 	queue := stub(t, http.StatusAccepted, queueCapture)
