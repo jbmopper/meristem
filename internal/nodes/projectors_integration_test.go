@@ -249,8 +249,12 @@ func TestQueueViaExpandMirrorsLegacyColumn(t *testing.T) {
 		t.Fatalf("List read QueueVia = %v, want [hub] — the reader is not seeing a drifted binary's relay_via write", m4.QueueVia)
 	}
 
-	// The registry snapshot builder reads the same column and must agree; it is
-	// what ships this node's topology to peers.
+	// Same column, read directly. This is not a test of SnapshotService.Build —
+	// it re-reads relay_via rather than calling the builder, so it pins the
+	// column's value after a drifted write and nothing more. The builder's own
+	// coverage lives in the snapshot tests; what matters here is that the
+	// column a stale binary writes is the column the snapshot path later reads,
+	// so the two cannot silently disagree about this node's topology.
 	var snapQueueVia []string
 	var snapRelay []byte
 	if err := pool.QueryRow(ctx, `SELECT relay_via FROM nodes WHERE node_id = 'm4'`).Scan(&snapRelay); err != nil {
