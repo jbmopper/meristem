@@ -89,10 +89,13 @@ func (s *Service) ClaimDemand(ctx context.Context, listenerID uuid.UUID, in Clai
 	}
 
 	// The actor's OWN authority over the item — the same reducer that
-	// filtered the candidate listing — is revalidated at claim time. A
+	// filtered the candidate listing — is revalidated at claim time and
+	// FENCED INSIDE this transaction (LCP3-R2-B1): the tree-membership read
+	// runs through the open tx, never a nested pool acquire, so the decision
+	// shares the claim's snapshot and a saturated pool cannot deadlock. A
 	// listener registration never grants authority (design: "it grants no
 	// authority: authorization stays with the bound token's own scopes").
-	if err := s.access.CanWriteWorkItem(ctx, in.Actor, env.WorkItemID); err != nil {
+	if err := s.access.CanWriteWorkItemIn(ctx, tx, in.Actor, env.WorkItemID); err != nil {
 		if errors.Is(err, access.ErrDenied) {
 			return domain.WorkItemAssignment{}, fmt.Errorf("%w: actor lacks claim authority over work item %s", ErrNotAuthorized, env.WorkItemID)
 		}

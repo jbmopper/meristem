@@ -12,6 +12,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -211,6 +212,42 @@ func TestClaimDemandRevalidatesAtomically(t *testing.T) {
 		DemandEventID: secondDemand, ObservedPolicyEventID: reg.PolicyEventID, Actor: other.Token,
 	}); !errors.Is(err, listeners.ErrRetired) {
 		t.Fatalf("retired-listener claim: err = %v, want ErrRetired", err)
+	}
+}
+
+// TestClaimDemandSingleConnectionPool (LCP3-R2-B1): the actor-authority
+// reducer is FENCED INSIDE the claim transaction — it must run through the
+// open tx, never a nested pool acquire. With a one-connection pool a nested
+// acquire would deadlock against the connection the transaction itself
+// holds, so an authorized bound claim completing here proves the fence.
+func TestClaimDemandSingleConnectionPool(t *testing.T) {
+	f := newClaimDemandFixture(t, "claim_one_conn")
+	principal := f.principal(t, "oneconn-principal", f.tree.ID)
+	reg := f.listener(t, "oneconn-listener", principal.Token.ID)
+	item, demandID := f.demand(t, f.tree.ID, "oneconn-demand")
+
+	config, err := pgxpool.ParseConfig(f.pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("parse pool config: %v", err)
+	}
+	config.MaxConns = 1
+	ctx, cancel := context.WithTimeout(f.ctx, 30*time.Second)
+	defer cancel()
+	narrow, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open one-connection pool: %v", err)
+	}
+	defer narrow.Close()
+
+	svc := listeners.NewService(narrow, f.writer)
+	assignment, err := svc.ClaimDemand(ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: demandID, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("bound claim on a one-connection pool: %v (a hang or timeout here means the authority reducer escaped the transaction)", err)
+	}
+	if assignment.WorkItemID != item.ID || assignment.ListenerID == nil || *assignment.ListenerID != reg.ID {
+		t.Fatalf("one-connection claim mis-attributed: %+v", assignment)
 	}
 }
 

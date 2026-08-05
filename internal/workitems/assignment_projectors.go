@@ -325,12 +325,17 @@ func decodeAssignedPayload(raw any) (assignedPayload, error) {
 		return assignedPayload{}, fmt.Errorf("work_item.assigned: assignee_token_id, valid mode, and positive lease_seconds are required")
 	}
 	// Listener binding travels whole or not at all: a partially attributed
-	// claim would make restart derivation ambiguous.
+	// claim would make restart derivation ambiguous. A field that is PRESENT
+	// but zero is malformed outright — never coerced to "absent".
 	bound := 0
 	for _, field := range []*uuid.UUID{payload.ListenerID, payload.DemandEventID, payload.PolicyEventID} {
-		if field != nil && *field != uuid.Nil {
-			bound++
+		if field == nil {
+			continue
 		}
+		if *field == uuid.Nil {
+			return assignedPayload{}, fmt.Errorf("work_item.assigned: listener binding fields must be non-zero when present")
+		}
+		bound++
 	}
 	if bound != 0 && bound != 3 {
 		return assignedPayload{}, fmt.Errorf("work_item.assigned: listener_id, demand_event_id, and policy_event_id must be present together")

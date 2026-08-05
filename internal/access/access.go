@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/domain"
@@ -288,17 +289,37 @@ func (s *Service) CanCreateWorkItem(_ context.Context, actor domain.Token) error
 }
 
 func (s *Service) CanWriteWorkItem(ctx context.Context, actor domain.Token, id uuid.UUID) error {
+	return s.canWriteWorkItemVia(ctx, s.pool, actor, id)
+}
+
+// Queryer is the read surface tx-fenced reducers accept: both *pgxpool.Pool
+// and pgx.Tx satisfy it.
+type Queryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// CanWriteWorkItemIn is CanWriteWorkItem with the tree-membership read
+// executed through the CALLER'S queryer — typically an open transaction. A
+// reducer running inside a transaction must never fall back to the pool: the
+// authority decision would escape the transaction's snapshot, and with a
+// saturated pool the nested acquire deadlocks against the connection the
+// transaction itself holds (the cultivarXylemForRefInTx hazard).
+func (s *Service) CanWriteWorkItemIn(ctx context.Context, q Queryer, actor domain.Token, id uuid.UUID) error {
+	return s.canWriteWorkItemVia(ctx, q, actor, id)
+}
+
+func (s *Service) canWriteWorkItemVia(ctx context.Context, q Queryer, actor domain.Token, id uuid.UUID) error {
 	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsWriteAll) || hasScope(actor, ScopeWorkItemsTrackerWriteAll) {
 		return nil
 	}
 	if !canWriteWorkItems(scopeSet(actor.Scopes)) {
 		return ErrDenied
 	}
-	ok, err := s.workItemInAnyTree(ctx, actor, id)
+	visible, err := s.workItemsInAnyTreeVia(ctx, q, actor, []uuid.UUID{id})
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !visible[id] {
 		return ErrDenied
 	}
 	return nil
@@ -391,12 +412,19 @@ func (s *Service) workItemsInAnyTree(ctx context.Context, actor domain.Token, id
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("access: work_item tree policy requires database")
 	}
+	return s.workItemsInAnyTreeVia(ctx, s.pool, actor, ids)
+}
+
+func (s *Service) workItemsInAnyTreeVia(ctx context.Context, q Queryer, actor domain.Token, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	if s == nil || q == nil {
+		return nil, fmt.Errorf("access: work_item tree policy requires database")
+	}
 	roots := workItemTreeRoots(actor)
 	visible := make(map[uuid.UUID]bool, len(ids))
 	if len(roots) == 0 || len(ids) == 0 {
 		return visible, nil
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		WITH RECURSIVE subtree(id) AS (
 			SELECT unnest($1::uuid[])
 			UNION
