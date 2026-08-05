@@ -1114,7 +1114,7 @@ func writeGrantError(w http.ResponseWriter, err error) {
 }
 
 func toAssignmentResponse(a domain.WorkItemAssignment) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"work_item_id":        a.WorkItemID,
 		"holder_token_id":     a.HolderTokenID,
 		"mode":                a.Mode,
@@ -1123,6 +1123,12 @@ func toAssignmentResponse(a domain.WorkItemAssignment) map[string]any {
 		"expires_at":          a.ExpiresAt,
 		"updated_at":          a.UpdatedAt,
 	}
+	if a.ListenerID != nil {
+		out["listener_id"] = a.ListenerID
+		out["demand_event_id"] = a.DemandEventID
+		out["policy_event_id"] = a.PolicyEventID
+	}
+	return out
 }
 
 // handleListHeldAssignments is the restart-derivation read (listener control

@@ -391,6 +391,7 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 		"listeners.set_policy",
 		"listeners.bind_credential",
 		"listeners.retire",
+		"listeners.claim",
 	}
 	if len(result.Tools) != len(expected) {
 		t.Fatalf("expected %d tools, got %d (%v)", len(expected), len(result.Tools), toolNames(result.Tools))
@@ -467,6 +468,7 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		"listeners_set_policy",
 		"listeners_bind_credential",
 		"listeners_retire",
+		"listeners_claim",
 	}
 	if len(result.Tools) != len(expected) {
 		t.Fatalf("expected %d tools, got %d (%v)", len(expected), len(result.Tools), toolNames(result.Tools))
@@ -515,6 +517,7 @@ func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 		"listeners.set_policy":       true,
 		"listeners.bind_credential":  true,
 		"listeners.retire":           true,
+		"listeners.claim":            true,
 	}
 	for _, tool := range s.tools {
 		required := schemaRequiredSet(tool.InputSchema)

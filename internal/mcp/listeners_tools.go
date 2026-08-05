@@ -26,6 +26,57 @@ func (s *Server) listenerTools() []Tool {
 		s.toolListenersSetPolicy(),
 		s.toolListenersBindCredential(),
 		s.toolListenersRetire(),
+		s.toolListenersClaim(),
+	}
+}
+
+func (s *Server) toolListenersClaim() Tool {
+	return Tool{
+		Name:        "listeners.claim",
+		Description: "Listener-bound atomic claim: revalidates the registration, credential binding, policy revision, demand eligibility, actor authority, and listener capacity in one transaction before assigning. Callers must be the listener's currently bound principal. Supervisors use this, never the generic work-item claim.",
+		Mutates:     true,
+		InputSchema: schemaObject([]string{"id", "demand_event_id", "observed_policy_event_id"}, map[string]any{
+			"id":                       schemaString("Listener uuid."),
+			"demand_event_id":          schemaString("Durable demand event uuid (dispatch.requested)."),
+			"observed_policy_event_id": schemaString("The policy revision the caller derived its snapshot under; a stale revision is a pure conflict."),
+		}),
+		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
+			if s.deps.Listeners == nil {
+				return nil, errors.New("listeners service not configured")
+			}
+			var args struct {
+				ID                    string `json:"id"`
+				DemandEventID         string `json:"demand_event_id"`
+				ObservedPolicyEventID string `json:"observed_policy_event_id"`
+			}
+			if err := decodeArgs(raw, &args); err != nil {
+				return nil, err
+			}
+			id, err := parseUUID(args.ID, "id")
+			if err != nil {
+				return nil, err
+			}
+			demandEventID, err := parseUUID(args.DemandEventID, "demand_event_id")
+			if err != nil {
+				return nil, err
+			}
+			observed, err := parseUUID(args.ObservedPolicyEventID, "observed_policy_event_id")
+			if err != nil {
+				return nil, err
+			}
+			assignment, err := s.deps.Listeners.ClaimDemand(ctx, id, listeners.ClaimDemandInput{
+				DemandEventID:         demandEventID,
+				ObservedPolicyEventID: &observed,
+				Actor:                 actor,
+			})
+			if err != nil {
+				if mapped := listenerToolErr(err); isReplayableToolError(mapped) {
+					return nil, mapped
+				}
+				return nil, assignmentToolErr(err, uuid.Nil)
+			}
+			return map[string]any{"assignment": toAssignmentDTO(assignment)}, nil
+		},
 	}
 }
 
@@ -308,7 +359,9 @@ func listenerToolErr(err error) error {
 		errors.Is(err, listeners.ErrStalePolicy),
 		errors.Is(err, listeners.ErrNotAuthorized),
 		errors.Is(err, listeners.ErrInvalidPolicy),
-		errors.Is(err, listeners.ErrInvalidRequest):
+		errors.Is(err, listeners.ErrInvalidRequest),
+		errors.Is(err, listeners.ErrDemandNotEligible),
+		errors.Is(err, listeners.ErrListenerAtCapacity):
 		return replayableToolErr(pureToolErr(err))
 	default:
 		return err

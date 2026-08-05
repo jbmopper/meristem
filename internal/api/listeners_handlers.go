@@ -177,7 +177,7 @@ func (s *Server) handleListDemandCandidates(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "demand candidates are visible to the listener's bound principal or listener administration")
 		return
 	}
-	candidates, err := s.listeners.ListDemandCandidates(r.Context(), id)
+	candidates, err := s.listeners.ListDemandCandidates(r.Context(), id, actor)
 	if err != nil {
 		writeListenerError(w, r, err)
 		return
@@ -193,6 +193,72 @@ func (s *Server) handleListDemandCandidates(w http.ResponseWriter, r *http.Reque
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"candidates": out})
+}
+
+// handleClaimListenerDemand is the listener-bound claim (LCP3-R1-B1): the
+// ONLY claim path supervisors use. All revalidation — registration lock,
+// binding, policy revision, demand eligibility, actor authority, capacity —
+// happens inside the service transaction; this handler decodes and maps.
+func (s *Server) handleClaimListenerDemand(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		DemandEventID         string `json:"demand_event_id"`
+		ObservedPolicyEventID string `json:"observed_policy_event_id"`
+	}
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	demandEventID, err := uuid.Parse(req.DemandEventID)
+	if err != nil {
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusBadRequest, "invalid_demand_event_id", "demand_event_id must be a uuid")
+		return
+	}
+	var observed *uuid.UUID
+	if req.ObservedPolicyEventID != "" {
+		parsed, err := uuid.Parse(req.ObservedPolicyEventID)
+		if err != nil {
+			idempotency.MarkRefusalUnconsumed(r.Context())
+			writeAPIError(w, http.StatusBadRequest, "invalid_observed_policy_event_id", "observed_policy_event_id must be a uuid")
+			return
+		}
+		observed = &parsed
+	}
+	assignment, err := s.listeners.ClaimDemand(r.Context(), id, listeners.ClaimDemandInput{
+		DemandEventID:         demandEventID,
+		ObservedPolicyEventID: observed,
+		Actor:                 actor,
+	})
+	if err != nil {
+		if isListenerServiceError(err) {
+			writeListenerError(w, r, err)
+		} else {
+			writeAssignmentError(w, r, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignment": toAssignmentResponse(assignment)})
+}
+
+// isListenerServiceError routes refusal mapping: listener-service refusals
+// (including the new claim conflicts) map through writeListenerError; the
+// work-item half of the transaction maps through the assignment vocabulary.
+func isListenerServiceError(err error) bool {
+	return errors.Is(err, listeners.ErrNotFound) ||
+		errors.Is(err, listeners.ErrRetired) ||
+		errors.Is(err, listeners.ErrStalePolicy) ||
+		errors.Is(err, listeners.ErrNotAuthorized) ||
+		errors.Is(err, listeners.ErrInvalidRequest) ||
+		errors.Is(err, listeners.ErrInvalidPolicy) ||
+		errors.Is(err, listeners.ErrDemandNotEligible) ||
+		errors.Is(err, listeners.ErrListenerAtCapacity)
 }
 
 func (s *Server) handleSetListenerPolicy(w http.ResponseWriter, r *http.Request) {
@@ -298,7 +364,9 @@ func writeListenerError(w http.ResponseWriter, r *http.Request, err error) {
 		errors.Is(err, listeners.ErrStalePolicy),
 		errors.Is(err, listeners.ErrNotAuthorized),
 		errors.Is(err, listeners.ErrInvalidPolicy),
-		errors.Is(err, listeners.ErrInvalidRequest):
+		errors.Is(err, listeners.ErrInvalidRequest),
+		errors.Is(err, listeners.ErrDemandNotEligible),
+		errors.Is(err, listeners.ErrListenerAtCapacity):
 		idempotency.MarkRefusalUnconsumed(r.Context())
 	}
 	switch {
@@ -310,6 +378,10 @@ func writeListenerError(w http.ResponseWriter, r *http.Request, err error) {
 		writeAPIError(w, http.StatusConflict, "listener_retired", err.Error())
 	case errors.Is(err, listeners.ErrStalePolicy):
 		writeAPIError(w, http.StatusConflict, "stale_policy_revision", err.Error())
+	case errors.Is(err, listeners.ErrDemandNotEligible):
+		writeAPIError(w, http.StatusConflict, "demand_not_eligible", err.Error())
+	case errors.Is(err, listeners.ErrListenerAtCapacity):
+		writeAPIError(w, http.StatusConflict, "listener_at_capacity", err.Error())
 	case errors.Is(err, listeners.ErrNotAuthorized):
 		writeAPIError(w, http.StatusForbidden, "listener_operation_not_authorized", err.Error())
 	case errors.Is(err, listeners.ErrInvalidPolicy), errors.Is(err, listeners.ErrInvalidRequest):

@@ -164,10 +164,12 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition":
 		return scopes[ScopeWorkItemsWriteAll] || scopes[ScopeWorkItemsTrackerWriteAll] ||
 			((scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsTrackerWrite]) && hasWorkItemTreeScope(actor))
-	case "work_items.claim", "work_items.yield":
+	case "work_items.claim", "work_items.yield", "listeners.claim":
 		// Assignment mutation is deliberately NOT a tracker-write capability:
 		// sealed provider tracker profiles must not gain lease authority as a
-		// side effect of this case list growing.
+		// side effect of this case list growing. The listener-bound claim
+		// shares the vocabulary — the service additionally requires the
+		// caller to be the listener's bound principal.
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	case "listeners.set_policy":
 		// Wide replacement needs the admin reducer; the service additionally

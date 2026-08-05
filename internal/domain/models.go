@@ -504,6 +504,12 @@ type WorkItemAssignment struct {
 	ClaimedAt         time.Time
 	ExpiresAt         time.Time
 	UpdatedAt         time.Time
+	// Listener binding (nil for ordinary claims): WHICH listener claimed,
+	// under WHICH policy revision, for WHICH durable demand event. Restart
+	// derivation is generation-bound to the listener, not just the token.
+	ListenerID    *uuid.UUID
+	DemandEventID *uuid.UUID
+	PolicyEventID *uuid.UUID
 }
 
 // Message is the v0 text-only inbox projection.

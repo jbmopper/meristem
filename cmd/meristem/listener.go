@@ -69,7 +69,7 @@ currently bound principal credential.
 Flags:
   --name        stable listener registration name (required)
   --api         meristem API base URL (default http://127.0.0.1:8080)
-  --cursor-dir  directory for durable cursors (default ~/.meristem/listener/<name>)
+  --cursor-dir  directory for durable cursors (default ~/.meristem/listener/<registration-uuid>)
   --once        run one derivation pass (snapshot + claim attempts) and exit
                 instead of streaming; prints the derived state
   --interval    reconnect backoff for dropped streams (default 2s)
@@ -99,30 +99,47 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 	if source != "" && source != "MERISTEM_TOKEN" {
 		fmt.Fprintf(os.Stderr, "listener: using token from %s\n", source)
 	}
+	sup := &listenerSupervisor{
+		api:     strings.TrimRight(*api, "/"),
+		token:   token,
+		name:    *name,
+		backoff: *interval,
+		logger:  logger,
+		http:    &http.Client{Timeout: 30 * time.Second},
+	}
+	// The default cursor directory is keyed by the VALIDATED registration
+	// UUID, never the raw name (LCP3-R1-B3): a name is an object address, not
+	// a filesystem path, and must not be able to escape or reshape the cursor
+	// root. Resolving the registration first also fails fast on a typo'd
+	// name. --cursor-dir remains the explicit operator override.
 	dir := strings.TrimSpace(*cursorDir)
 	if dir == "" {
+		reg, err := sup.getListener(ctx)
+		if err != nil {
+			return err
+		}
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("listener: resolve home for cursor dir: %w", err)
 		}
-		dir = filepath.Join(home, ".meristem", "listener", *name)
+		dir = defaultListenerCursorDir(home, reg.ID)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("listener: create cursor dir: %w", err)
 	}
-	sup := &listenerSupervisor{
-		api:       strings.TrimRight(*api, "/"),
-		token:     token,
-		name:      *name,
-		cursorDir: dir,
-		backoff:   *interval,
-		logger:    logger,
-		http:      &http.Client{Timeout: 30 * time.Second},
-	}
+	sup.cursorDir = dir
 	if *once {
 		return sup.runOnce(ctx, os.Stdout)
 	}
 	return sup.run(ctx)
+}
+
+// defaultListenerCursorDir keys the durable cursor root by the registration's
+// validated UUID — a fixed-alphabet path component — so no listener NAME
+// (which admin-side validation only requires to be non-empty) ever becomes a
+// path component.
+func defaultListenerCursorDir(home string, listenerID uuid.UUID) string {
+	return filepath.Join(home, ".meristem", "listener", listenerID.String())
 }
 
 type listenerSupervisor struct {
@@ -147,9 +164,10 @@ type listenerView struct {
 }
 
 type heldAssignment struct {
-	WorkItemID        uuid.UUID `json:"work_item_id"`
-	AssignmentEventID uuid.UUID `json:"assignment_event_id"`
-	ExpiresAt         time.Time `json:"expires_at"`
+	WorkItemID        uuid.UUID  `json:"work_item_id"`
+	AssignmentEventID uuid.UUID  `json:"assignment_event_id"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	ListenerID        *uuid.UUID `json:"listener_id"`
 }
 
 type demandCandidateView struct {
@@ -184,7 +202,7 @@ func (s *listenerSupervisor) runLoop(ctx context.Context) error {
 			s.logger.Info("listener retired; supervisor exiting", slog.String("name", s.name))
 			return nil
 		}
-		held, err := s.heldAssignments(ctx)
+		held, err := s.heldAssignments(ctx, reg.ID)
 		if err != nil {
 			return err
 		}
@@ -219,7 +237,7 @@ func (s *listenerSupervisor) runOnce(ctx context.Context, out io.Writer) error {
 		fmt.Fprintf(out, "state=retired listener=%s\n", reg.ID)
 		return nil
 	}
-	held, err := s.heldAssignments(ctx)
+	held, err := s.heldAssignments(ctx, reg.ID)
 	if err != nil {
 		return err
 	}
@@ -365,8 +383,14 @@ func (s *listenerSupervisor) focused(ctx context.Context, reg listenerView, held
 		}
 		phaseCtx, cancel := context.WithCancel(ctx)
 		next, streamErr := client.consumeStream(phaseCtx, last, func(ev sseEvent) error {
-			if ev.Item.Kind == domain.EventWorkItemAssignmentReleased &&
-				strings.Contains(string(ev.Item.Payload), held.AssignmentEventID.String()) {
+			if ev.Item.Kind != domain.EventWorkItemAssignmentReleased {
+				return nil
+			}
+			var release struct {
+				AssignmentEventID uuid.UUID `json:"assignment_event_id"`
+			}
+			if err := json.Unmarshal(ev.Item.Payload, &release); err == nil &&
+				release.AssignmentEventID == held.AssignmentEventID {
 				cancel()
 			}
 			return nil
@@ -562,7 +586,7 @@ func (s *listenerSupervisor) claimSweep(ctx context.Context, reg listenerView) (
 		return nil, fmt.Errorf("listener: demand candidates: status %d", status)
 	}
 	for _, candidate := range payload.Candidates {
-		claimed, ok, err := s.claim(ctx, candidate.WorkItemID)
+		claimed, ok, err := s.claim(ctx, reg, candidate)
 		if err != nil {
 			return nil, err
 		}
@@ -576,12 +600,23 @@ func (s *listenerSupervisor) claimSweep(ctx context.Context, reg listenerView) (
 	return nil, nil
 }
 
-// claim attempts one atomic claim. ok=false covers every pure refusal (held
-// by another listener, no longer claimable, vanished) — the sweep just moves
-// to the next candidate.
-func (s *listenerSupervisor) claim(ctx context.Context, workItemID uuid.UUID) (*heldAssignment, bool, error) {
+// claim attempts one LISTENER-BOUND atomic claim: the server locks the
+// registration and revalidates binding, policy revision, demand eligibility,
+// actor authority, and capacity in the claim transaction — the supervisor's
+// snapshot is only ever a suggestion. ok=false covers every pure refusal
+// (held by a racer, stale policy, ineligible demand, at capacity, vanished)
+// — the sweep just moves on; a stale-policy refusal surfaces on the next
+// re-derivation.
+func (s *listenerSupervisor) claim(ctx context.Context, reg listenerView, candidate demandCandidateView) (*heldAssignment, bool, error) {
+	body, err := json.Marshal(map[string]string{
+		"demand_event_id":          candidate.DemandEventID.String(),
+		"observed_policy_event_id": reg.PolicyEventID,
+	})
+	if err != nil {
+		return nil, false, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.api+"/v1/work-items/"+workItemID.String()+"/claim", strings.NewReader("{}"))
+		s.api+"/v1/listeners/"+reg.ID.String()+"/claim", bytes.NewReader(body))
 	if err != nil {
 		return nil, false, err
 	}
@@ -593,21 +628,21 @@ func (s *listenerSupervisor) claim(ctx context.Context, workItemID uuid.UUID) (*
 		return nil, false, fmt.Errorf("listener: claim: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(resp.Body)
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
 		var payload struct {
 			Assignment heldAssignment `json:"assignment"`
 		}
-		if err := json.Unmarshal(body, &payload); err != nil {
+		if err := json.Unmarshal(raw, &payload); err != nil {
 			return nil, false, fmt.Errorf("listener: decode claim: %w", err)
 		}
-		payload.Assignment.WorkItemID = workItemID
+		payload.Assignment.WorkItemID = candidate.WorkItemID
 		return &payload.Assignment, true, nil
 	case http.StatusConflict, http.StatusNotFound, http.StatusForbidden:
 		return nil, false, nil
 	default:
-		return nil, false, newAPIRequestError(resp.StatusCode, body)
+		return nil, false, newAPIRequestError(resp.StatusCode, raw)
 	}
 }
 
@@ -661,7 +696,11 @@ func (s *listenerSupervisor) getListener(ctx context.Context) (listenerView, err
 	return payload.Listener, nil
 }
 
-func (s *listenerSupervisor) heldAssignments(ctx context.Context) ([]heldAssignment, error) {
+// heldAssignments returns the assignments this LISTENER holds. Attribution
+// is generation-bound to the listener, not just the token: the same principal
+// backing multiple registrations (or holding manual unbound claims) must not
+// resume another listener's — or a human's — lease.
+func (s *listenerSupervisor) heldAssignments(ctx context.Context, listenerID uuid.UUID) ([]heldAssignment, error) {
 	var payload struct {
 		Assignments []heldAssignment `json:"assignments"`
 	}
@@ -672,7 +711,13 @@ func (s *listenerSupervisor) heldAssignments(ctx context.Context) ([]heldAssignm
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("listener: held assignments: status %d", status)
 	}
-	return payload.Assignments, nil
+	mine := payload.Assignments[:0]
+	for _, a := range payload.Assignments {
+		if a.ListenerID != nil && *a.ListenerID == listenerID {
+			mine = append(mine, a)
+		}
+	}
+	return mine, nil
 }
 
 func (s *listenerSupervisor) getJSON(ctx context.Context, path string, out any) (int, error) {

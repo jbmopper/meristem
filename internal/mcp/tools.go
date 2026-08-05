@@ -1668,7 +1668,7 @@ func (s *Server) toolWorkItemsYield() Tool {
 }
 
 func toAssignmentDTO(a domain.WorkItemAssignment) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"work_item_id":        a.WorkItemID.String(),
 		"holder_token_id":     a.HolderTokenID.String(),
 		"mode":                string(a.Mode),
@@ -1677,6 +1677,16 @@ func toAssignmentDTO(a domain.WorkItemAssignment) map[string]any {
 		"expires_at":          a.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		"updated_at":          a.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
+	if a.ListenerID != nil {
+		out["listener_id"] = a.ListenerID.String()
+		if a.DemandEventID != nil {
+			out["demand_event_id"] = a.DemandEventID.String()
+		}
+		if a.PolicyEventID != nil {
+			out["policy_event_id"] = a.PolicyEventID.String()
+		}
+	}
+	return out
 }
 
 // assignmentToolErr maps assignment refusals. The claim-held, unavailable,

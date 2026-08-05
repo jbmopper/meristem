@@ -24,6 +24,7 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
+	"github.com/jbmopper/meristem/internal/workitems"
 )
 
 var (
@@ -70,10 +71,21 @@ func listenerEventDiscriminator(ctx context.Context, label string, predecessor u
 type Service struct {
 	pool   *pgxpool.Pool
 	writer *events.Writer
+	// workItems is the claim-reduction seam: the listener-bound claim locks
+	// and revalidates the registration, then delegates the work-item half of
+	// the transaction to it. access is the canonical authority reducer for
+	// candidate visibility and claim authority.
+	workItems *workitems.Service
+	access    *access.Service
 }
 
 func NewService(pool *pgxpool.Pool, writer *events.Writer) *Service {
-	return &Service{pool: pool, writer: writer}
+	return &Service{
+		pool:      pool,
+		writer:    writer,
+		workItems: workitems.NewService(pool, writer),
+		access:    access.NewService(pool),
+	}
 }
 
 // listenerAdminActor pins the separation of duties as a DOMAIN invariant
@@ -420,6 +432,7 @@ func (s *Service) requireLiveToken(ctx context.Context, tx pgx.Tx, id uuid.UUID)
 
 type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 func scanRegistrationForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Registration, error) {

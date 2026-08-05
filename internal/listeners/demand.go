@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/feed"
 )
@@ -137,7 +138,7 @@ func (s *Service) ResolveForDemand(ctx context.Context, demandEventID uuid.UUID)
 	if demandEventID == uuid.Nil {
 		return Registration{}, fmt.Errorf("%w: demand event id is required", ErrInvalidRequest)
 	}
-	env, err := s.demandEnvelope(ctx, demandEventID)
+	env, err := s.demandEnvelope(ctx, s.pool, demandEventID)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -173,7 +174,14 @@ type DemandCandidate struct {
 // Eligibility is evaluated against the STORED policy server-side; a
 // policy-less or retired registration has no candidates. A malformed durable
 // demand event (missing capability or origin) is skipped, never guessed at.
-func (s *Service) ListDemandCandidates(ctx context.Context, listenerID uuid.UUID) ([]DemandCandidate, error) {
+//
+// The reduction ALSO applies the calling actor's own object authority
+// (LCP3-R1-B2): a candidate the actor could not claim — no write authority
+// over the work item's tree — is ABSENT from the listing, not merely
+// unclaimable later. A broad or misconfigured base policy therefore cannot
+// turn a tree-scoped principal into a portfolio-wide demand enumerator; the
+// listener-bound claim revalidates the same authority atomically.
+func (s *Service) ListDemandCandidates(ctx context.Context, listenerID uuid.UUID, actor domain.Token) ([]DemandCandidate, error) {
 	reg, err := scanRegistration(ctx, s.pool, listenerID)
 	if err != nil {
 		return nil, err
@@ -222,16 +230,23 @@ func (s *Service) ListDemandCandidates(ctx context.Context, listenerID uuid.UUID
 	}
 	var out []DemandCandidate
 	for _, c := range candidates {
-		env, err := s.demandEnvelope(ctx, c.id)
+		env, err := s.demandEnvelope(ctx, s.pool, c.id)
 		if err != nil {
 			if errors.Is(err, ErrInvalidRequest) || errors.Is(err, ErrNotFound) {
 				continue
 			}
 			return nil, err
 		}
-		if EligibleDemand(reg.Policy, env) {
-			out = append(out, DemandCandidate{DemandEventID: c.id, DemandEventSeq: c.seq, Envelope: env})
+		if !EligibleDemand(reg.Policy, env) {
+			continue
 		}
+		if err := s.access.CanWriteWorkItem(ctx, actor, env.WorkItemID); err != nil {
+			if errors.Is(err, access.ErrDenied) {
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, DemandCandidate{DemandEventID: c.id, DemandEventSeq: c.seq, Envelope: env})
 	}
 	return out, nil
 }
@@ -242,14 +257,14 @@ func (s *Service) ListDemandCandidates(ctx context.Context, listenerID uuid.UUID
 // comes from the canonical relations projection. Every gap fails closed: a
 // missing event, a non-demand kind, or a payload without routing metadata
 // refuses rather than guessing.
-func (s *Service) demandEnvelope(ctx context.Context, demandEventID uuid.UUID) (DemandEnvelope, error) {
+func (s *Service) demandEnvelope(ctx context.Context, q queryer, demandEventID uuid.UUID) (DemandEnvelope, error) {
 	var (
 		kind        string
 		subjectKind string
 		subjectID   uuid.UUID
 		payloadRaw  []byte
 	)
-	err := s.pool.QueryRow(ctx, `SELECT kind, subject_kind, subject_id, payload FROM events WHERE id=$1`, demandEventID).
+	err := q.QueryRow(ctx, `SELECT kind, subject_kind, subject_id, payload FROM events WHERE id=$1`, demandEventID).
 		Scan(&kind, &subjectKind, &subjectID, &payloadRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DemandEnvelope{}, fmt.Errorf("%w: demand event %s", ErrNotFound, demandEventID)
@@ -291,7 +306,7 @@ func (s *Service) demandEnvelope(ctx context.Context, demandEventID uuid.UUID) (
 		WorkItemID:    workItemID,
 		OriginTokenID: payload.OriginTokenID,
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		WITH RECURSIVE lineage(id) AS (
 			SELECT $1::uuid
 			UNION
