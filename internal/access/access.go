@@ -8,6 +8,7 @@ package access
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,8 +33,13 @@ const (
 	ScopeWorkItemsTrackerWrite    = "work_items.tracker_write"
 	ScopeWorkItemsTrackerWriteAll = "work_items.tracker_write_all"
 	ScopeWorkItemsCreate          = "work_items.create"
-	ScopeFeedRead                 = "feed.read"
-	ScopeFeedReadAssigned         = "feed.read_assigned"
+	// ScopeWorkItemsReviewDecide is the explicit owner authority for clearing
+	// a human-review block or recording approved human clearance. It is never
+	// implied by ordinary/tracker work-item write scopes, the legacy unscoped
+	// compatibility path, or the root credential.
+	ScopeWorkItemsReviewDecide = "work_items.review_decide"
+	ScopeFeedRead              = "feed.read"
+	ScopeFeedReadAssigned      = "feed.read_assigned"
 	// feed.listen_for:<token-id> lets an assigned-only reader consume the
 	// assigned/addressed lane of one other token without inheriting that
 	// token's write authority. The ordinary tree scope still bounds content.
@@ -84,6 +90,78 @@ func canAdminOAuthClient(actor domain.Token, scope string) bool {
 // itself must call this reducer; no caller-supplied boolean substitutes.
 func CanAdminListeners(actor domain.Token) bool {
 	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil && actor.Source == domain.SourceHuman && hasScope(actor, ScopeListenersAdmin)
+}
+
+// CanDecideHumanReview is the transport-independent authority reducer for a
+// human-review decision. Ordinary work-item write authority remains a
+// separate requirement at the object boundary; this reducer answers only
+// whether the credential may clear/assert the human gate itself.
+func CanDecideHumanReview(actor domain.Token) bool {
+	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil && actor.Source == domain.SourceHuman && hasScope(actor, ScopeWorkItemsReviewDecide)
+}
+
+// CanDecideHumanReviewEvent evaluates the same authority from immutable token
+// history as of the candidate event. Projectors and security-sensitive
+// consumers use this instead of trusting a caller-authored payload marker or
+// today's mutable token projection. A later revocation therefore does not
+// rewrite an earlier authorized decision, while a revocation before the
+// decision fails closed during replay.
+func CanDecideHumanReviewEvent(ctx context.Context, tx pgx.Tx, event domain.Event) (bool, error) {
+	if event.Source != domain.SourceHuman || event.ActorTokenID == nil || *event.ActorTokenID == uuid.Nil || event.Seq <= 0 {
+		return false, nil
+	}
+	var (
+		createdSeq int64
+		isRoot     bool
+		source     string
+		scopesRaw  []byte
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT seq,
+		       COALESCE((payload->>'is_root')::boolean, false),
+		       COALESCE(NULLIF(payload->>'source', ''), 'human'),
+		       COALESCE(payload->'scopes', '[]'::jsonb)
+		FROM events
+		WHERE subject_kind = $1
+		  AND subject_id = $2
+		  AND kind = $3
+		  AND seq < $4
+		ORDER BY seq DESC
+		LIMIT 1
+	`, domain.SubjectToken, *event.ActorTokenID, domain.EventTokenCreated, event.Seq).Scan(&createdSeq, &isRoot, &source, &scopesRaw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var scopes []string
+	if err := json.Unmarshal(scopesRaw, &scopes); err != nil {
+		return false, fmt.Errorf("decode human-review actor scopes: %w", err)
+	}
+	var revoked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM events
+			WHERE subject_kind = $1
+			  AND subject_id = $2
+			  AND kind = $3
+			  AND seq > $4
+			  AND seq < $5
+		)
+	`, domain.SubjectToken, *event.ActorTokenID, domain.EventTokenRevoked, createdSeq, event.Seq).Scan(&revoked); err != nil {
+		return false, err
+	}
+	if revoked {
+		return false, nil
+	}
+	return CanDecideHumanReview(domain.Token{
+		ID:     *event.ActorTokenID,
+		IsRoot: isRoot,
+		Scopes: scopes,
+		Source: domain.Source(source),
+	}), nil
 }
 
 // Service evaluates access decisions that need projection reads.

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/projections"
 )
@@ -56,6 +57,17 @@ func (createdProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event
 	humanReview, err := normalizeHumanReviewStatus(payload.HumanReviewStatus)
 	if err != nil {
 		return err
+	}
+	if humanReview == domain.HumanReviewApproved {
+		authorized, err := access.CanDecideHumanReviewEvent(ctx, tx, event)
+		if err != nil {
+			return fmt.Errorf("work_item.created: evaluate human-review authority: %w", err)
+		}
+		if !authorized {
+			// The event remains immutable, but an unauthorized claim of explicit
+			// human approval folds to the conservative review fixed point.
+			humanReview = domain.HumanReviewBlocked
+		}
 	}
 	// DO NOTHING on conflict for the same reason as
 	// internal/auth/projectors.go: the events writer fires projectors only
@@ -276,6 +288,26 @@ func (metadataUpdatedProjector) Apply(ctx context.Context, tx pgx.Tx, event doma
 	humanReview, err := normalizeHumanReviewStatus(payload.To.HumanReviewStatus)
 	if err != nil {
 		return err
+	}
+	var currentReviewText string
+	if err := tx.QueryRow(ctx, `SELECT human_review_status FROM work_items WHERE id = $1`, event.SubjectID).Scan(&currentReviewText); err != nil {
+		return fmt.Errorf("work_item.metadata_updated: read current human-review status: %w", err)
+	}
+	currentReview := domain.HumanReviewStatus(currentReviewText)
+	if !currentReview.Valid() {
+		return fmt.Errorf("work_item.metadata_updated: invalid projected human_review_status %q", currentReview)
+	}
+	if humanReviewDecisionRequired(currentReview, humanReview) {
+		authorized, err := access.CanDecideHumanReviewEvent(ctx, tx, event)
+		if err != nil {
+			return fmt.Errorf("work_item.metadata_updated: evaluate human-review authority: %w", err)
+		}
+		if !authorized {
+			// Preserve the attempted fact in events while refusing to project its
+			// authority. This also invalidates an earlier approval if an
+			// unauthorized actor edits metadata while claiming it remains approved.
+			humanReview = domain.HumanReviewBlocked
+		}
 	}
 	_, err = tx.Exec(ctx, `
 		UPDATE work_items

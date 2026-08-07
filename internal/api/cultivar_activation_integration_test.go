@@ -97,10 +97,17 @@ func TestCultivarActivationGrantsApprovedSameTreeProposal(t *testing.T) {
 	}
 	root := rootResult.Token
 	defineActivationTropism(t, ctx, root, pool, writer)
+	reviewer, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "activation-reviewer", Source: domain.SourceHuman,
+		Scopes: []string{access.ScopeWorkItemsReviewDecide}, Actor: &root,
+	})
+	if err != nil {
+		t.Fatalf("create reviewer: %v", err)
+	}
 	workSvc := workitems.NewService(pool, writer)
 	item, err := workSvc.Create(ctx, workitems.CreateInput{
 		Title:             "approved activation proposal",
-		Actor:             root,
+		Actor:             reviewer.Token,
 		HumanReviewStatus: domain.HumanReviewApproved,
 	})
 	if err != nil {
@@ -152,9 +159,16 @@ func TestCultivarActivationDeniesRootstockSelfModification(t *testing.T) {
 	}
 	root := rootResult.Token
 	defineActivationTropism(t, ctx, root, pool, writer)
+	reviewer, err := auth.NewService(pool, writer).CreateToken(ctx, auth.CreateTokenInput{
+		Name: "rootstock-activation-reviewer", Source: domain.SourceHuman,
+		Scopes: []string{access.ScopeWorkItemsReviewDecide}, Actor: &root,
+	})
+	if err != nil {
+		t.Fatalf("create reviewer: %v", err)
+	}
 	item, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
 		Title:             "rootstock activation proposal",
-		Actor:             root,
+		Actor:             reviewer.Token,
 		HumanReviewStatus: domain.HumanReviewApproved,
 	})
 	if err != nil {
