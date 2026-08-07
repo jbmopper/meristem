@@ -22,8 +22,9 @@ No such record can exist today:
 - `crossnode_outcome_observations` carries `target_node_id` and
   `remote_terminal_event_id` — a remote *event*, with no path to a work-item
   uuid on this node.
-- `FormatCanonicalRef` has no callers, so no canonical reference is minted
-  anywhere.
+- `FormatCanonicalRef`'s only production caller is the remote-read envelope,
+  which emits a transient read result. No durable local record mints a
+  canonical reference that can serve as an anchor.
 
 So the anchor condition is unsatisfiable in production: every remote read
 refuses, and the success path could only ever be exercised by a test that
@@ -110,6 +111,14 @@ A retire event for a reference that was never recorded matches zero rows and is
 a no-op, in the same way `node.route_updated` is a no-op for an unregistered
 node.
 
+A record event folds as an upsert. When the key already names a retired row,
+the new record event replaces `recorded_event_id` / `recorded_at` and clears
+both `retired_event_id` and `retired_at`; it does not use `ON CONFLICT DO
+NOTHING`. Thus record → retire → record ends live in both the synchronous
+projection and a full replay. The projector contract requires a regression
+that folds that sequence, rebuilds from the same events, and compares the live
+and rebuilt rows.
+
 ### Idempotency, and the cycle trap
 
 Event identity is subject + kind + canonical payload. Recording the same
@@ -177,6 +186,10 @@ rejects decorations and non-standard UUID spellings. Re-emitting the parsed
 tuple produces one durable string per object, so both accepted qualified inputs
 select the same anchor and decorated variants fail before lookup.
 
+The implementation child must pin this at the service boundary: canonical and
+compact spellings of the same remote work item select the same stored anchor,
+while bare, decorated, or malformed references refuse before outbound I/O.
+
 ### What produces an anchor — never the read itself
 
 An anchor is created only by an explicit operator or domain action:
@@ -189,6 +202,15 @@ An anchor is created only by an explicit operator or domain action:
 
 The remote read never mints its own anchor. That would make D circular: the
 read would authorize itself.
+
+An addressed push that requests `continues_at` is one composite operation. All
+three decisions are evaluated against the same authenticated caller before any
+outbound I/O: ordinary local mutation authority, `crossnode.work_items.write`
+for the push, and `crossnode.references.record` for the anchor. If the reference
+scope is absent, the composite operation refuses before dispatch and appends no
+event; it never dispatches successfully and silently omits the requested
+anchor. An addressed push that does not request an anchor remains an ordinary
+push and does not require `crossnode.references.record`.
 
 ## Alternative considered: extend `work_item_relations`
 
