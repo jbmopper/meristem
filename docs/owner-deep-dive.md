@@ -46,15 +46,13 @@ Throughout, `$BIN` is `.meristem/generated/meristem-bin` and
 
 ## Step 1 — Per-agent worktrees
 
-**What you run.** Prepare worktrees for the generated-wrapper agents
-(`codex`, `claude-code-gui`), then run
-`scripts/provision-assistant-access.sh --targets codex,claude-code-gui --print-remote`
-to regenerate the launch wrappers, then relaunch the agents. If you use Cursor
-local MCP, prepare `cursor-mcp` separately; it uses
-`scripts/cursor-mcp-command.sh` and `.meristem/cursor-mcp.token`, not the
-generated-wrapper provisioner. This is the human acknowledgement on the
-worktree-discipline work item — a step no agent can take for itself, because
-the whole point is to stop agents from stepping on each other.
+**What you run.** Prepare worktrees for source isolation, then run
+`scripts/provision-assistant-access.sh --generate-http --print-remote`. That
+offline mode generates secret-free Streamable HTTP entries and launch/helpers
+for Codex, Claude Code, and Cursor beneath `.meristem/generated/`; it neither
+reads credentials nor applies live client configuration. The historical
+no-mode invocation still regenerates the stdio development/rollback wrappers,
+but those are not the release transport.
 
 **The collision history.** Early on, multiple assistants shared the primary
 source checkout. The primary checkout owns local state under `.meristem/`
@@ -70,13 +68,23 @@ Each agent gets its own git worktree based on `v1`, with its own branch
 (`codex/<t>-worktree`, `claude/<t>-worktree`, else `agent/<t>-worktree`). The
 helper symlinks `<worktree>/.meristem` back to the primary checkout so token and
 state files live in exactly one place while the *source* checkout is isolated
-per agent. `provision-assistant-access.sh` then writes **secret-free** MCP
-command wrappers under `.meristem/generated/` that read token files at runtime
-rather than embedding bearer secrets in shared JSON — and those wrappers fail
-closed until their expected worktree exists. The shared binary is rebuilt only
-from a clean, detached worktree at a known ref (`git diff --quiet` before
-`go build`), never from a dirty agent tree. The discipline is not bureaucracy;
-it is what makes "which binary is running which code" a question with one answer.
+per agent. HTTP MCP connectivity no longer starts a binary from that worktree:
+all three clients use the one loopback API, their own scoped token, and
+generated secret-free config. The shared server binary is rebuilt only from a
+clean, detached worktree at a known ref (`git diff --quiet` before `go build`),
+never from a dirty agent tree. The discipline is not bureaucracy; it is what
+makes "which binary is running which code" a question with one answer.
+
+**The cutover invariant.** `--mint-http` stages a new token as
+`.meristem/<client>.http-next.token`; it never treats an existing file as proof
+of the required `mcp.profile:local_agent_v1` marker. Stop or disconnect one
+client, preserve its exact stdio `meristem` entry outside active config,
+atomically replace that same active name and the canonical token file, then
+restart/reconnect and smoke initialization, tool shape, attribution, and
+idempotency. Only then revoke the prior token. Never create a parallel
+`meristem-http` entry: a temporary gap is harmless, while two credentialed
+writers defeat the cutover guarantee. Codex and Cursor need a full restart;
+Claude's `headersHelper` rereads on reconnect.
 
 ---
 

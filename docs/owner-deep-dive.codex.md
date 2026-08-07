@@ -24,12 +24,16 @@ uses a separate non-root human token.
 Agent worktrees are not ceremony. They keep Codex, Claude, and any future
 worker from committing another agent's dirty files or rebuilding
 `.meristem/generated/meristem-bin` from the wrong ref. The primary checkout owns
-`.meristem/`; worktrees link to it for local tokens and generated wrappers, but
-source edits happen on isolated branches.
+`.meristem/`; worktrees link to it for local state, but source edits happen on
+isolated branches.
 
-`scripts/provision-assistant-access.sh` mints per-assistant source=`agent`
-tokens and generates wrapper scripts that read token files at runtime. The
-generated MCP snippets do not embed bearer secrets. Each token row becomes the
+`scripts/provision-assistant-access.sh --generate-http` writes secret-free
+Streamable HTTP entries and launch/helpers for Codex, Claude, and Cursor. It
+does not read tokens or contact Postgres. A separate owner-approved
+`--mint-http` operation stages explicit source=`agent` credentials carrying
+`mcp.profile:local_agent_v1` plus business scopes; it never reuses a potentially
+legacy-unscoped token file. The historical no-mode invocation still regenerates
+the development/rollback stdio wrappers. Each token row becomes the
 `actor_token_id` on events the assistant causes, preserving attribution without
 adding an `agent_kind` schema.
 
