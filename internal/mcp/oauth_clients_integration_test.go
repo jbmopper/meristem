@@ -238,8 +238,12 @@ func TestProviderHTTPProfilesHideOAuthClientAdministrationIntegration(t *testing
 	for _, profile := range []*HTTPToolProfile{ProviderSafeReadHTTPProfile(), ProviderTrackerHTTPProfile()} {
 		for _, name := range []string{"oauth_clients.bind_actor", "oauth_clients.revoke"} {
 			result := callHTTPTool(t, s, admin.Token, profile, name, map[string]any{"client_id": "unreachable", "idempotency_key": profile.Name() + "-" + name})
-			if !strings.Contains(result.TransportError, "not enabled on this HTTP MCP profile") {
-				t.Fatalf("profile %s exposed %s: %+v", profile.Name(), name, result)
+			want := "not enabled on this HTTP MCP profile"
+			if profile.Name() == ProviderTrackerHTTPProfile().Name() {
+				want = "invalid or mismatched MCP actor profile"
+			}
+			if !strings.Contains(result.TransportError, want) {
+				t.Fatalf("profile %s did not fail closed before dispatching human OAuth admin tool %s (want %q): %+v", profile.Name(), name, want, result)
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -61,6 +62,22 @@ func TestProviderSafeUnregisteredToolFailsClosed(t *testing.T) {
 				t.Errorf("rejection message = %q, want the fail-closed rendering-gate message", rerr.Message)
 			}
 
+			// The complete HTTP request path must also fail closed. Exact actor/profile
+			// matching may reject this synthetic route before the renderer gate; either
+			// way no result body may escape.
+			actor := domain.Token{ID: uuid.New(), Source: domain.SourceAgent}
+			request := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":{}}}`)
+			resp := s.HandleHTTPMessageWithOptions(context.Background(), request, actor, HTTPOptions{Profile: profile})
+			var envelope rpcMessage
+			if err := json.Unmarshal(resp.Body, &envelope); err != nil {
+				t.Fatalf("decode full-path response: %v body=%s", err, resp.Body)
+			}
+			if envelope.Error == nil {
+				t.Fatalf("full request path returned a result for allowlisted-but-unregistered tool %q: %s", tool, resp.Body)
+			}
+			if len(envelope.Result) != 0 {
+				t.Fatalf("full request path leaked a result alongside its error for %q: %s", tool, resp.Body)
+			}
 		})
 	}
 }
