@@ -24,12 +24,6 @@ type MigrationDirection int
 const (
 	DirectionUp MigrationDirection = iota
 	DirectionDown
-
-	// humanReviewGateBoundaryMigration is the one migration whose application
-	// records the event-log position at which its projector invariant became
-	// authoritative. Historical events at or below that position must retain
-	// their original fold semantics during rebuild.
-	humanReviewGateBoundaryMigration int64 = 40
 )
 
 // migrationFilenamePattern matches "0001_name.up.sql" or "0001_name.down.sql".
@@ -197,23 +191,9 @@ func applyMigration(
 	}
 
 	if up {
-		if f.Version == humanReviewGateBoundaryMigration {
-			// Include every event committed by an older writer before activation.
-			// INSERT takes ROW EXCLUSIVE, so SHARE waits for in-flight appends and
-			// prevents a new one from straddling the boundary transaction.
-			if _, err = tx.Exec(ctx, `LOCK TABLE events IN SHARE MODE`); err != nil {
-				return fmt.Errorf("storage: lock events for %s boundary: %w", f.Filename, err)
-			}
-			_, err = tx.Exec(ctx, `
-				INSERT INTO schema_migrations (version, name, event_seq_boundary)
-				SELECT $1, $2, COALESCE(max(seq), 0)
-				FROM events
-			`, f.Version, f.Name)
-		} else {
-			_, err = tx.Exec(ctx,
-				`INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`,
-				f.Version, f.Name)
-		}
+		_, err = tx.Exec(ctx,
+			`INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`,
+			f.Version, f.Name)
 	} else {
 		_, err = tx.Exec(ctx,
 			`DELETE FROM schema_migrations WHERE version = $1`,

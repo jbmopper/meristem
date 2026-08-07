@@ -118,7 +118,7 @@ curl -fsS -X POST \
 
 An empty predicate list means all eligible demand for those registered
 capabilities. A narrower actor or work-item-tree policy is a complete
-replacement and must carry the currently observed `observed_policy_event_id`.
+replacement and must carry the currently observed `policy_event_id`.
 
 ```bash
 BIN=.meristem/generated/meristem-bin
