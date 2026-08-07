@@ -97,9 +97,10 @@ Expect, per pass (all idempotent on re-run — a second tick emits ~0 fresh):
 - convergence: verdicts on running items with checks;
 - breach: `patience.breached` per over-budget epoch. Pre-claim agent-cultivar
   waits converge on `dispatch.requested`; other breaches escalate to
-  human-attention under bring-up budgets. Items already
-  `human_review_status=blocked` are the fixed point — recorded, never
-  re-escalated.
+  human-attention under bring-up budgets without changing the origin's
+  `human_review_status`. Items already `human_review_status=blocked` skip
+  escalation; other repeated observations of one state epoch converge on the
+  same deterministic escalation.
   A breach is open only while the item is still in the same state epoch named
   by the breach payload; later lifecycle transitions make it historical.
 

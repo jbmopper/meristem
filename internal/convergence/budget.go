@@ -19,8 +19,8 @@ const (
 	// EscalateRequestApproval routes to the approval system (default-deny;
 	// v1). The owner decides whether to continue.
 	EscalateRequestApproval Escalation = "request_approval"
-	// EscalateHandToHuman blocks the work_item for direct human attention
-	// (human_review_status → blocked) rather than auto-failing.
+	// EscalateHandToHuman blocks lifecycle progress for direct human attention
+	// without changing the owner's recorded human_review_status.
 	EscalateHandToHuman Escalation = "hand_to_human"
 )
 

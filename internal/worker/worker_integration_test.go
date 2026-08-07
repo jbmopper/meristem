@@ -115,12 +115,11 @@ func TestScanOnceEmitsBreachAndEscalates(t *testing.T) {
 		t.Errorf("events count for %s = %d after first pass, want %d", domain.EventEscalationRequested, got, wantBreaches)
 	}
 	assertEventKindDeltaAllowed(t, beforeKinds, eventKindCounts(t, ctx, pool), map[string]bool{
-		domain.EventPatienceBreached:        true,
-		domain.EventEscalationRequested:     true,
-		domain.EventWorkItemCreated:         true,
-		domain.EventWorkItemRelationAdded:   true,
-		domain.EventWorkItemMetadataUpdated: true,
-		domain.EventWorkItemTransitioned:    true,
+		domain.EventPatienceBreached:      true,
+		domain.EventEscalationRequested:   true,
+		domain.EventWorkItemCreated:       true,
+		domain.EventWorkItemRelationAdded: true,
+		domain.EventWorkItemTransitioned:  true,
 	})
 
 	// Per-row check: the under-budget seed must not have a breach event.
@@ -142,7 +141,6 @@ func TestScanOnceEmitsBreachAndEscalates(t *testing.T) {
 		wantReview := domain.HumanReviewWavedThrough
 		if s.expectHit {
 			wantState = domain.WorkItemBlocked
-			wantReview = domain.HumanReviewBlocked
 		}
 		if gotItem.State != wantState {
 			t.Errorf("planted[%d] state = %s, want %s", i, gotItem.State, wantState)
@@ -1238,7 +1236,7 @@ func TestScanOnceDoesNotSpawnScribeForHumanReviewBlockedItem(t *testing.T) {
 	}
 }
 
-func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
+func TestScanOnceEscalationAttentionChildrenDoNotBreed(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
 	if err := storage.Migrate(ctx, pool, nil); err != nil {
@@ -1298,11 +1296,11 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 	if second.BreachesEmitted != 2 {
 		t.Fatalf("second breaches emitted = %d, want 2", second.BreachesEmitted)
 	}
-	if second.PatienceEscalationsSkippedAwaitingHuman != 2 {
-		t.Fatalf("second skipped awaiting human = %d, want 2", second.PatienceEscalationsSkippedAwaitingHuman)
+	if second.PatienceEscalationsSkippedAwaitingHuman != 1 {
+		t.Fatalf("second skipped awaiting human = %d, want 1", second.PatienceEscalationsSkippedAwaitingHuman)
 	}
-	if second.PatienceEscalationsRequested != 0 {
-		t.Fatalf("second patience escalations = %d, want 0", second.PatienceEscalationsRequested)
+	if second.PatienceEscalationsRequested != 1 {
+		t.Fatalf("second patience escalations = %d, want 1 for the new blocked-state epoch", second.PatienceEscalationsRequested)
 	}
 
 	thirdNow := now.Add(4 * time.Hour)
@@ -1317,17 +1315,20 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 	if third.PatienceEscalationsRequested != 0 {
 		t.Fatalf("third patience escalations = %d, want 0", third.PatienceEscalationsRequested)
 	}
-	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
-		t.Fatalf("escalation requests after later scans = %d, want 1", got)
+	if third.PatienceEscalationsAlreadyRequested != 1 {
+		t.Fatalf("third already-requested escalations = %d, want 1", third.PatienceEscalationsAlreadyRequested)
 	}
-	if got := countRelationsForParent(t, ctx, pool, item.ID); got != 1 {
-		t.Fatalf("children of original = %d, want 1", got)
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 2 {
+		t.Fatalf("escalation requests after later scans = %d, want 2 (captured and blocked epochs)", got)
+	}
+	if got := countRelationsForParent(t, ctx, pool, item.ID); got != 2 {
+		t.Fatalf("children of original = %d, want 2", got)
 	}
 	if got := countRelationsForParent(t, ctx, pool, childID); got != 0 {
 		t.Fatalf("children of human attention item = %d, want 0", got)
 	}
-	if got := countHumanAttentionItems(t, ctx, pool); got != 1 {
-		t.Fatalf("human attention items = %d, want 1", got)
+	if got := countHumanAttentionItems(t, ctx, pool); got != 2 {
+		t.Fatalf("human attention items = %d, want 2", got)
 	}
 }
 
@@ -1336,8 +1337,8 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 // (lifecycle state=blocked, human_review_status=waved_through) that overshoots
 // its blocked-state patience budget spawns exactly one human-attention child,
 // no matter how many scans observe the same blocked epoch. The first breach
-// escalates and flips human_review_status to blocked; every later scan of the
-// same epoch takes the awaiting-human skip instead of breeding another child.
+// preserves human_review_status; every later scan converges on the same
+// deterministic escalation instead of breeding another child.
 func TestScanOnceBlockedOwnerCourtEscalatesOnce(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -1384,10 +1385,17 @@ func TestScanOnceBlockedOwnerCourtEscalatesOnce(t *testing.T) {
 	if got := countHumanAttentionItems(t, ctx, pool); got != 1 {
 		t.Fatalf("human attention items after first = %d, want 1", got)
 	}
+	preserved, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get parent after first escalation: %v", err)
+	}
+	if preserved.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("human_review_status after escalation = %s, want waved_through", preserved.HumanReviewStatus)
+	}
 
 	// A second scan of the same blocked epoch must not breed another child:
-	// the escalation already flipped human_review_status to blocked, so the
-	// breach now takes the awaiting-human skip.
+	// reason and summary are stable for the state epoch, so the escalation id
+	// resolves to the already-recorded request.
 	secondNow := now.Add(24 * time.Hour)
 	secondWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return secondNow })
 	if err != nil {
@@ -1400,8 +1408,11 @@ func TestScanOnceBlockedOwnerCourtEscalatesOnce(t *testing.T) {
 	if second.PatienceEscalationsRequested != 0 {
 		t.Fatalf("second patience escalations = %d, want 0", second.PatienceEscalationsRequested)
 	}
-	if second.PatienceEscalationsSkippedAwaitingHuman != 1 {
-		t.Fatalf("second skipped awaiting human = %d, want 1", second.PatienceEscalationsSkippedAwaitingHuman)
+	if second.PatienceEscalationsAlreadyRequested != 1 {
+		t.Fatalf("second already-requested escalations = %d, want 1", second.PatienceEscalationsAlreadyRequested)
+	}
+	if second.PatienceEscalationsSkippedAwaitingHuman != 0 {
+		t.Fatalf("second skipped awaiting human = %d, want 0", second.PatienceEscalationsSkippedAwaitingHuman)
 	}
 	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
 		t.Fatalf("escalation requests after second scan = %d, want 1", got)
@@ -1615,8 +1626,8 @@ func TestScanOnceEscalatesStaleRejectedInputsAfterPatienceBudget(t *testing.T) {
 	if got.State != domain.WorkItemBlocked {
 		t.Fatalf("state = %q, want blocked", got.State)
 	}
-	if got.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("human review status = %q, want blocked", got.HumanReviewStatus)
+	if got.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("human review status = %q, want waved_through", got.HumanReviewStatus)
 	}
 }
 
@@ -1637,7 +1648,7 @@ func TestScanOnceConvergenceBlocksAfterFreshFailedAttempts(t *testing.T) {
 		Title:                      "convergence exhausted reject",
 		State:                      domain.WorkItemRunning,
 		SuggestedConvergenceChecks: []string{"tests_green"},
-		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		HumanReviewStatus:          domain.HumanReviewApproved,
 		Actor:                      systemTok.Token,
 	})
 	if err != nil {
@@ -1671,8 +1682,8 @@ func TestScanOnceConvergenceBlocksAfterFreshFailedAttempts(t *testing.T) {
 	if got.State != domain.WorkItemBlocked {
 		t.Fatalf("state = %q, want blocked", got.State)
 	}
-	if got.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("human review status = %q, want blocked", got.HumanReviewStatus)
+	if got.HumanReviewStatus != domain.HumanReviewApproved {
+		t.Fatalf("human review status = %q, want approved", got.HumanReviewStatus)
 	}
 	if countVerdictsForWorkItem(t, ctx, pool, item.ID) != defaultConvergenceMaxAttempts {
 		t.Fatalf("expected %d verdict rows", defaultConvergenceMaxAttempts)

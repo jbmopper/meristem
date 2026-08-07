@@ -240,13 +240,13 @@ second attempt.
 **Recursion guards and the fixed point.** Self-definition must terminate. The
 scribe child is *born* with its own check (`query:parent_checks_defined`), so it
 never matches the checkless predicate — no scribe-for-a-scribe is possible
-structurally, not by filter. And the escalation loop has a base case:
-`human_review_status = blocked` is THE fixed point. An item waiting on owner
-input still gets its `patience.breached` recorded, but the worker does **not**
-recursively escalate it (`PatienceEscalationsSkippedAwaitingHuman`). Blocked-on-
-you items are exempt from escalation storms; they wait for you, quietly, forever
-being not-your-problem-yet. This is what keeps a backlog full of owner-gated
-items from generating an unbounded cascade of "please look at this" work.
+structurally, not by filter. The escalation loop has two base cases. An item
+already at `human_review_status = blocked` records its `patience.breached` but
+does **not** recursively escalate it
+(`PatienceEscalationsSkippedAwaitingHuman`). For a waved-through or approved
+origin, a repeated observation of the same state epoch resolves to the same
+deterministic escalation id and the same attention child. Neither case creates
+an unbounded cascade, and neither revokes an owner decision.
 
 ---
 

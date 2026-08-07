@@ -147,25 +147,6 @@ func (s *Service) RequestInTx(ctx context.Context, tx pgx.Tx, in RequestInput) (
 	}); err != nil {
 		return RequestResult{}, err
 	}
-	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
-		SubjectKind:  domain.SubjectWorkItem,
-		SubjectID:    in.WorkItemID,
-		Kind:         domain.EventWorkItemMetadataUpdated,
-		Source:       source,
-		ActorTokenID: actorID,
-		Payload: map[string]any{
-			"from": map[string]any{
-				"suggested_convergence_checks": parent.SuggestedConvergenceChecks,
-				"human_review_status":          parent.HumanReviewStatus,
-			},
-			"to": map[string]any{
-				"suggested_convergence_checks": parent.SuggestedConvergenceChecks,
-				"human_review_status":          domain.HumanReviewBlocked,
-			},
-		},
-	}); err != nil {
-		return RequestResult{}, err
-	}
 	if parent.State != domain.WorkItemBlocked {
 		if _, _, err := s.writer.Append(ctx, tx, events.Spec{
 			SubjectKind:  domain.SubjectWorkItem,
