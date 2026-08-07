@@ -176,10 +176,16 @@ const (
 	// an authority grant. Credential rotation rebinds the SAME listener id;
 	// policy_set is a full replacement whose normalized shape participates in
 	// deterministic event identity.
-	EventListenerRegistered      = "listener.registered"
-	EventListenerCredentialBound = "listener.credential_bound"
-	EventListenerPolicySet       = "listener.policy_set"
-	EventListenerRetired         = "listener.retired"
+	EventListenerRegistered            = "listener.registered"
+	EventListenerCredentialBound       = "listener.credential_bound"
+	EventListenerPolicySet             = "listener.policy_set"
+	EventListenerRetired               = "listener.retired"
+	EventListenerActivationRequested   = "listener.activation_requested"
+	EventListenerActivationDispatching = "listener.activation_dispatching"
+	EventListenerActivationAccepted    = "listener.activation_accepted"
+	EventListenerActivationCompleted   = "listener.activation_completed"
+	EventListenerActivationFailed      = "listener.activation_failed"
+	EventListenerActivationAmbiguous   = "listener.activation_ambiguous"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -254,6 +260,12 @@ var AllEventKinds = []string{
 	EventListenerCredentialBound,
 	EventListenerPolicySet,
 	EventListenerRetired,
+	EventListenerActivationRequested,
+	EventListenerActivationDispatching,
+	EventListenerActivationAccepted,
+	EventListenerActivationCompleted,
+	EventListenerActivationFailed,
+	EventListenerActivationAmbiguous,
 }
 
 const (
@@ -272,6 +284,7 @@ const (
 	SubjectCultivar            = "cultivar"
 	SubjectProjection          = "projection"
 	SubjectListener            = "listener"
+	SubjectListenerActivation  = "listener_activation"
 	// SubjectConvergence is the subject kind for a convergence verdict. The
 	// subject_id is the work_item being reduced; the attempt lives in the event
 	// payload, so (work_item_id, attempt, payload) remains the deterministic

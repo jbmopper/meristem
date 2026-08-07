@@ -1,11 +1,11 @@
 # Listener Control Plane
 
-> Status: review revision for work item
+> Status: owner-authorized implementation release candidate for work item
 > `588544c9-2fe3-5173-aeb9-33829fd19cec`, incorporating Fable findings
-> `LDR-M1` and `LDR-M2`. This document is not yet normative. `docs/spec.md`
-> remains authoritative until the revised artifact is independently confirmed
-> and owner acceptance is recorded. No implementation or deployment is
-> authorized by this draft.
+> `LDR-M1` and `LDR-M2`. `docs/spec.md` remains normative. Slices 0-3 are on
+> `v1`; slice 4 is implemented on the listener release train and still requires
+> exact-commit review plus the explicit runtime cutover gate. Networking and
+> assignment-bound token exchange remain deferred until after the OS update.
 
 ## Decision summary
 
@@ -48,35 +48,30 @@ persisted deterministic predicates control delivery.
 
 ## Current-state evidence
 
-Evidence was collected against repository and runtime state on 2026-08-04 MDT.
+Evidence was refreshed against repository state on 2026-08-07 MDT.
 
 | Capability | State | Evidence and disposition |
 | --- | --- | --- |
 | Assigned/addressed feed lane | Shipped | Shared REST/MCP reducer and SSE tests are in `internal/api/assigned_feed_integration_test.go`; reuse unchanged |
 | Normalized actor, kind, item, and tree predicates | Shipped | `internal/feed/predicates.go`; reuse as the policy predicate vocabulary |
 | Filter-bound durable cursor and SSE resume | Shipped | `meristem feed --watch --cursor-file`; reuse in the generic supervisor |
-| Wake-hook redelivery on failure | Shipped | `meristem feed --watch --exec` advances the cursor only after hook success |
-| Atomic work-item Claim/Yield, lease expiry, and terminal handback | Shipped internally | `internal/workitems/assignments.go` and migrations 0035-0036; expose through canonical transports rather than replace |
-| Claim/Yield/GetAssignment REST and MCP surfaces | Missing | No registered REST handlers or MCP tools exist; first implementation slice |
-| Durable listener registration and base policy | Missing | Static launcher configuration currently substitutes for it |
-| Stable listener addressing | Missing | Fable event `d8213058-99ea-55c2-9805-88b217816786` addressed legacy token `7917fa54...`, while the interactive Codex token was `76bb7593...` and the bridge lane token was `ebbb5827...`; the event was therefore correctly filtered away from both |
-| Claim-bound focus and automatic policy restoration | Missing | No durable listener state machine consumes the assignment projection |
-| Codex task activation | Bootstrap-proven | `scripts/codex-thread-nudge.py` safely drives the app-server, but its binding and journal are local adapter concerns |
-| Durable activation request/outcome | Missing in Meristem | The shell bridge uses local queue, delivery, marker, seen, and quarantine files |
+| Wake-hook redelivery on failure | Legacy compatibility | `meristem feed --watch --exec` remains available during guarded cutover; the generic listener owns new delivery state |
+| Atomic work-item Claim/Yield, lease expiry, and terminal handback | Shipped | `internal/workitems/assignments.go`, migrations 0035-0036, and canonical REST/MCP transports |
+| Claim/Yield/GetAssignment REST and MCP surfaces | Shipped | Listener slice 1; external scoped clients share the domain reducer |
+| Durable listener registration and base policy | Shipped | Listener slice 2, migration 0037, and `internal/listeners` |
+| Stable listener addressing | Shipped | Producers address listener UUID/name; bearer rebinding does not change the address |
+| Claim-bound focus and automatic policy restoration | Shipped | `meristem listener` derives IDLE/FOCUSED from registration, assignment, and feed projections |
+| Codex task activation | Release candidate | `scripts/codex-thread-nudge.py activate` is metadata-only, journal-free, idle-only, and fail-closed on unattended requests |
+| Durable activation request/outcome | Release candidate | Migration 0039 plus `internal/listeneractivation`; REST, MCP, assigned-feed control, restart, and rebuild proofs are included |
 | Assignment-bound token exchange | Designed separately, not implemented | Required only when a claimed role needs narrower temporary authority than the listener's stable credential already has |
 
 ### Runtime correction to the initial review evidence
 
-The generated binary reports exact commit
-`2c56f91dd0cd0298465391700dc032c9f49a87be`, its build guard reports the same
-reviewed pin, and the running API and worker map the same on-disk inode. The
-current checkout and `origin/v1` are also at that commit. Therefore a restart
-is not presently expected to add listener-policy or claim-transport behavior.
-The initial string-marker inference that the serving binary was one commit
-behind is superseded by the executable build guard and process mapping.
-
-Restart remains an acceptance-test case. It is not the design or the presumed
-fix.
+Runtime release state is intentionally not frozen in this design record. Use
+`meristem status`, `/readyz`, `meristem build-guard-status`, and MCP
+`initialize` to compare the mapped build with the reviewed `v1` pin. Restart
+remains an acceptance test and a release action, never the presumed fix for
+missing behavior.
 
 ## Domain model
 
@@ -408,10 +403,11 @@ bug is tracked by `96154ad5-a30f-55df-9d56-aa3460639967`.
 
 ## Implementation plan
 
-Implementation begins only after an independent exact-revision design verdict
-and owner instruction.
+The owner authorized implementation on 2026-08-07. Exact-commit review remains
+required before merge, and replacing the live feed bridge remains a separate
+human-gated cutover.
 
-### Slice 0 — readiness proof and baseline
+### Slice 0 — readiness proof and baseline (shipped)
 
 - Pin the reviewed `v1` commit and binary build guard.
 - Run existing feed-watch, assignment, rebuild, and bridge test suites.
@@ -424,7 +420,7 @@ and owner instruction.
 Exit: evidence distinguishes configuration/restart issues from missing code;
 no restart is prescribed without a failed executable probe.
 
-### Slice 1 — canonical assignment transports
+### Slice 1 — canonical assignment transports (shipped)
 
 - Add REST/MCP claim, assignment read, and yield surfaces over the existing
   service.
@@ -438,7 +434,7 @@ Exit: two external scoped clients race for one item; exactly one assignment
 event exists, the loser gets a replayable conflict, and yield/expiry/terminal
 handback are visible on the assigned lane.
 
-### Slice 2 — listener registration and policy
+### Slice 2 — listener registration and policy (shipped)
 
 - Add listener events, projections, domain service, REST, and MCP.
 - Reuse the normalized predicate implementation and pin policy fingerprints.
@@ -451,7 +447,7 @@ Exit: Fable and Codex have stable listener registrations in the routing
 fixtures; either may request or receive a capability without naming a bearer
 UUID, and routing resolves the addressed listener deterministically.
 
-### Slice 3 — idle/focused supervisor
+### Slice 3 — idle/focused supervisor (shipped)
 
 - Add a generic `meristem listener` runtime using the existing feed client.
 - Maintain the stable control lane and revision-specific demand/focus cursors.
@@ -462,7 +458,7 @@ UUID, and routing resolves the addressed listener deterministically.
 Exit: restart in IDLE and FOCUSED loses no open demand, accepts no duplicate
 assignment, and restores the latest base policy after release.
 
-### Slice 4 — durable activation and Codex adapter cutdown
+### Slice 4 — durable activation and Codex adapter cutdown (release candidate)
 
 - Add activation events/projection and bounded activation reconciler.
 - Move delivery state from shell files into the event-backed projection.

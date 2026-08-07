@@ -28,6 +28,7 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/listeneractivation"
 	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -366,5 +367,162 @@ func TestSupervisorStreamClaimAndHandbackIntegration(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("supervisor did not stop on context cancellation")
+	}
+}
+
+// TestSupervisorActivationCompositionIntegration proves the release seam all
+// the way through the production supervisor: the durable claim creates one
+// activation generation, the adapter receives IDs rather than task content or
+// Meristem credentials, structural receipts terminalize the ledger, and a
+// restart derives terminal instead of dispatching the turn twice.
+func TestSupervisorActivationCompositionIntegration(t *testing.T) {
+	f := newSupervisorFixture(t, "sup-activation")
+	item := f.spawnDemand(t, "activation-demand")
+	if out := runOnceOutput(t, f.sup); !strings.Contains(out, item.ID.String()) {
+		t.Fatalf("claim pass = %q, want focused on %s", out, item.ID)
+	}
+	assignment, err := f.workSvc.GetAssignment(f.ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read assignment: %v", err)
+	}
+	held := heldAssignment{
+		WorkItemID:        item.ID,
+		AssignmentEventID: assignment.AssignmentEventID,
+		ExpiresAt:         assignment.ExpiresAt,
+		ListenerID:        assignment.ListenerID,
+	}
+
+	recordPath := filepath.Join(t.TempDir(), "adapter-args")
+	adapterPath := filepath.Join(t.TempDir(), "fake-listener-adapter")
+	adapter := `#!/bin/sh
+record_path="$2"
+shift 2
+if [ -n "$MERISTEM_TOKEN$MERISTEM_DATABASE_URL" ]; then
+  exit 12
+fi
+printf '%s\n' "$*" > "$record_path"
+printf '%s\n' '{"outcome":"accepted","reason":"turn_admitted"}'
+printf '%s\n' '{"outcome":"completed","reason":"turn_completed"}'
+`
+	if err := os.WriteFile(adapterPath, []byte(adapter), 0o700); err != nil {
+		t.Fatalf("write fake adapter: %v", err)
+	}
+	t.Setenv("MERISTEM_TOKEN", "must-not-reach-adapter")
+	t.Setenv("MERISTEM_DATABASE_URL", "must-not-reach-adapter")
+	f.sup.activationAdapter = adapterPath
+	f.sup.activationArgs = []string{"--record", recordPath}
+	f.sup.activationBindingGeneration = "binding-v1"
+	f.sup.activationConsumerGeneration = "consumer-v1"
+	reg, err := f.sup.getListener(f.ctx)
+	if err != nil {
+		t.Fatalf("read listener view: %v", err)
+	}
+
+	activation, action, err := f.sup.activationStep(f.ctx, reg, held)
+	if err != nil {
+		t.Fatalf("activation step: %v", err)
+	}
+	if action != "dispatch" {
+		t.Fatalf("first action = %q, want dispatch", action)
+	}
+	if err := f.sup.runActivationAdapter(f.ctx, activation, action); err != nil {
+		t.Fatalf("run activation adapter: %v", err)
+	}
+	got, err := listeneractivation.NewService(f.pool, f.writer).Get(f.ctx, activation.ID)
+	if err != nil {
+		t.Fatalf("read activation: %v", err)
+	}
+	if got.State != listeneractivation.StateCompleted || got.DispatchCount != 1 || got.ReconcileCount != 0 {
+		t.Fatalf("activation = state %s dispatches %d reconciles %d", got.State, got.DispatchCount, got.ReconcileCount)
+	}
+	args, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read adapter args: %v", err)
+	}
+	argText := string(args)
+	if !strings.Contains(argText, activation.ID.String()) || !strings.Contains(argText, assignment.AssignmentEventID.String()) || strings.Contains(argText, item.Title) {
+		t.Fatalf("adapter args crossed metadata boundary: %q", argText)
+	}
+
+	restarted, action, err := f.sup.activationStep(f.ctx, reg, held)
+	if err != nil {
+		t.Fatalf("restart activation step: %v", err)
+	}
+	if restarted.ID != activation.ID || action != "terminal" {
+		t.Fatalf("restart = activation %s action %q, want %s terminal", restarted.ID, action, activation.ID)
+	}
+	var eventCount int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM events
+		WHERE subject_kind=$1 AND subject_id=$2
+		  AND kind = ANY($3::text[])
+	`, domain.SubjectListenerActivation, activation.ID, []string{
+		domain.EventListenerActivationRequested,
+		domain.EventListenerActivationDispatching,
+		domain.EventListenerActivationAccepted,
+		domain.EventListenerActivationCompleted,
+	}).Scan(&eventCount); err != nil {
+		t.Fatalf("count activation events: %v", err)
+	}
+	if eventCount != 4 {
+		t.Fatalf("activation event count = %d, want 4", eventCount)
+	}
+	report, err := rebuildAndDiff(f.ctx, f.pool, app.NewProjectionRegistry(), "listener_activation_rebuild_check", f.sup.logger, false)
+	if err != nil {
+		t.Fatalf("activation rebuild: %v", err)
+	}
+	if len(report.mismatches) != 0 {
+		t.Fatalf("activation rebuild mismatches: %+v", report.mismatches)
+	}
+}
+
+func TestSupervisorInvalidAdapterReceiptIsAmbiguousIntegration(t *testing.T) {
+	f := newSupervisorFixture(t, "sup-activation-invalid")
+	item := f.spawnDemand(t, "activation-invalid-demand")
+	if out := runOnceOutput(t, f.sup); !strings.Contains(out, item.ID.String()) {
+		t.Fatalf("claim pass = %q, want focused on %s", out, item.ID)
+	}
+	assignment, err := f.workSvc.GetAssignment(f.ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read assignment: %v", err)
+	}
+	held := heldAssignment{
+		WorkItemID: item.ID, AssignmentEventID: assignment.AssignmentEventID,
+		ExpiresAt: assignment.ExpiresAt, ListenerID: assignment.ListenerID,
+	}
+	adapterPath := filepath.Join(t.TempDir(), "invalid-listener-adapter")
+	if err := os.WriteFile(adapterPath, []byte("#!/bin/sh\nprintf '%s\\n' 'not-a-structural-receipt' '{\"outcome\":\"completed\",\"reason\":\"turn_completed\"}'\n"), 0o700); err != nil {
+		t.Fatalf("write invalid adapter: %v", err)
+	}
+	f.sup.activationAdapter = adapterPath
+	f.sup.activationBindingGeneration = "binding-invalid-v1"
+	f.sup.activationConsumerGeneration = "consumer-invalid-v1"
+	reg, err := f.sup.getListener(f.ctx)
+	if err != nil {
+		t.Fatalf("read listener view: %v", err)
+	}
+	activation, action, err := f.sup.activationStep(f.ctx, reg, held)
+	if err != nil {
+		t.Fatalf("activation step: %v", err)
+	}
+	if err := f.sup.runActivationAdapter(f.ctx, activation, action); err != nil {
+		t.Fatalf("run invalid adapter: %v", err)
+	}
+	got, err := listeneractivation.NewService(f.pool, f.writer).Get(f.ctx, activation.ID)
+	if err != nil {
+		t.Fatalf("read activation: %v", err)
+	}
+	if got.State != listeneractivation.StateAmbiguous || got.LastReason != "adapter_outcome_ambiguous" {
+		t.Fatalf("invalid receipt state = %s reason %q, want ambiguous", got.State, got.LastReason)
+	}
+	var completed int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM events
+		WHERE subject_kind=$1 AND subject_id=$2 AND kind=$3
+	`, domain.SubjectListenerActivation, activation.ID, domain.EventListenerActivationCompleted).Scan(&completed); err != nil {
+		t.Fatalf("count completed events: %v", err)
+	}
+	if completed != 0 {
+		t.Fatalf("invalid adapter appended %d completed events", completed)
 	}
 }

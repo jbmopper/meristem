@@ -90,6 +90,14 @@ var ExcludedKinds = []string{
 	domain.EventListenerCredentialBound,
 	domain.EventListenerPolicySet,
 	domain.EventListenerRetired,
+	// Activation delivery is addressed runtime control for the assigned lane.
+	// It remains out of the default human narrative, like assignment leases.
+	domain.EventListenerActivationRequested,
+	domain.EventListenerActivationDispatching,
+	domain.EventListenerActivationAccepted,
+	domain.EventListenerActivationCompleted,
+	domain.EventListenerActivationFailed,
+	domain.EventListenerActivationAmbiguous,
 	// Node registry maintenance is fleet-topology audit, not the human
 	// activity narrative; it belongs to the log, not /v1/feed.
 	domain.EventNodeRegistered,

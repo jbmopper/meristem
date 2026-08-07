@@ -16,6 +16,7 @@ Currently shipped:
 - `meristem safety check` — validate deterministic resource limits (request bodies, feed long-poll cap, patience budgets); `api`, `worker`, `mcp`, and non–dry-run `seed v1` refuse to start if invalid.
 - `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, work-item routes, and provider-safe Streamable HTTP MCP at `/mcp`; sealed tracker profiles add coordination-only writes.
 - `meristem worker` — always-on deterministic reconciler daemon; `worker --once` remains the one-tick verification path.
+- `meristem listener` — restart-derived IDLE/FOCUSED supervisor over filter-bound feeds and assignment leases; an optional one-shot adapter uses the event-backed activation ledger instead of local delivery journals.
 - `meristem tokens {create, list, revoke}` plus `POST /v1/tokens/revoke-all` — bearer token lifecycle and root-only panic revocation.
 - `meristem mcp` — JSON-RPC over stdio MCP server with parity to the canonical REST surface; provider HTTP writes remain limited to the sealed tracker profile.
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).

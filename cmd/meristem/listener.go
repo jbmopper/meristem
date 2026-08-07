@@ -39,6 +39,7 @@ package main
 // current phase and forces re-derivation; content lenses never replace it.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -50,6 +51,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -73,6 +75,10 @@ Flags:
   --once        run one derivation pass (snapshot + claim attempts) and exit
                 instead of streaming; prints the derived state
   --interval    reconnect backoff for dropped streams (default 2s)
+  --activation-adapter  absolute one-shot adapter executable (optional)
+  --activation-arg      repeatable fixed adapter argument
+  --activation-binding-generation  opaque local task-binding generation
+  --activation-consumer-generation stable single-consumer generation
 `)
 }
 
@@ -84,6 +90,11 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 	cursorDir := fs.String("cursor-dir", "", "directory for durable cursors")
 	once := fs.Bool("once", false, "run one derivation pass and exit")
 	interval := fs.Duration("interval", 2*time.Second, "reconnect backoff for dropped streams")
+	activationAdapter := fs.String("activation-adapter", "", "absolute one-shot activation adapter executable")
+	activationBinding := fs.String("activation-binding-generation", "", "opaque local adapter binding generation")
+	activationConsumer := fs.String("activation-consumer-generation", "", "stable activation consumer generation")
+	var activationArgs stringSliceFlag
+	fs.Var(&activationArgs, "activation-arg", "fixed activation adapter argument (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		listenerUsage(os.Stderr)
 		return err
@@ -91,6 +102,20 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 	if strings.TrimSpace(*name) == "" {
 		listenerUsage(os.Stderr)
 		return errors.New("listener: --name is required")
+	}
+	adapterPath := strings.TrimSpace(*activationAdapter)
+	if adapterPath == "" {
+		if len(activationArgs) > 0 || strings.TrimSpace(*activationBinding) != "" || strings.TrimSpace(*activationConsumer) != "" {
+			return errors.New("listener: --activation-adapter is required when activation adapter options are set")
+		}
+	} else {
+		if !filepath.IsAbs(adapterPath) || strings.TrimSpace(*activationBinding) == "" || strings.TrimSpace(*activationConsumer) == "" {
+			return errors.New("listener: activation adapter must be absolute and both activation generations are required")
+		}
+		info, err := os.Stat(adapterPath)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+			return errors.New("listener: activation adapter must be an executable regular file")
+		}
 	}
 	token, source, err := resolveFeedToken()
 	if err != nil {
@@ -100,12 +125,16 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 		fmt.Fprintf(os.Stderr, "listener: using token from %s\n", source)
 	}
 	sup := &listenerSupervisor{
-		api:     strings.TrimRight(*api, "/"),
-		token:   token,
-		name:    *name,
-		backoff: *interval,
-		logger:  logger,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		api:                          strings.TrimRight(*api, "/"),
+		token:                        token,
+		name:                         *name,
+		backoff:                      *interval,
+		logger:                       logger,
+		http:                         &http.Client{Timeout: 30 * time.Second},
+		activationAdapter:            adapterPath,
+		activationArgs:               append([]string(nil), activationArgs...),
+		activationBindingGeneration:  strings.TrimSpace(*activationBinding),
+		activationConsumerGeneration: strings.TrimSpace(*activationConsumer),
 	}
 	// The default cursor directory is keyed by the VALIDATED registration
 	// UUID, never the raw name (LCP3-R1-B3): a name is an object address, not
@@ -143,13 +172,17 @@ func defaultListenerCursorDir(home string, listenerID uuid.UUID) string {
 }
 
 type listenerSupervisor struct {
-	api       string
-	token     string
-	name      string
-	cursorDir string
-	backoff   time.Duration
-	logger    *slog.Logger
-	http      *http.Client
+	api                          string
+	token                        string
+	name                         string
+	cursorDir                    string
+	backoff                      time.Duration
+	logger                       *slog.Logger
+	http                         *http.Client
+	activationAdapter            string
+	activationArgs               []string
+	activationBindingGeneration  string
+	activationConsumerGeneration string
 }
 
 // listenerView is the wire shape of one /v1/listeners entry, narrowed to the
@@ -175,6 +208,15 @@ type demandCandidateView struct {
 	DemandEventSeq int64     `json:"demand_event_seq"`
 	WorkItemID     uuid.UUID `json:"work_item_id"`
 	Capability     string    `json:"capability"`
+}
+
+type activationView struct {
+	ID                uuid.UUID `json:"id"`
+	State             string    `json:"state"`
+	StateEventID      uuid.UUID `json:"state_event_id"`
+	AssignmentEventID uuid.UUID `json:"assignment_event_id"`
+	WorkItemID        uuid.UUID `json:"work_item_id"`
+	BindingGeneration string    `json:"binding_generation"`
 }
 
 // run is the outer derivation loop: every iteration re-derives IDLE or
@@ -362,6 +404,34 @@ func (s *listenerSupervisor) focused(ctx context.Context, reg listenerView, held
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
+		if s.activationAdapter != "" {
+			activation, action, err := s.activationStep(ctx, reg, held)
+			if err != nil {
+				return err
+			}
+			switch action {
+			case "dispatch", "reconcile":
+				if err := s.runActivationAdapter(ctx, activation, action); err != nil {
+					return err
+				}
+				continue
+			case "wait":
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(s.backoff):
+				}
+				if released, err = s.assignmentReleased(ctx, held); err != nil {
+					return err
+				}
+				continue
+			case "terminal":
+				// Delivery finished (or exhausted); the exact assignment remains
+				// focused until task completion, yield, or worker-owned expiry.
+			default:
+				return fmt.Errorf("listener: unknown activation action %q", action)
+			}
+		}
 		client := s.feedClient(url.Values{"scope": []string{"assigned"}})
 		last, err := loadCursorFile(focusCursor)
 		if err != nil {
@@ -425,6 +495,246 @@ func (s *listenerSupervisor) focused(ctx context.Context, reg listenerView, held
 			fmt.Sprintf("listener %s observed release of assignment %s; returning to idle under the latest base policy", s.name, held.AssignmentEventID))
 	}
 	return nil
+}
+
+// activationStep composes the durable activation ledger with the focused
+// assignment. Ensure is deterministic, including after a crash between claim
+// and activation request. Begin records the finite external-contact lease and
+// tells the adapter whether it may dispatch or must only reconcile.
+func (s *listenerSupervisor) activationStep(ctx context.Context, reg listenerView, held heldAssignment) (activationView, string, error) {
+	ensureBody := map[string]any{
+		"assignment_event_id": held.AssignmentEventID,
+		"binding_generation":  s.activationBindingGeneration,
+		"attempt":             1,
+	}
+	var ensured struct {
+		Activation activationView `json:"activation"`
+	}
+	ensureKey := activationIdempotencyKey("ensure", held.AssignmentEventID.String(), s.activationBindingGeneration)
+	if err := s.postJSON(ctx, "/v1/listeners/"+reg.ID.String()+"/activations/ensure", ensureBody, ensureKey, &ensured); err != nil {
+		return activationView{}, "", fmt.Errorf("listener: ensure activation: %w", err)
+	}
+	var begun struct {
+		Action     string         `json:"action"`
+		Activation activationView `json:"activation"`
+	}
+	// Each begin is a distinct reconciliation attempt. Reusing the first key
+	// would replay its cached HTTP response forever even after later receipt
+	// events changed the activation state. An uncertain earlier begin remains
+	// safe: the durable consumer lease makes the fresh call return wait (or
+	// reconcile after expiry), never a second blind dispatch.
+	beginKey := uuid.NewString()
+	if err := s.postJSON(ctx, "/v1/listener-activations/"+ensured.Activation.ID.String()+"/begin", map[string]any{
+		"consumer_generation": s.activationConsumerGeneration,
+	}, beginKey, &begun); err != nil {
+		return activationView{}, "", fmt.Errorf("listener: begin activation: %w", err)
+	}
+	return begun.Activation, begun.Action, nil
+}
+
+type activationAdapterReceipt struct {
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason"`
+}
+
+var activationReceiptReasons = map[string]bool{
+	"turn_admitted":               true,
+	"reconciled_in_progress_turn": true,
+	"reconciled_completed_turn":   true,
+	"reconciled_terminal_turn":    true,
+	"turn_completed":              true,
+	"turn_terminal_failure":       true,
+}
+
+// runActivationAdapter invokes one configured executable directly (never via
+// a shell), with IDs only. The process receives no Meristem bearer or database
+// URL. Its stdout is a tiny structural JSON-lines receipt protocol; arbitrary
+// text is neither logged nor persisted.
+func (s *listenerSupervisor) runActivationAdapter(ctx context.Context, activation activationView, action string) error {
+	args := append([]string(nil), s.activationArgs...)
+	args = append(args,
+		"--activation-id", activation.ID.String(),
+		"--assignment-event-id", activation.AssignmentEventID.String(),
+		"--mode", action,
+	)
+	cmd := exec.CommandContext(ctx, s.activationAdapter, args...)
+	cmd.Env = activationAdapterEnvironment()
+	cmd.Stderr = io.Discard
+	// Give an adapter (notably the Codex adapter, which owns an app-server
+	// process group) a bounded graceful cleanup window before CommandContext
+	// escalates to a hard kill.
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = 5 * time.Second
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("listener: activation adapter stdout: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return s.recordSyntheticActivationReceipt(ctx, activation, "failed", "adapter_start_failed")
+	}
+	current := activation
+	accepted := false
+	terminal := false
+	protocolInvalid := false
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	for scanner.Scan() {
+		var receipt activationAdapterReceipt
+		if err := json.Unmarshal(scanner.Bytes(), &receipt); err != nil || !activationReceiptReasons[receipt.Reason] {
+			protocolInvalid = true
+			_ = cmd.Cancel()
+			break
+		}
+		switch receipt.Outcome {
+		case "accepted":
+			if accepted || terminal {
+				protocolInvalid = true
+				_ = cmd.Cancel()
+				break
+			}
+			accepted = true
+		case "completed", "failed":
+			if terminal || (action == "dispatch" && !accepted) {
+				protocolInvalid = true
+				_ = cmd.Cancel()
+				break
+			}
+			terminal = true
+		default:
+			protocolInvalid = true
+			_ = cmd.Cancel()
+			break
+		}
+		if protocolInvalid {
+			break
+		}
+		updated, err := s.recordActivationReceipt(ctx, current, receipt.Outcome, receipt.Reason)
+		if err != nil {
+			_ = cmd.Cancel()
+			_ = waitActivationAdapter(cmd, true)
+			return err
+		}
+		current = updated
+		if terminal {
+			// A terminal receipt is the complete protocol. Stop reading so an
+			// adapter cannot keep this single activation attempt alive forever;
+			// SIGINT lets it clean up any child transport before the bounded kill.
+			_ = cmd.Cancel()
+			break
+		}
+	}
+	waitErr := waitActivationAdapter(cmd, terminal || protocolInvalid)
+	if terminal {
+		return nil
+	}
+	outcome := "ambiguous"
+	reason := "adapter_outcome_ambiguous"
+	if action == "reconcile" || accepted || protocolInvalid || scanner.Err() != nil {
+	} else if waitErr == nil {
+		reason = "adapter_protocol_invalid"
+	} else if exitErr, ok := waitErr.(*exec.ExitError); ok && (exitErr.ExitCode() == 64 || exitErr.ExitCode() == 75) {
+		// The adapter contract reserves these exits for validation or a
+		// transient failure before admission. Every other receipt-free exit
+		// (including signals) is uncertain and must reconcile, never retry.
+		outcome = "failed"
+		reason = "adapter_retryable_failure"
+	}
+	return s.recordSyntheticActivationReceipt(ctx, current, outcome, reason)
+}
+
+func waitActivationAdapter(cmd *exec.Cmd, bounded bool) error {
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+	if !bounded {
+		return <-wait
+	}
+	select {
+	case err := <-wait:
+		return err
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		return <-wait
+	}
+}
+
+func (s *listenerSupervisor) recordSyntheticActivationReceipt(ctx context.Context, activation activationView, outcome, reason string) error {
+	_, err := s.recordActivationReceipt(ctx, activation, outcome, reason)
+	return err
+}
+
+func (s *listenerSupervisor) recordActivationReceipt(ctx context.Context, activation activationView, outcome, reason string) (activationView, error) {
+	var response struct {
+		Activation activationView `json:"activation"`
+	}
+	key := activationIdempotencyKey("receipt", activation.ID.String(), activation.StateEventID.String(), outcome)
+	err := s.postJSON(ctx, "/v1/listener-activations/"+activation.ID.String()+"/receipts", map[string]any{
+		"observed_state_event_id": activation.StateEventID,
+		"consumer_generation":     s.activationConsumerGeneration,
+		"outcome":                 outcome,
+		"reason":                  reason,
+	}, key, &response)
+	if err != nil {
+		return activationView{}, fmt.Errorf("listener: record activation %s: %w", outcome, err)
+	}
+	return response.Activation, nil
+}
+
+func (s *listenerSupervisor) postJSON(ctx context.Context, path string, payload any, idempotencyKey string, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.api+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", idempotencyKey)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return newAPIRequestError(resp.StatusCode, raw)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return err
+	}
+	return nil
+}
+
+func activationIdempotencyKey(parts ...string) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("meristem|listener_activation_http|"+strings.Join(parts, "|"))).String()
+}
+
+func activationAdapterEnvironment() []string {
+	allowed := []string{
+		"HOME", "PATH", "TMPDIR", "SHELL", "USER", "LOGNAME", "LANG",
+		"LC_ALL", "LC_CTYPE", "TERM", "CODEX_HOME", "CODEX_CI",
+		"CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_SANDBOX",
+		"CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_SHELL",
+		"CODEX_MERISTEM_TOKEN_FILE", "XDG_CONFIG_HOME", "SSL_CERT_FILE",
+		"SSL_CERT_DIR", "XPC_FLAGS", "XPC_SERVICE_NAME",
+		"__CFBundleIdentifier", "__CF_USER_TEXT_ENCODING",
+	}
+	env := make([]string, 0, len(allowed)+3)
+	for _, key := range allowed {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	if os.Getenv("PATH") == "" {
+		env = append(env, "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	}
+	return append(env, "RUST_LOG=error", "RUST_BACKTRACE=0", "NO_COLOR=1")
 }
 
 // assignmentReleased reads the durable projection: the generation is released

@@ -27,6 +27,9 @@ func (s *Server) listenerTools() []Tool {
 		s.toolListenersBindCredential(),
 		s.toolListenersRetire(),
 		s.toolListenersClaim(),
+		s.toolListenersEnsureActivation(),
+		s.toolListenerActivationsBegin(),
+		s.toolListenerActivationsRecordReceipt(),
 	}
 }
 

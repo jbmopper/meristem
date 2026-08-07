@@ -63,6 +63,13 @@ These are how the principles above are made true in code. They are non-optional 
 - **`approval`** — a gated decision required before a write action proceeds. v1 only.
 - **`connection`** — a configured integration to an external system. v1 only.
 - **`artifact`** — a persisted output (log, transcript, patch, screenshot). v1 only.
+- **`listener`** — a durable, stable client endpoint with a current principal,
+  capability policy, and at most one active assignment in the first release;
+  it is not an agent persona or a bearer-token address.
+- **`listener_activation`** — the event-backed, assignment-generation-bound
+  delivery ledger for one external adapter attempt. External contact follows a
+  finite dispatch lease; uncertainty reconciles by deterministic external
+  message id and is never blindly resubmitted.
 - **`idempotency_key`** — a `(token, scope, key)` entry used to dedupe POSTs across a 24-hour window.
 
 ## Repository layout
@@ -82,6 +89,8 @@ internal/inbox/       message capture
 internal/workitems/   lifecycle, transitions, relations
 internal/feed/        chronological projection
 internal/signals/     non-human structured input → work_items (see docs/signals.md)
+internal/listeners/   stable registration, policy, demand eligibility, and claims
+internal/listeneractivation/ event-backed adapter dispatch/reconcile ledger
 internal/safety/      deterministic resource limits (request bodies, feed wait, patience budgets)
 internal/storage/     pgx pool + migration runner
 internal/worker/      bounded-patience scan kernel (v1)
@@ -162,6 +171,12 @@ A projection writer turns appended events into derived rows. It is the *only* co
   assigned-only listener remains bounded by its `work_items.tree:<uuid>` scope,
   gains none of the target token's writes, and receives a distinct
   filter-bound cursor for each watched identity.
+- Listener activation mutations (`listeners.ensure_activation`,
+  `listener_activations.begin`, `listener_activations.record_receipt`) require
+  ordinary assignment-write visibility plus the current registration
+  principal and exact active assignment generation. The adapter boundary
+  carries activation/assignment ids and allowlisted structural receipts only;
+  expired or uncertain dispatch is reconcile-only and never blindly retried.
 - Provider OAuth actors use one exact versioned authority marker plus its
   sealed scopes. Owner profiles may read the portfolio-wide provider-safe
   work-item/feed projections; delegated profiles remain tree-scoped. Tracker

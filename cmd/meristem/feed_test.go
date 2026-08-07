@@ -261,6 +261,46 @@ func TestResolveFeedTokenEnvWins(t *testing.T) {
 	}
 }
 
+func TestResolveFeedTokenExplicitFileWinsAndFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	wln := filepath.Join(dir, ".meristem")
+	if err := os.MkdirAll(wln, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wln, "root.token"), []byte("fallback-root"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	explicit := filepath.Join(dir, "listener.token")
+	if err := os.WriteFile(explicit, []byte("listener-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withCwd(t, dir)
+	t.Setenv("MERISTEM_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN_FILE", explicit)
+
+	tok, src, err := resolveFeedToken()
+	if err != nil {
+		t.Fatalf("resolve explicit token file: %v", err)
+	}
+	if tok != "listener-token" || src != explicit {
+		t.Fatalf("explicit token = %q from %q", tok, src)
+	}
+
+	if err := os.Chmod(explicit, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolveFeedToken(); err == nil || !strings.Contains(err.Error(), "mode-0600") {
+		t.Fatalf("unsafe explicit file should fail without fallback, got %v", err)
+	}
+	if err := os.Chmod(explicit, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MERISTEM_TOKEN_FILE", "relative.token")
+	if _, _, err := resolveFeedToken(); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative explicit file should fail, got %v", err)
+	}
+}
+
 // TestResolveFeedTokenWalksUp pins the walk-upward discovery: a .meristem/
 // at the project root is found from a deep subdirectory.
 func TestResolveFeedTokenWalksUp(t *testing.T) {
@@ -278,6 +318,7 @@ func TestResolveFeedTokenWalksUp(t *testing.T) {
 	}
 	withCwd(t, deep)
 	t.Setenv("MERISTEM_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN_FILE", "")
 
 	tok, src, err := resolveFeedToken()
 	if err != nil {
@@ -307,6 +348,7 @@ func TestResolveFeedTokenPriorityOrder(t *testing.T) {
 	}
 	withCwd(t, dir)
 	t.Setenv("MERISTEM_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN_FILE", "")
 
 	tok, _, err := resolveFeedToken()
 	if err != nil {
@@ -334,6 +376,7 @@ func TestResolveFeedTokenFallsThroughEmptyFiles(t *testing.T) {
 	}
 	withCwd(t, dir)
 	t.Setenv("MERISTEM_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN_FILE", "")
 
 	tok, _, err := resolveFeedToken()
 	if err != nil {
@@ -351,6 +394,7 @@ func TestResolveFeedTokenNoSources(t *testing.T) {
 	dir := t.TempDir()
 	withCwd(t, dir)
 	t.Setenv("MERISTEM_TOKEN", "")
+	t.Setenv("MERISTEM_TOKEN_FILE", "")
 
 	_, _, err := resolveFeedToken()
 	if err == nil {

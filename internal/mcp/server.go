@@ -26,6 +26,7 @@ import (
 	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/listeneractivation"
 	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
@@ -56,6 +57,7 @@ type Deps struct {
 	OAuthClientAdmin    *oauth.ClientAdminService
 	WorkItems           *workitems.Service
 	Listeners           *listeners.Service
+	ListenerActivations *listeneractivation.Service
 	Approvals           *approvals.Service
 	HTTPConnector       *httpconnector.Service
 	CheckProposals      *convergence.ChecksProposalService
