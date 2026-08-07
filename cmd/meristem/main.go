@@ -90,10 +90,14 @@ func main() {
 		err = runSpoke(ctx, logger, args, processBuild)
 	case "feed":
 		err = runFeed(ctx, logger, args)
+	case "listener":
+		err = runListener(ctx, logger, args)
 	case "safety":
 		err = runSafety(ctx, logger, args)
 	case "git":
 		err = runGit(ctx, logger, args)
+	case "status":
+		err = runStatus(ctx, logger, args, processBuild)
 	case "version", "--version", "-v":
 		err = runVersion(os.Stdout, args, processBuild)
 	case "build-guard-status":
@@ -172,9 +176,11 @@ usage:
   meristem worker --once     run one deterministic reconciler tick
   meristem spoke             run the pull-only outbound poll loop (drains the hub command queue; reads MERISTEM_HUB_URL/NODE_ID/HUB_TOKEN/TOKEN)
   meristem feed [--watch]    human-readable terminal view of the activity log
+  meristem listener --name X run the idle/focused supervisor for a registered listener address
   meristem export-context    deterministically materialize an allow/deny repo slice (operator-side; no API calls)
   meristem safety check      validate deterministic resource-safety controls
   meristem healthcheck       probe /readyz; exit 0 if healthy (for Docker HEALTHCHECK)
+  meristem status            non-mutating runtime evidence: build guard, database head, assignment state (--work-item)
   meristem version [--commit] print release label or exact compiled guard commit
   meristem build-guard-status print the machine-readable launcher guard protocol
   meristem help              show this message

@@ -18,6 +18,7 @@ import (
 	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
@@ -61,6 +62,7 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string, build buildgua
 		Inbox:               inbox.NewService(pool, writer),
 		OAuthClientAdmin:    oauth.NewClientAdminService(pool, writer),
 		WorkItems:           workitems.NewService(pool, writer),
+		Listeners:           listeners.NewService(pool, writer),
 		Approvals:           approvalSvc,
 		HTTPConnector:       httpconnector.NewService(pool, writer, approvalSvc, nil),
 		CheckProposals:      convergence.NewChecksProposalService(pool, writer),

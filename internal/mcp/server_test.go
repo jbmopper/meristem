@@ -46,6 +46,24 @@ func newTestServer(t *testing.T) *Server {
 	return s
 }
 
+// fullCatalogScopes makes the test actor see EVERY advertised tool via
+// explicit scopes. The legacy-unscoped shortcut no longer covers listener
+// administration — that surface is CanAdminListeners exactly — so the
+// full-catalog golden authenticates a maximally scoped human instead.
+func fullCatalogScopes() []string {
+	return []string{
+		access.ScopePolicyProfileSwitch,
+		access.ScopeInboxCapture,
+		access.ScopeFeedRead,
+		access.ScopeWorkItemsReadAll,
+		access.ScopeWorkItemsWriteAll,
+		access.ScopeRegistryWrite,
+		access.ScopeApprovalsDecide,
+		access.ScopeListenersAdmin,
+		"logs.read",
+	}
+}
+
 // This test previously codified the pre-2026 echo-any-version behavior
 // (2024-11-05 was echoed back). The 2026-core consensus replaces echo with
 // negotiation: an unsupported proposal is answered with a supported version,
@@ -323,6 +341,7 @@ func TestServer_Run_AcceptsMultilineJSON(t *testing.T) {
 
 func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 	s := newTestServer(t)
+	s.actor.Scopes = fullCatalogScopes()
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if resp.Error != nil {
 		t.Fatalf("tools/list returned error: %+v", resp.Error)
@@ -362,6 +381,17 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 		"convergence.propose_checks",
 		"work_items.update_metadata",
 		"work_items.transition",
+		"work_items.claim",
+		"work_items.get_assignment",
+		"work_items.held_assignments",
+		"work_items.yield",
+		"listeners.create",
+		"listeners.list",
+		"listeners.get",
+		"listeners.set_policy",
+		"listeners.bind_credential",
+		"listeners.retire",
+		"listeners.claim",
 	}
 	if len(result.Tools) != len(expected) {
 		t.Fatalf("expected %d tools, got %d (%v)", len(expected), len(result.Tools), toolNames(result.Tools))
@@ -387,6 +417,7 @@ func TestServer_ToolsList_AdvertisesAllTools(t *testing.T) {
 
 func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	s := newTestServer(t)
+	s.actor.Scopes = fullCatalogScopes()
 	s.SetToolNameMode(ToolNameModeCursor)
 	resp := roundtrip(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if resp.Error != nil {
@@ -427,6 +458,17 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 		"convergence_propose_checks",
 		"work_items_update_metadata",
 		"work_items_transition",
+		"work_items_claim",
+		"work_items_get_assignment",
+		"work_items_held_assignments",
+		"work_items_yield",
+		"listeners_create",
+		"listeners_list",
+		"listeners_get",
+		"listeners_set_policy",
+		"listeners_bind_credential",
+		"listeners_retire",
+		"listeners_claim",
 	}
 	if len(result.Tools) != len(expected) {
 		t.Fatalf("expected %d tools, got %d (%v)", len(expected), len(result.Tools), toolNames(result.Tools))
@@ -469,6 +511,13 @@ func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 		"convergence.propose_checks": true,
 		"work_items.update_metadata": true,
 		"work_items.transition":      true,
+		"work_items.claim":           true,
+		"work_items.yield":           true,
+		"listeners.create":           true,
+		"listeners.set_policy":       true,
+		"listeners.bind_credential":  true,
+		"listeners.retire":           true,
+		"listeners.claim":            true,
 	}
 	for _, tool := range s.tools {
 		required := schemaRequiredSet(tool.InputSchema)

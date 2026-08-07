@@ -36,6 +36,7 @@ import (
 	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/mcp"
 	"github.com/jbmopper/meristem/internal/nodes"
 	"github.com/jbmopper/meristem/internal/oauth"
@@ -97,6 +98,7 @@ type Server struct {
 	inbox                 *inbox.Service
 	signals               *signals.Service
 	workItems             *workitems.Service
+	listeners             *listeners.Service
 	access                *access.Service
 	escalations           *escalations.Service
 	approvals             *approvals.Service
@@ -179,6 +181,7 @@ func NewWithPolicyAndBuildGuard(pool *pgxpool.Pool, logger *slog.Logger, policy 
 		s.inbox = inbox.NewService(pool, s.writer)
 		s.signals = signals.NewService(pool, s.writer)
 		s.workItems = workitems.NewService(pool, s.writer)
+		s.listeners = listeners.NewService(pool, s.writer)
 		s.access = access.NewService(pool)
 		s.escalations = escalations.NewService(pool, s.writer)
 		s.approvals = approvals.NewService(pool, s.writer)
@@ -212,6 +215,7 @@ func NewWithPolicyAndBuildGuard(pool *pgxpool.Pool, logger *slog.Logger, policy 
 			Inbox:               s.inbox,
 			OAuthClientAdmin:    s.oauthClientAdmin,
 			WorkItems:           s.workItems,
+			Listeners:           s.listeners,
 			Approvals:           s.approvals,
 			HTTPConnector:       s.httpConnector,
 			CheckProposals:      s.checkProposals,
@@ -540,6 +544,19 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /v1/work-items/{id}/cultivar-activations", s.commandWithAccess(s.canWriteWorkItemPath("registry.activate_cultivar"), http.HandlerFunc(s.handleActivateCultivar)))
 	s.mux.Handle("POST /v1/work-items/{id}/metadata", s.commandWithAccess(s.canWriteWorkItemPath("work_items.update_metadata"), http.HandlerFunc(s.handleUpdateWorkItemMetadata)))
 	s.mux.Handle("POST /v1/work-items/{id}/transition", s.commandWithAccess(s.canWriteWorkItemPath("work_items.transition"), http.HandlerFunc(s.handleTransitionWorkItem)))
+	s.mux.Handle("POST /v1/work-items/{id}/claim", s.commandWithAccess(s.canWriteWorkItemPath("work_items.claim"), http.HandlerFunc(s.handleClaimWorkItem)))
+	s.mux.Handle("GET /v1/work-items/{id}/assignment", s.protected(http.HandlerFunc(s.handleGetWorkItemAssignment)))
+	s.mux.Handle("GET /v1/assignments/held", s.protected(http.HandlerFunc(s.handleListHeldAssignments)))
+	s.mux.Handle("POST /v1/work-items/{id}/yield", s.commandWithAccess(s.canWriteWorkItemPath("work_items.yield"), http.HandlerFunc(s.handleYieldWorkItem)))
+	s.mux.Handle("POST /v1/listeners", s.commandWithAccess(s.canUseListenerTool("listeners.create"), http.HandlerFunc(s.handleCreateListener)))
+	s.mux.Handle("GET /v1/listeners", s.protected(http.HandlerFunc(s.handleListListeners)))
+	s.mux.Handle("GET /v1/listeners/{id}", s.protected(http.HandlerFunc(s.handleGetListener)))
+	s.mux.Handle("GET /v1/listeners/by-name/{name}", s.protected(http.HandlerFunc(s.handleGetListenerByName)))
+	s.mux.Handle("GET /v1/listeners/{id}/demand/candidates", s.protected(http.HandlerFunc(s.handleListDemandCandidates)))
+	s.mux.Handle("POST /v1/listeners/{id}/claim", s.commandWithAccess(s.canUseListenerTool("listeners.claim"), http.HandlerFunc(s.handleClaimListenerDemand)))
+	s.mux.Handle("POST /v1/listeners/{id}/policy", s.commandWithAccess(s.canUseListenerTool("listeners.set_policy"), http.HandlerFunc(s.handleSetListenerPolicy)))
+	s.mux.Handle("POST /v1/listeners/{id}/credential-bindings", s.commandWithAccess(s.canUseListenerTool("listeners.bind_credential"), http.HandlerFunc(s.handleBindListenerCredential)))
+	s.mux.Handle("POST /v1/listeners/{id}/retire", s.commandWithAccess(s.canUseListenerTool("listeners.retire"), http.HandlerFunc(s.handleRetireListener)))
 }
 
 func (s *Server) protected(next http.Handler) http.Handler {

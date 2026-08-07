@@ -135,20 +135,36 @@ func (w *Worker) appendDispatch(ctx context.Context, candidate dispatchCandidate
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Routing metadata for the listener demand envelope: the demanded
+	// capability (the cultivar names the worker profile being requested) and
+	// the ORIGINATING principal — the last non-system principal that advanced
+	// this item, falling back to its creator. Listener resolution reads these
+	// from the durable event and never trusts caller-supplied routing fields,
+	// so "listen to Fable" matches Fable-originated demand even though this
+	// event itself is system-authored.
+	payload := map[string]any{
+		"work_item_id":           candidate.ID,
+		"state":                  candidate.State,
+		"state_entered_at_unix":  candidate.StateEnteredAt.Unix(),
+		"cultivar":               cultivar,
+		"capability":             cultivar,
+		"reason":                 reason,
+		"source_reconciler_pass": "dispatch",
+	}
+	origin, err := dispatchOrigin(ctx, tx, candidate.ID)
+	if err != nil {
+		return false, err
+	}
+	if origin != uuid.Nil {
+		payload["origin_token_id"] = origin
+	}
 	_, fresh, err := w.writer.Append(ctx, tx, events.Spec{
 		SubjectKind:  domain.SubjectWorkItem,
 		SubjectID:    candidate.ID,
 		Kind:         domain.EventDispatchRequested,
 		Source:       domain.SourceSystem,
 		ActorTokenID: w.actor,
-		Payload: map[string]any{
-			"work_item_id":           candidate.ID,
-			"state":                  candidate.State,
-			"state_entered_at_unix":  candidate.StateEnteredAt.Unix(),
-			"cultivar":               cultivar,
-			"reason":                 reason,
-			"source_reconciler_pass": "dispatch",
-		},
+		Payload:      payload,
 	})
 	if err != nil {
 		return false, err
@@ -157,6 +173,29 @@ func (w *Worker) appendDispatch(ctx context.Context, candidate dispatchCandidate
 		return false, err
 	}
 	return fresh, nil
+}
+
+// dispatchOrigin reduces the demand's originating principal from the event
+// log: the most recent human- or agent-authored event on the item (its
+// current effective author), else the item's creator. uuid.Nil when neither
+// exists; listener resolution fails closed on such demand.
+func dispatchOrigin(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID) (uuid.UUID, error) {
+	var origin *uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(
+			(SELECT actor_token_id FROM events
+			 WHERE subject_kind = $1 AND subject_id = $2
+			   AND source <> $3 AND actor_token_id IS NOT NULL
+			 ORDER BY seq DESC LIMIT 1),
+			(SELECT created_by FROM work_items WHERE id = $2)
+		)`, domain.SubjectWorkItem, workItemID, domain.SourceSystem).Scan(&origin)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("resolve dispatch origin: %w", err)
+	}
+	if origin == nil {
+		return uuid.Nil, nil
+	}
+	return *origin, nil
 }
 
 func shouldRoutePatienceBreachToDispatch(b Breach) bool {
