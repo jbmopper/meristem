@@ -46,8 +46,8 @@ var (
 	// human-review block or asserting approved review requires one explicit
 	// non-root human authority.
 	ErrHumanReviewDecisionDenied = errors.New("workitems: human review decision requires an active non-root human token with work_items.review_decide")
-	// ErrHumanReviewBlocked prevents a completion claim from terminalizing an
-	// item that still waits on its human-review gate.
+	// ErrHumanReviewBlocked prevents completed creation or a completion claim
+	// from terminalizing an item that still waits on its human-review gate.
 	ErrHumanReviewBlocked = errors.New("workitems: human review is blocked")
 	// ErrUnexpectedEventDedupe is returned when a first-attempt mutation's
 	// event collides with an existing row while NOT running under the
@@ -107,6 +107,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (domain.WorkItem, 
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
+	if state == domain.WorkItemDone && humanReview == domain.HumanReviewBlocked {
+		return domain.WorkItem{}, ErrHumanReviewBlocked
+	}
 	if humanReview == domain.HumanReviewApproved && !access.CanDecideHumanReview(in.Actor) {
 		return domain.WorkItem{}, ErrHumanReviewDecisionDenied
 	}
@@ -163,6 +166,9 @@ func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.U
 	humanReview, err := normalizeHumanReviewStatus(in.HumanReviewStatus)
 	if err != nil {
 		return domain.WorkItem{}, false, err
+	}
+	if state == domain.WorkItemDone && humanReview == domain.HumanReviewBlocked {
+		return domain.WorkItem{}, false, ErrHumanReviewBlocked
 	}
 	if humanReview == domain.HumanReviewApproved && !access.CanDecideHumanReview(in.Actor) {
 		return domain.WorkItem{}, false, ErrHumanReviewDecisionDenied

@@ -114,7 +114,11 @@ func (s *AuthorizationService) Begin(ctx context.Context, in AuthorizationInput)
 	if !ok {
 		return AuthorizationRequest{}, errors.New("oauth: deterministic authorization identity unavailable")
 	}
-	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "OAuth access request: " + client.ClientID, Body: fmt.Sprintf("UNTRUSTED self-asserted client name: %q. Selected redirect: %s. Registered redirects: %s. Bound actor: %s. Sealed profile: %s. Effective scopes: %s. Resource: %s.", client.ClientName, in.RedirectURI, strings.Join(client.RedirectURIs, ", "), providerActor.ID, client.AuthorityProfile, strings.Join(providerActor.Scopes, ", "), in.Resource), Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewBlocked, PatienceBudgetSeconds: int(AuthorizationRequestTTL.Seconds()), EscalationRule: domain.EscalationRuleHandToHuman})
+	// The approval row and awaiting_approval lifecycle state are the human gate
+	// for this external side effect. human_review_status is a separate review
+	// mechanism and must not be used as a second, uncleared gate that the OAuth
+	// continuation later bypasses when it records successful completion.
+	item, err := s.workItems.Create(ctx, workitems.CreateInput{Title: "OAuth access request: " + client.ClientID, Body: fmt.Sprintf("UNTRUSTED self-asserted client name: %q. Selected redirect: %s. Registered redirects: %s. Bound actor: %s. Sealed profile: %s. Effective scopes: %s. Resource: %s.", client.ClientName, in.RedirectURI, strings.Join(client.RedirectURIs, ", "), providerActor.ID, client.AuthorityProfile, strings.Join(providerActor.Scopes, ", "), in.Resource), Actor: systemActor, State: domain.WorkItemCaptured, HumanReviewStatus: domain.HumanReviewWavedThrough, PatienceBudgetSeconds: int(AuthorizationRequestTTL.Seconds()), EscalationRule: domain.EscalationRuleHandToHuman})
 	if err != nil {
 		return AuthorizationRequest{}, err
 	}

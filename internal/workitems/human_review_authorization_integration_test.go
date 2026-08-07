@@ -58,6 +58,16 @@ func TestHumanReviewDecisionsRequireExplicitScopedHumanBeforeAppend(t *testing.T
 	rootWithScope.Scopes = []string{access.ScopeWorkItemsReviewDecide}
 
 	svc := NewService(pool, writer)
+	beforeCreate := countWorkItemKind(t, ctx, pool, uuid.Nil, domain.EventWorkItemCreated)
+	if _, err := svc.Create(ctx, CreateInput{
+		Title: "blocked terminal creation", State: domain.WorkItemDone,
+		HumanReviewStatus: domain.HumanReviewBlocked, Actor: root,
+	}); !errors.Is(err, ErrHumanReviewBlocked) {
+		t.Fatalf("blocked terminal creation error = %v, want ErrHumanReviewBlocked", err)
+	}
+	if after := countWorkItemKind(t, ctx, pool, uuid.Nil, domain.EventWorkItemCreated); after != beforeCreate {
+		t.Fatalf("blocked terminal creation appended event: before=%d after=%d", beforeCreate, after)
+	}
 	item, err := svc.Create(ctx, CreateInput{Title: "review-gated", HumanReviewStatus: domain.HumanReviewBlocked, Actor: root})
 	if err != nil {
 		t.Fatalf("create blocked item: %v", err)
@@ -211,6 +221,33 @@ func TestHistoricalUnauthorizedReviewEventRemainsButProjectsBlocked(t *testing.T
 	if after := countWorkItemKind(t, ctx, pool, item.ID, domain.EventWorkItemTransitioned); after != beforeTransitions {
 		t.Fatalf("blocked completion appended event: before=%d after=%d", beforeTransitions, after)
 	}
+
+	tx, err = pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin direct transition append: %v", err)
+	}
+	_, _, err = writer.Append(ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    item.ID,
+		Kind:         domain.EventWorkItemTransitioned,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &agentResult.Token.ID,
+		Payload: map[string]any{
+			"from":   item.State,
+			"to":     domain.WorkItemDone,
+			"reason": "internal producer bypass attempt",
+		},
+	})
+	if err == nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal("direct transition append completed blocked work item")
+	}
+	if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+		t.Fatalf("roll back rejected direct transition: %v", rollbackErr)
+	}
+	if after := countWorkItemKind(t, ctx, pool, item.ID, domain.EventWorkItemTransitioned); after != beforeTransitions {
+		t.Fatalf("rejected direct completion left an event: before=%d after=%d", beforeTransitions, after)
+	}
 }
 
 func countHumanReviewEvents(t *testing.T, ctx context.Context, pool interface {
@@ -225,7 +262,13 @@ func countWorkItemKind(t *testing.T, ctx context.Context, pool interface {
 }, id uuid.UUID, kind string) int {
 	t.Helper()
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE subject_id=$1 AND kind=$2`, id, kind).Scan(&count); err != nil {
+	query := `SELECT count(*) FROM events WHERE subject_id=$1 AND kind=$2`
+	args := []any{id, kind}
+	if id == uuid.Nil {
+		query = `SELECT count(*) FROM events WHERE kind=$1`
+		args = []any{kind}
+	}
+	if err := pool.QueryRow(ctx, query, args...).Scan(&count); err != nil {
 		t.Fatalf("count %s: %v", kind, err)
 	}
 	return count

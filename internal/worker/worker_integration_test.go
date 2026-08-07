@@ -1071,11 +1071,19 @@ func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
 		Title:                      "blocked implementation",
 		State:                      domain.WorkItemDone,
 		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
-		HumanReviewStatus:          domain.HumanReviewBlocked,
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
 		Actor:                      systemTok.Token,
 	})
 	if err != nil {
 		t.Fatalf("create blocked item: %v", err)
+	}
+	blocked, err = service.UpdateMetadata(ctx, blocked.ID, workitems.UpdateMetadataInput{
+		SuggestedConvergenceChecks: blocked.SuggestedConvergenceChecks,
+		HumanReviewStatus:          domain.HumanReviewBlocked,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("block completed item after terminalization: %v", err)
 	}
 	if err := service.AppendEvent(ctx, blocked.ID, "coordination.implementation_ready", map[string]any{
 		"commits": []string{"def5678"},

@@ -58,6 +58,9 @@ func (createdProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event
 	if err != nil {
 		return err
 	}
+	if domain.WorkItemState(state) == domain.WorkItemDone && humanReview == domain.HumanReviewBlocked {
+		return fmt.Errorf("work_item.created: cannot create completed work while human review is blocked")
+	}
 	if humanReview == domain.HumanReviewApproved {
 		authorized, err := access.CanDecideHumanReviewEvent(ctx, tx, event)
 		if err != nil {
@@ -138,6 +141,20 @@ func (transitionedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 	to := domain.WorkItemState(payload.To)
 	if !domain.CanTransition(effectiveFrom, to) {
 		return fmt.Errorf("work_item.transitioned: invalid transition from %s to %s", effectiveFrom, to)
+	}
+	if to == domain.WorkItemDone {
+		var humanReview domain.HumanReviewStatus
+		if err := tx.QueryRow(ctx, `
+			SELECT human_review_status
+			FROM work_items
+			WHERE id = $1
+			FOR UPDATE
+		`, event.SubjectID).Scan(&humanReview); err != nil {
+			return fmt.Errorf("work_item.transitioned: read human-review gate: %w", err)
+		}
+		if humanReview == domain.HumanReviewBlocked {
+			return fmt.Errorf("work_item.transitioned: cannot complete while human review is blocked")
+		}
 	}
 	_, err = tx.Exec(ctx, `
 		UPDATE work_items

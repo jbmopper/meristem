@@ -88,6 +88,38 @@ and published through the shared-build guard, run the generic listener beside
 the API and worker. The listener bearer belongs in one absolute mode-0600 file;
 the awakened Codex task keeps its separate MCP credential file.
 
+The first deployment has no listener projection until migrations 0037-0039
+and the matching API binary are live. Bootstrap the stable address before
+starting the supervisor. Registration and the initial broad policy require an
+active non-root human credential with the exact `listeners.admin` scope; the
+root credential may mint that administrator but cannot perform these calls.
+The `principal_token_id` names the bearer stored in the listener token file,
+not the administrator.
+
+```bash
+export LISTENER_ADMIN_TOKEN=<scoped-non-root-human-bearer>
+export LISTENER_PRINCIPAL_ID=<uuid-of-listener-principal-token>
+
+curl -fsS -X POST \
+  -H "Authorization: Bearer $LISTENER_ADMIN_TOKEN" \
+  -H 'Idempotency-Key: register-codex-review-v1' \
+  -H 'Content-Type: application/json' \
+  http://127.0.0.1:8080/v1/listeners \
+  -d "{\"name\":\"codex-review\",\"principal_token_id\":\"$LISTENER_PRINCIPAL_ID\",\"provider\":\"codex\",\"capabilities\":[\"review.complementary\",\"review.exact_artifact\"]}"
+
+export LISTENER_ID=<id-from-registration-response>
+curl -fsS -X POST \
+  -H "Authorization: Bearer $LISTENER_ADMIN_TOKEN" \
+  -H 'Idempotency-Key: initialize-codex-review-policy-v1' \
+  -H 'Content-Type: application/json' \
+  "http://127.0.0.1:8080/v1/listeners/$LISTENER_ID/policy" \
+  -d '{"policy":{"predicates":[],"capabilities":["review.complementary","review.exact_artifact"],"max_concurrent_assignments":1,"focus":"claimed_work_item_tree"}}'
+```
+
+An empty predicate list means all eligible demand for those registered
+capabilities. A narrower actor or work-item-tree policy is a complete
+replacement and must carry the currently observed `policy_event_id`.
+
 ```bash
 BIN=.meristem/generated/meristem-bin
 export MERISTEM_TOKEN_FILE=/absolute/path/to/listener-principal.token
