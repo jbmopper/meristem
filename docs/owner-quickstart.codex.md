@@ -12,9 +12,9 @@ export BIN="${BIN:-go run ./cmd/meristem}"
 scripts/bootstrap.sh
 scripts/prepare-agent-worktree.sh --target codex
 scripts/prepare-agent-worktree.sh --target claude-code-gui
-MERISTEM_DATABASE_URL="$MERISTEM_DATABASE_URL" \
-  scripts/provision-assistant-access.sh --targets codex,claude-code-gui --print-remote
-# -> .meristem/*.token plus secret-free wrappers under .meristem/generated/
+scripts/provision-assistant-access.sh --generate-http --print-remote
+# -> secret-free Codex/Claude/Cursor HTTP candidates under .meristem/generated/
+# The no-mode invocation remains the development/rollback stdio generator.
 ```
 
 ## 2. Start or verify the API

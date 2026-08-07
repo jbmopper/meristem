@@ -17,38 +17,40 @@ export MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/merist
 BIN=.meristem/generated/meristem-bin
 ```
 
-## 1. Per-agent worktrees (human-ack on worktree discipline)
+## 1. Per-agent worktrees and HTTP MCP candidates
 
 Agents must not share the primary checkout. See [`agent-worktrees.md`](agent-worktrees.md).
 
 ```bash
-for t in codex claude-code-gui; do
+for t in codex claude-code cursor; do
   scripts/prepare-agent-worktree.sh --target "$t"
 done                                   # -> target/worktree/branch/base per target
-scripts/provision-assistant-access.sh --targets codex,claude-code-gui --print-remote
-# Optional Cursor local MCP:
-# scripts/prepare-agent-worktree.sh --target cursor-mcp
-# If .meristem/cursor-mcp.token is missing, mint it with root:
-# MERISTEM_TOKEN="$(tr -d '\n' < .meristem/root.token)" "$BIN" tokens create --name cursor-mcp --source agent
-# Store the printed secret in .meristem/cursor-mcp.token mode 0600.
-# Point Cursor at scripts/cursor-mcp-command.sh; it uses ../meristem-cursor-mcp.
+scripts/provision-assistant-access.sh --generate-http --print-remote
 ```
-Then relaunch each agent so it picks up its wrapper. Every wrapper and the API
-server exec one shared artifact (`$BIN`); rebuild it only from a clean `v1`
-checkout with `scripts/rebuild-meristem-bin.sh` (it refuses a dirty tree or a
-non-`v1` HEAD; `--force` is limited to an explicit alternate output that cannot
-present itself as current). One rebuild covers the API server and all wrappers.
-For the first guarded rollout, drain/stop the API and worker and close all
-write-capable MCP sessions before publishing, then restart everything and
-verify `/readyz` plus MCP `initialize` report the current build (work item
-`835e0dbf`). After that bootstrap, guarded MCP sessions keep their old process
-until restart but refuse authoritative work at their next pin boundary.
+
+Generation is offline and secret-free. Do not mint or switch client credentials
+until the reviewed HTTP-profile server is running on loopback. During the
+owner-approved cutover, `--mint-http` stages new profile-bearing credentials as
+`.http-next.token`; stop/disconnect one client, preserve its old stdio entry
+outside active config, atomically replace the exact same active name `meristem`
+and token file, then restart/reconnect and smoke before revoking the old token.
+Codex/Cursor require full restart; Claude rereads via `headersHelper` on
+reconnect. Never add a second `meristem-http` entry.
+
+Rebuild `$BIN` only from a clean `v1` checkout with
+`scripts/rebuild-meristem-bin.sh` (it refuses a dirty tree or a non-`v1` HEAD;
+`--force` is limited to an explicit alternate output that cannot present itself
+as current). For the first guarded rollout, drain/stop the API and worker and
+close all write-capable stdio MCP sessions before publishing, then restart the
+server stack and verify `/readyz` plus HTTP MCP `initialize` report the current
+build (work item `835e0dbf`).
 A rebuild re-triggers the macOS firewall approval
 for the API listener (the script ad-hoc code-signs, which is hash-based and may
 not prevent the re-prompt; failure is loud but non-fatal). Background in
 `agent-worktrees.md`. This rebuild
-is repo-side work item a9374bdd; the live redeploy (regenerate wrappers, restart
-sessions) is owner action 835e0dbf.
+is repo-side work item a9374bdd; the live redeploy (regenerate HTTP candidates,
+perform the guarded per-client swaps, restart sessions) is owner action
+835e0dbf.
 
 ## 2. Mint the operator token (root only mints/revokes)
 

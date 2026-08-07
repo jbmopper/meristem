@@ -1,8 +1,8 @@
 # Local-Agent HTTP MCP Parity and Client Cutover
 
-Status: revised after Claude round-one review; pending round-two review
+Status: accepted after Claude round-two review
 Work item: `35991736-bdae-53ac-9760-1121a1855189`  
-Release base: `e7bc6dd32367dd1bd62e806360cb78b696835eaa`
+Implementation base: `c22fc5e81f188f83ccd5eb502dfc328ef6024b81`
 
 ## Decision
 
@@ -50,7 +50,10 @@ marker.
   `/mcp` POST extends its write deadline to the configured maximum feed wait
   plus a five-second response margin through `http.ResponseController`. Failure
   to establish that deadline rejects the request before tool dispatch; the
-  transport never accepts a wait it cannot return as a JSON-RPC response.
+  transport never accepts a wait it cannot return as a JSON-RPC response. The
+  handler clears the connection-scoped deadline on exit so keep-alive requests
+  cannot inherit an expired absolute deadline; a clear failure is diagnostic
+  only and never rewrites an already-committed response.
 - OAuth or token exchange for local agents. Those belong to the later token
   ergonomics work.
 - Removing the root-only local administration path used to mint and revoke

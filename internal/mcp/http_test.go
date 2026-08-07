@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -13,6 +14,15 @@ import (
 	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 )
+
+func providerHTTPTestActor(t *testing.T, profile access.ProviderAuthorityProfile) domain.Token {
+	t.Helper()
+	authority, err := access.ReduceProviderAuthority(profile, uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: authority.Scopes}
+}
 
 func TestHandleHTTPMessageInitializeReturnsJSONRPCResponse(t *testing.T) {
 	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
@@ -188,7 +198,7 @@ func TestHandleHTTPMessageWithOptionsRejectsHTTPWriteTool(t *testing.T) {
 
 func TestProviderTrackerHTTPProfileAdvertisesOnlySafeTrackerTools(t *testing.T) {
 	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
-	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+	actor := providerHTTPTestActor(t, access.ProviderOwnerTrackerWriteV1)
 	profile := ProviderTrackerHTTPProfile()
 
 	resp := s.HandleHTTPMessageWithOptions(
@@ -245,7 +255,7 @@ func TestProviderTrackerHTTPProfileAdvertisesOnlySafeTrackerTools(t *testing.T) 
 
 func TestProviderTrackerHTTPProfileRejectsHiddenToolsBeforeDispatch(t *testing.T) {
 	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
-	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+	actor := providerHTTPTestActor(t, access.ProviderOwnerTrackerWriteV1)
 	profile := ProviderTrackerHTTPProfile()
 	hidden := []string{
 		"inbox.capture",
@@ -276,7 +286,7 @@ func TestProviderTrackerHTTPProfileRejectsHiddenToolsBeforeDispatch(t *testing.T
 
 func TestProviderTrackerHTTPProfileRejectsLatentExecutionAuthority(t *testing.T) {
 	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
-	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+	actor := providerHTTPTestActor(t, access.ProviderOwnerTrackerWriteV1)
 	profile := ProviderTrackerHTTPProfile()
 	cases := []struct {
 		name string
@@ -300,6 +310,75 @@ func TestProviderTrackerHTTPProfileRejectsLatentExecutionAuthority(t *testing.T)
 	}
 }
 
+func TestHTTPSecondGateUsesActorDerivedTrackerValidator(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := providerHTTPTestActor(t, access.ProviderOwnerTrackerWriteV1)
+	weakenedRoute := ProviderTrackerHTTPProfile()
+	weakenedRoute.validateCall = nil
+
+	resp := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"work_items.create","arguments":{"title":"x","human_review_status":"waved_through","idempotency_key":"x"}}}`),
+		actor,
+		HTTPOptions{Profile: weakenedRoute},
+	)
+	if !strings.Contains(string(resp.Body), "tracker_execution_authority_denied") {
+		t.Fatalf("weakened route validator bypassed actor-derived second gate: %s", resp.Body)
+	}
+}
+
+func TestHTTPToolNameModeIsRequestLocalUnderConcurrency(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{
+		ID:     uuid.New(),
+		Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeMCPLocalAgentProfileV1, access.ScopeFeedRead, access.ScopeWorkItemsReadAll},
+	}
+	const calls = 40
+	errCh := make(chan string, calls)
+	var wg sync.WaitGroup
+	for i := 0; i < calls; i++ {
+		mode := ToolNameModeCanonical
+		want, reject := `"work_items.get"`, `"work_items_get"`
+		if i%2 == 1 {
+			mode = ToolNameModeCursor
+			want, reject = reject, want
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp := s.HandleHTTPMessageWithOptions(
+				context.Background(),
+				[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+				actor,
+				HTTPOptions{Profile: LocalAgentHTTPProfile(), ToolNameMode: mode},
+			)
+			body := string(resp.Body)
+			if !strings.Contains(body, want) || strings.Contains(body, reject) {
+				errCh <- body
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for body := range errCh {
+		t.Fatalf("request-local tool names contaminated across calls: %s", body)
+	}
+}
+
+func TestFilterHTTPToolListFailsClosedOnShapeMismatch(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	for _, result := range []any{
+		[]toolDescriptor{{Name: "feed.read"}},
+		map[string]any{"tools": []any{map[string]any{"name": "feed.read"}}},
+	} {
+		filtered, rerr := s.filterHTTPToolList(result, toolSet("feed.read"))
+		if rerr == nil || filtered != nil {
+			t.Fatalf("shape mismatch returned result=%#v error=%#v", filtered, rerr)
+		}
+	}
+}
+
 func TestProviderTrackerHTTPProfileValidatorAcceptsAdvertisedReads(t *testing.T) {
 	// Every read the tracker profile advertises via tools/list must pass its
 	// call validator; a mismatch rejects calls to a tool the surface offers.
@@ -313,7 +392,7 @@ func TestProviderTrackerHTTPProfileValidatorAcceptsAdvertisedReads(t *testing.T)
 
 func TestProviderTrackerHTTPProfileAllowsBacklogReadinessCall(t *testing.T) {
 	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
-	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+	actor := providerHTTPTestActor(t, access.ProviderOwnerTrackerWriteV1)
 
 	resp := s.HandleHTTPMessageWithOptions(
 		context.Background(),
@@ -331,7 +410,7 @@ func TestProviderTrackerHTTPProfileAllowsBacklogReadinessCall(t *testing.T) {
 
 func TestProviderSafeReadHTTPProfileAllowsCallsWithoutValidator(t *testing.T) {
 	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
-	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+	actor := providerHTTPTestActor(t, access.ProviderOwnerTrackerReadV1)
 
 	resp := s.HandleHTTPMessageWithOptions(
 		context.Background(),
@@ -360,7 +439,8 @@ func TestCheckHTTPToolAllowedFailsClosedOnEmptyAllowlist(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := s.HandleHTTPMessageWithOptions(context.Background(), call, actor, tc.opts)
-			if !strings.Contains(string(resp.Body), "not enabled on this HTTP MCP profile") {
+			if !strings.Contains(string(resp.Body), "not enabled on this HTTP MCP profile") &&
+				!strings.Contains(string(resp.Body), "invalid or mismatched MCP actor profile") {
 				t.Fatalf("restricted route with empty allowlist failed open: %s", resp.Body)
 			}
 		})

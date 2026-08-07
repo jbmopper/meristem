@@ -59,6 +59,8 @@ MCP tool names:
 - Canonical clients expose: feed.read, backlog.readiness, work_items.get, work_items.list, work_items.append_event, work_items.update_metadata, work_items.spawn_child, work_items.transition, work_items.create, inbox.capture.
 - Some MCP hosts expose underscore aliases instead: feed_read, backlog_readiness, work_items_get, work_items_list, work_items_append_event, work_items_update_metadata, work_items_spawn_child, work_items_transition, work_items_create, inbox_capture.
 - Use whichever spelling the MCP client advertises; they route to the same meristem operations.
+- Over HTTP, the client may request one spelling per request with
+  `X-Meristem-Tool-Names: canonical|cursor`; an absent header means canonical.
 - Every mutating MCP call must include an `idempotency_key` argument. Use a stable, task-local key such as `[WORK_ITEM_ID]:worker.started` or `[WORK_ITEM_ID]:spawn:<short-child-purpose>` and reuse it only for the same tool arguments.
 ```
 
@@ -84,6 +86,12 @@ Each worker should have its own agent-source token so events have clean
 attribution. For local assistants, use
 [`scripts/provision-assistant-access.sh`](../scripts/provision-assistant-access.sh)
 to create token files and secret-free MCP snippets.
+
+Local workers using `/mcp` need an active non-root agent token carrying exactly
+one `mcp.profile:local_agent_v1` marker plus the ordinary scopes required for
+their assignment. The marker selects local HTTP behavior but grants no
+authority. Unknown, repeated, or mixed local/provider profile markers fail
+closed; do not try to repair them in a client request.
 
 If a worker cannot see meristem MCP tools, fix the MCP connection first. Do not
 ask the worker to coordinate through ad hoc chat while pretending meristem is the

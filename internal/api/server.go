@@ -112,6 +112,7 @@ type Server struct {
 	feed                  *feed.Service
 	mcpServer             *mcp.Server
 	mcpAllowedOrigins     map[string]bool
+	mcpSetWriteDeadline   func(http.ResponseWriter, time.Time) error
 	policyProfiles        *policyprofile.Service
 	projections           *projectiondefs.Service
 	registry              *registry.Service
