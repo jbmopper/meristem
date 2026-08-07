@@ -1,9 +1,13 @@
 package auth
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 )
 
@@ -73,5 +77,19 @@ func TestNormalizeTokenSource(t *testing.T) {
 				t.Fatalf("normalizeTokenSource(%+v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCreateDelegatedTokenRejectsLocalMCPProfile(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.CreateDelegatedToken(context.Background(), nil, CreateDelegatedTokenInput{
+		ID:     uuid.New(),
+		Name:   "delegated-local-profile",
+		Scopes: []string{access.ScopeMCPLocalAgentProfileV1, access.ScopeFeedRead},
+		Source: domain.SourceAgent,
+		Actor:  domain.Token{ID: uuid.New(), Source: domain.SourceAgent},
+	})
+	if err == nil || !strings.Contains(err.Error(), "delegated token cannot carry a local MCP profile marker") {
+		t.Fatalf("CreateDelegatedToken error = %v, want local profile issuance refusal", err)
 	}
 }

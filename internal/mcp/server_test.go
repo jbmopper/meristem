@@ -496,6 +496,45 @@ func TestServer_ToolsList_CursorModeAdvertisesUnderscoreAliases(t *testing.T) {
 	}
 }
 
+func TestIndexToolsRejectsCanonicalAndAliasCollisions(t *testing.T) {
+	tests := []struct {
+		name  string
+		tools []Tool
+	}{
+		{
+			name:  "duplicate canonical",
+			tools: []Tool{{Name: "a.b"}, {Name: "a.b"}},
+		},
+		{
+			name:  "two aliases collide",
+			tools: []Tool{{Name: "a.b_c"}, {Name: "a_b.c"}},
+		},
+		{
+			name:  "canonical collides with prior alias",
+			tools: []Tool{{Name: "a.b"}, {Name: "a_b"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := indexTools(tc.tools); err == nil {
+				t.Fatalf("indexTools(%v) accepted a non-injective registry", toolNamesFromTools(tc.tools))
+			}
+		})
+	}
+	if indexed, err := indexTools([]Tool{{Name: "ping"}, {Name: "work_items.get"}}); err != nil ||
+		indexed["ping"].Name != "ping" || indexed["work_items_get"].Name != "work_items.get" {
+		t.Fatalf("valid tool registry = %v, %v", indexed, err)
+	}
+}
+
+func toolNamesFromTools(tools []Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
 func TestServer_ToolsList_MutationSchemasRequireIdempotencyKey(t *testing.T) {
 	s := newTestServer(t)
 	mutations := map[string]bool{

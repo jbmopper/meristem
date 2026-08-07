@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/jbmopper/meristem/internal/domain"
 )
 
 // ProviderAuthorityProfile is a versioned, sealed scope bundle. OAuth grants
@@ -18,9 +20,16 @@ const (
 	ProviderDelegatedTreeReadV1  ProviderAuthorityProfile = "delegated_tree_read_v1"
 	ProviderDelegatedTreeWriteV1 ProviderAuthorityProfile = "delegated_tree_write_v1"
 	providerProfileScopePrefix                            = "provider.profile:"
+
+	// ScopeMCPLocalAgentProfileV1 selects the ordinary scope-derived MCP data
+	// profile for a local agent. It classifies presentation only: every business
+	// tool remains governed by the token's other explicit scopes.
+	ScopeMCPLocalAgentProfileV1 = "mcp.profile:local_agent_v1"
+	localMCPProfileScopePrefix  = "mcp.profile:"
 )
 
 var ErrInvalidProviderAuthority = errors.New("access: invalid provider authority profile")
+var ErrInvalidLocalMCPProfile = errors.New("access: invalid local MCP profile")
 
 type ProviderAuthority struct {
 	Profile ProviderAuthorityProfile
@@ -106,6 +115,43 @@ func ProviderAuthorityProfileFromScopes(scopes []string) (ProviderAuthorityProfi
 func HasProviderAuthorityMarker(scopes []string) bool {
 	for _, scope := range scopes {
 		if strings.HasPrefix(strings.TrimSpace(scope), providerProfileScopePrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// LocalAgentMCPProfileFromActor reports whether actor carries a local MCP
+// profile marker and validates its complete marker/identity contract. Unknown
+// and repeated mcp.profile markers are marked-but-invalid so transports fail
+// closed rather than treating them as ordinary business scopes.
+func LocalAgentMCPProfileFromActor(actor domain.Token) (marked bool, err error) {
+	count := 0
+	valid := false
+	for _, raw := range actor.Scopes {
+		scope := strings.TrimSpace(raw)
+		if !strings.HasPrefix(scope, localMCPProfileScopePrefix) {
+			continue
+		}
+		count++
+		valid = scope == ScopeMCPLocalAgentProfileV1
+	}
+	if count == 0 {
+		return false, nil
+	}
+	if count != 1 || !valid || HasProviderAuthorityMarker(actor.Scopes) ||
+		actor.ID == uuid.Nil || actor.IsRoot || actor.Source != domain.SourceAgent || actor.RevokedAt != nil {
+		return true, ErrInvalidLocalMCPProfile
+	}
+	return true, nil
+}
+
+// HasLocalMCPProfileMarker distinguishes local-profile-bearing credentials
+// from ordinary static credentials. It intentionally recognizes unknown
+// versions so issuance and transport boundaries can reject them explicitly.
+func HasLocalMCPProfileMarker(scopes []string) bool {
+	for _, scope := range scopes {
+		if strings.HasPrefix(strings.TrimSpace(scope), localMCPProfileScopePrefix) {
 			return true
 		}
 	}

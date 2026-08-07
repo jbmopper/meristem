@@ -3,6 +3,7 @@ package access
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -26,6 +27,47 @@ func TestProviderReadGrantCannotGainWritesWhenToolsAreEnabled(t *testing.T) {
 	}
 	if !ToolVisible(actor, "feed.read") || !ToolVisible(actor, "work_items.list") || !ToolVisible(actor, "work_items.get") {
 		t.Fatalf("read profile missing coordination reads: %v", authority.Scopes)
+	}
+}
+
+func TestLocalAgentMCPProfileFromActor(t *testing.T) {
+	revoked := time.Now()
+	validID := uuid.New()
+	for _, tc := range []struct {
+		name    string
+		actor   domain.Token
+		marked  bool
+		wantErr bool
+	}{
+		{name: "unmarked", actor: domain.Token{ID: validID, Source: domain.SourceAgent}, marked: false},
+		{name: "valid", actor: domain.Token{ID: validID, Source: domain.SourceAgent, Scopes: []string{ScopeMCPLocalAgentProfileV1, ScopeFeedRead}}, marked: true},
+		{name: "marker only remains valid but powerless", actor: domain.Token{ID: validID, Source: domain.SourceAgent, Scopes: []string{ScopeMCPLocalAgentProfileV1}}, marked: true},
+		{name: "unknown", actor: domain.Token{ID: validID, Source: domain.SourceAgent, Scopes: []string{"mcp.profile:future_v2"}}, marked: true, wantErr: true},
+		{name: "repeated", actor: domain.Token{ID: validID, Source: domain.SourceAgent, Scopes: []string{ScopeMCPLocalAgentProfileV1, ScopeMCPLocalAgentProfileV1}}, marked: true, wantErr: true},
+		{name: "provider ambiguity", actor: domain.Token{ID: validID, Source: domain.SourceAgent, Scopes: []string{ScopeMCPLocalAgentProfileV1, providerProfileScopePrefix + string(ProviderOwnerTrackerReadV1)}}, marked: true, wantErr: true},
+		{name: "nil id", actor: domain.Token{Source: domain.SourceAgent, Scopes: []string{ScopeMCPLocalAgentProfileV1}}, marked: true, wantErr: true},
+		{name: "root", actor: domain.Token{ID: validID, IsRoot: true, Source: domain.SourceHuman, Scopes: []string{ScopeMCPLocalAgentProfileV1}}, marked: true, wantErr: true},
+		{name: "human", actor: domain.Token{ID: validID, Source: domain.SourceHuman, Scopes: []string{ScopeMCPLocalAgentProfileV1}}, marked: true, wantErr: true},
+		{name: "system", actor: domain.Token{ID: validID, Source: domain.SourceSystem, Scopes: []string{ScopeMCPLocalAgentProfileV1}}, marked: true, wantErr: true},
+		{name: "revoked", actor: domain.Token{ID: validID, Source: domain.SourceAgent, Scopes: []string{ScopeMCPLocalAgentProfileV1}, RevokedAt: &revoked}, marked: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marked, err := LocalAgentMCPProfileFromActor(tc.actor)
+			if marked != tc.marked || (err != nil) != tc.wantErr {
+				t.Fatalf("LocalAgentMCPProfileFromActor() = marked %v err %v, want marked %v err=%v", marked, err, tc.marked, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestProviderAuthorityRejectsLocalMCPMarker(t *testing.T) {
+	authority, err := ReduceProviderAuthority(ProviderOwnerTrackerReadV1, uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withLocal := append(append([]string(nil), authority.Scopes...), ScopeMCPLocalAgentProfileV1)
+	if _, err := ProviderAuthorityProfileFromScopes(withLocal); err == nil {
+		t.Fatal("sealed provider authority accepted a local MCP profile marker")
 	}
 }
 

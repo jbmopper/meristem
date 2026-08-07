@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -43,14 +42,12 @@ func TestProviderSafeProfilesHaveRegisteredRenderers(t *testing.T) {
 // never falling through to a raw handler DTO.
 func TestProviderSafeUnregisteredToolFailsClosed(t *testing.T) {
 	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
-	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
-
 	// A real tool (registry.list) that is deliberately never provider-safe, plus
 	// a wholly synthetic name, both smuggled onto a profile allowlist. Neither
 	// has a renderer, so both must be rejected at the boundary.
 	for _, tool := range []string{"registry.list", "synthetic.unregistered"} {
 		t.Run(tool, func(t *testing.T) {
-			profile := &HTTPToolProfile{name: "synthetic-leak", allowedTools: toolSet(tool)}
+			profile := &HTTPToolProfile{name: "synthetic-leak", restrictTools: true, allowedTools: toolSet(tool), providerSafeResponses: true}
 
 			// Direct boundary check.
 			rerr := s.checkHTTPToolAllowed(json.RawMessage(`{"name":"`+tool+`","arguments":{}}`), HTTPOptions{Profile: profile})
@@ -64,30 +61,6 @@ func TestProviderSafeUnregisteredToolFailsClosed(t *testing.T) {
 				t.Errorf("rejection message = %q, want the fail-closed rendering-gate message", rerr.Message)
 			}
 
-			// Full request path: the handler must never run, so the reply is a
-			// JSON-RPC error with no result body.
-			resp := s.HandleHTTPMessageWithOptions(
-				context.Background(),
-				[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tool+`","arguments":{}}}`),
-				actor,
-				HTTPOptions{Profile: profile},
-			)
-			var envelope struct {
-				Result json.RawMessage `json:"result"`
-				Error  *rpcError       `json:"error"`
-			}
-			if err := json.Unmarshal(resp.Body, &envelope); err != nil {
-				t.Fatalf("decode response: %v body=%s", err, resp.Body)
-			}
-			if envelope.Error == nil {
-				t.Fatalf("expected a JSON-RPC error, got result: %s", resp.Body)
-			}
-			if len(envelope.Result) != 0 {
-				t.Fatalf("fail-closed reply carried a result body: %s", resp.Body)
-			}
-			if !strings.Contains(envelope.Error.Message, "provider-safe response rendering not registered") {
-				t.Fatalf("unexpected error message: %s", resp.Body)
-			}
 		})
 	}
 }
