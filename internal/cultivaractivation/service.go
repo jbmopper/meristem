@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/escalations"
 	"github.com/jbmopper/meristem/internal/events"
@@ -226,11 +227,12 @@ func (s *Service) Activate(ctx context.Context, in ActivateInput) (Result, error
 
 func (s *Service) approvalSeparated(ctx context.Context, tx pgx.Tx, workItemID uuid.UUID, actorID uuid.UUID) (bool, string, error) {
 	var (
-		eventID  uuid.UUID
 		approver uuid.NullUUID
+		seq      int64
+		source   string
 	)
 	err := tx.QueryRow(ctx, `
-		SELECT id, actor_token_id
+		SELECT seq, actor_token_id, source
 		FROM events
 		WHERE subject_kind = $1
 		  AND subject_id = $2
@@ -239,9 +241,9 @@ func (s *Service) approvalSeparated(ctx context.Context, tx pgx.Tx, workItemID u
 		    OR
 		    (kind = $4 AND COALESCE(payload->>'human_review_status', '') = $5)
 		  )
-		ORDER BY occurred_at DESC, seq DESC
+		ORDER BY seq DESC
 		LIMIT 1
-	`, domain.SubjectWorkItem, workItemID, domain.EventWorkItemMetadataUpdated, domain.EventWorkItemCreated, domain.HumanReviewApproved).Scan(&eventID, &approver)
+	`, domain.SubjectWorkItem, workItemID, domain.EventWorkItemMetadataUpdated, domain.EventWorkItemCreated, domain.HumanReviewApproved).Scan(&seq, &approver, &source)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, "explicit human_review_status=approved event is required before cultivar activation", nil
@@ -250,6 +252,17 @@ func (s *Service) approvalSeparated(ctx context.Context, tx pgx.Tx, workItemID u
 	}
 	if approver.Valid && approver.UUID == actorID {
 		return false, "cultivar proposer cannot approve its own activation work item", nil
+	}
+	reviewEvent := domain.Event{Seq: seq, Source: domain.Source(source)}
+	if approver.Valid {
+		reviewEvent.ActorTokenID = &approver.UUID
+	}
+	authorized, err := access.CanDecideHumanReviewEvent(ctx, tx, reviewEvent)
+	if err != nil {
+		return false, "", err
+	}
+	if !authorized {
+		return false, "approved human review lacks an authorized work_items.review_decide attribution", nil
 	}
 	return true, "", nil
 }

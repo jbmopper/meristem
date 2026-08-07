@@ -137,7 +137,7 @@ resolves the breach historically. A future `patience.resolved` event would be
 redundant unless it carried a new decision that is not already present in the
 lifecycle log.
 
-Each `work_item` may carry `suggested_convergence_checks`, a human-readable checklist of signals a worker should try to satisfy before claiming convergence. The list is advisory until a reducer consumes it, but it is durable projection state sourced from events so workers, reviewers, and future reconcilers see the same checklist. A `work_item` also carries `human_review_status`: `blocked`, `waved_through`, or `approved`. `waved_through` is the default for ordinary project work; `blocked` means human review must be resolved before the item should be treated as converged; `approved` records explicit human clearance. This field is not a replacement for approval rows: external writes still use the approval system and default deny.
+Each `work_item` may carry `suggested_convergence_checks`, a human-readable checklist of signals a worker should try to satisfy before claiming convergence. The list is advisory until a reducer consumes it, but it is durable projection state sourced from events so workers, reviewers, and future reconcilers see the same checklist. A `work_item` also carries `human_review_status`: `blocked`, `waved_through`, or `approved`. `waved_through` is the default for ordinary project work; `blocked` means human review must be resolved before the item should be treated as converged; `approved` records explicit human clearance. Clearing `blocked`, creating or retaining `approved`, and otherwise asserting human clearance require an active non-root `source=human` token with the exact `work_items.review_decide` scope; root, agent, system, legacy-unscoped, revoked, ordinary-writer, and tracker-only credentials fail before append. Projectors independently reduce the actor's immutable token history as of the event and fold an unauthorized clearance attempt to `blocked` without rewriting the event. A `human_review_status=blocked` item cannot transition to `done`. This field is not a replacement for approval rows: external writes still use the approval system and default deny.
 
 The recurring shapes — none of them privileged, all reducible to "propose N signals, deterministically combine them":
 
@@ -317,12 +317,15 @@ receipt operations through the same services.
   (`work_items.read`, `work_items.write`, `work_items.read_all`,
   `work_items.write_all`, `work_items.tracker_write`,
   `work_items.tracker_write_all`, `work_items.create`,
+  `work_items.review_decide`,
   `work_items.tree:<uuid>`), feed
   scopes (`feed.read`, `feed.read_assigned`, `feed.listen_for:<token-uuid>`),
   owner posture scopes such as
   `policy_profile.switch`, registry write scope `registry.write`, log scopes,
   `oauth_clients.bind`, `oauth_clients.revoke`, and `approvals.decide`.
-  OAuth-client administration requires an explicitly scoped non-root human;
+  `work_items.review_decide` is an explicitly scoped non-root human authority
+  and is not implied by any ordinary/tracker work-item scope or by the legacy
+  unscoped compatibility path. OAuth-client administration requires an explicitly scoped non-root human;
   the root token remains mint/revoke-only. Write-request authority comes from
   the relevant work-item/connector write scope; approval decision authority
   requires a human non-root token with `approvals.decide`.

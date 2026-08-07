@@ -195,7 +195,14 @@ func (s *ChecksProposalService) ProposeChecks(ctx context.Context, parentID uuid
 
 	switch {
 	case validation.Accept:
-		if err := appendMetadataUpdated(ctx, tx, s.writer, effectSource, actorID, eventDiscriminator(ctx), parent, validation.Checks, parent.HumanReviewStatus); err != nil {
+		nextReview := parent.HumanReviewStatus
+		if nextReview == domain.HumanReviewApproved {
+			// Replacing the reviewed checklist changes what approval would mean.
+			// The scribe's system-authored effect therefore invalidates approval
+			// instead of attempting to retain human clearance.
+			nextReview = domain.HumanReviewBlocked
+		}
+		if err := appendMetadataUpdated(ctx, tx, s.writer, effectSource, actorID, eventDiscriminator(ctx), parent, validation.Checks, nextReview); err != nil {
 			return ChecksProposalResult{}, err
 		}
 		if childValid {
