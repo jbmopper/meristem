@@ -1,9 +1,9 @@
 # Remote reference anchors — design proposal
 
-Status: **proposal for owner decision**. Nothing here is implemented, and
-nothing here is authorized. Work item `319c8dc8` forbids migrations and new
-event kinds; this design needs both, which is exactly why it is a proposal
-rather than a branch.
+Status: **revised proposal for owner decision and independent design review**.
+Nothing here is implemented, and nothing here is authorized. Work item
+`319c8dc8` forbids migrations and new event kinds; this design needs both,
+which is exactly why it remains a proposal rather than an implementation.
 
 ## The problem
 
@@ -60,16 +60,27 @@ closed rather than being reconciled.
 The retire payload carries `work_item_id`, `canonical_ref`, `relation`, and a
 `reason`.
 
-### Relation vocabulary
+### Relation vocabulary and lifecycle boundary
 
 A small closed set, rejected if unknown:
 
-- `depends_on` — this local item cannot converge until the remote one does.
 - `tracks` — this item observes the remote one; no convergence coupling.
-- `continues_at` — work moved to the remote item; this one is a stub.
+- `continues_at` — records where work continued after a handoff; informational
+  only in this slice.
 
-Deliberately **not** included: `parent_of` / `child_of`. Parenthood implies
-tree traversal, and the local tree must stay local (see the comparison below).
+Neither relation changes local lifecycle, convergence checks, patience, or
+terminal state. In particular, `continues_at` does not automatically turn the
+local item into a terminal stub. Consumers may render or follow the reference,
+but only an ordinary local lifecycle event can change the local item.
+
+Deliberately **not** included:
+
+- `depends_on`. Making a local item wait for remote convergence requires a
+  separately designed event-backed remote-state observation, a deterministic
+  reducer and verdict event, and bounded patience with partition escalation.
+  A live remote read cannot be a replay-safe convergence input.
+- `parent_of` / `child_of`. Parenthood implies tree traversal, and the local
+  tree must stay local (see the comparison below).
 
 ### Projection
 
@@ -135,12 +146,24 @@ So recording or retiring an anchor requires **both**:
 
 Ordinary tracker-write scopes do **not** imply it.
 
-### The local ACL reduction for a remote read
+### Normalization and the local ACL reduction for a remote read
 
-A remote read of `<ref>` is permitted only when all of these hold:
+A remote-read surface may accept either qualified spelling defined by the
+network contract: the canonical `mrs://<node_id>/work-items/<uuid>` or the
+compact `<node_id>:<uuid>` alias. Before any anchor lookup or outbound I/O, the
+service must parse the input, require a non-empty remote node id, and re-emit it
+with `FormatCanonicalRef`. A bare UUID is local and is not a remote reference.
+Malformed or unformattable input fails closed.
+
+Only the normalized canonical string is carried past that boundary. Events and
+the projection store canonical strings exclusively; compact aliases are input
+compatibility, never durable identity.
+
+A remote read of the normalized `<canonical-ref>` is permitted only when all
+of these hold:
 
 1. There is a **non-retired** row in `work_item_remote_references` whose
-   `canonical_ref` equals `<ref>` by exact string comparison.
+   `canonical_ref` equals `<canonical-ref>` by exact string comparison.
 2. The caller passes the ordinary local **read** reducer for that row's
    `work_item_id` — the anchor's subject, a local object with a local ACL.
 3. The caller holds `crossnode.work_items.read` (`access.RemoteReadAllowed`).
@@ -148,20 +171,21 @@ A remote read of `<ref>` is permitted only when all of these hold:
 
 Any missing element refuses **before** outbound I/O and appends no event.
 
-Exact string comparison in (1) is why the canonical form must be one string per
-object, and why `ParseQualifiedRef` rejects decorations and non-standard UUID
-spellings. If two strings could name one object, an anchor on one spelling
-would not authorize a read of the other — or worse, a decorated variant would
-slip past a normalized comparison.
+Exact string comparison in (1) is safe only *after* normalization. The parser
+accepts the compact alias for compatibility, while canonical URI parsing
+rejects decorations and non-standard UUID spellings. Re-emitting the parsed
+tuple produces one durable string per object, so both accepted qualified inputs
+select the same anchor and decorated variants fail before lookup.
 
 ### What produces an anchor — never the read itself
 
 An anchor is created only by an explicit operator or domain action:
 
-- an operator recording a cross-node dependency (`meristem work-item
-  remote-ref add`, REST, MCP);
+- an operator recording a cross-node reference (`meristem work-item remote-ref
+  add`, REST, MCP);
 - a domain flow that *already* has authority over both sides, e.g. an addressed
-  push recording `continues_at` on the local item it just dispatched from.
+  push recording the informational `continues_at` relation on the local item it
+  just dispatched from.
 
 The remote read never mints its own anchor. That would make D circular: the
 read would authorize itself.
@@ -193,9 +217,9 @@ table; the benefit is that no existing correctness property has to be re-proved.
 ## Migration cost
 
 One migration for the projection, plus two event kinds. Both are currently
-forbidden by `319c8dc8`. Note that migration numbering is already contended —
-`0037` is claimed by three branches and `0038` now appears on the listener
-line — so the number must be assigned at merge time, not now.
+forbidden by `319c8dc8`. Migration numbering is integration state, not part of
+this design: assign the next dense number only when an implementation child is
+rebased onto the then-current `v1` line.
 
 ## What the owner is being asked
 
@@ -206,3 +230,6 @@ line — so the number must be assigned at merge time, not now.
 3. Confirm the stricter create authority (`crossnode.references.record` on top
    of local mutation authority), or accept that ordinary local write is enough
    to mint an anchor — which weakens D to roughly B.
+4. Confirm the first slice is observational (`tracks` and informational
+   `continues_at`) and defer cross-node convergence coupling to a separate
+   design with its own reducer, verdict event, patience budget, and escalation.
