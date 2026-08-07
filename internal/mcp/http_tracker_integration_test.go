@@ -217,9 +217,19 @@ type httpToolCallResult struct {
 
 func callHTTPTool(t *testing.T, s *Server, actor domain.Token, profile *HTTPToolProfile, name string, args map[string]any) httpToolCallResult {
 	t.Helper()
-	params, err := json.Marshal(map[string]any{"name": name, "arguments": args})
+	result, err := doHTTPToolCall(s, actor, profile, name, args)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return result
+}
+
+// doHTTPToolCall is safe to call from a worker goroutine because it reports
+// all decode/setup failures to its caller instead of invoking testing.FailNow.
+func doHTTPToolCall(s *Server, actor domain.Token, profile *HTTPToolProfile, name string, args map[string]any) (httpToolCallResult, error) {
+	params, err := json.Marshal(map[string]any{"name": name, "arguments": args})
+	if err != nil {
+		return httpToolCallResult{}, fmt.Errorf("encode HTTP MCP params: %w", err)
 	}
 	raw := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":%s}`, params))
 	resp := s.HandleHTTPMessageWithOptions(context.Background(), raw, actor, HTTPOptions{Profile: profile})
@@ -228,10 +238,10 @@ func callHTTPTool(t *testing.T, s *Server, actor domain.Token, profile *HTTPTool
 		Result json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(resp.Body, &envelope); err != nil {
-		t.Fatalf("decode HTTP MCP response: %v body=%s", err, resp.Body)
+		return httpToolCallResult{}, fmt.Errorf("decode HTTP MCP response: %w body=%s", err, resp.Body)
 	}
 	if envelope.Error != nil {
-		return httpToolCallResult{TransportError: envelope.Error.Message}
+		return httpToolCallResult{TransportError: envelope.Error.Message}, nil
 	}
 	var toolResult struct {
 		IsError bool `json:"isError"`
@@ -240,13 +250,13 @@ func callHTTPTool(t *testing.T, s *Server, actor domain.Token, profile *HTTPTool
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(envelope.Result, &toolResult); err != nil {
-		t.Fatalf("decode HTTP MCP tool result: %v result=%s", err, envelope.Result)
+		return httpToolCallResult{}, fmt.Errorf("decode HTTP MCP tool result: %w result=%s", err, envelope.Result)
 	}
 	text := ""
 	if len(toolResult.Content) > 0 {
 		text = toolResult.Content[0].Text
 	}
-	return httpToolCallResult{IsError: toolResult.IsError, Text: text}
+	return httpToolCallResult{IsError: toolResult.IsError, Text: text}, nil
 }
 
 func cloneHTTPArgs(in map[string]any) map[string]any {

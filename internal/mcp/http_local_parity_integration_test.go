@@ -155,16 +155,26 @@ func TestLocalAgentHTTPSurfaceAndIdempotencyParityIntegration(t *testing.T) {
 		"reason":          "local HTTP concurrent mutation",
 		"idempotency_key": "local-http-concurrent-transition",
 	}
-	results := make(chan httpToolCallResult, 2)
+	type concurrentCallResult struct {
+		name   string
+		result httpToolCallResult
+		err    error
+	}
+	results := make(chan concurrentCallResult, 2)
 	for _, name := range []string{"work_items.transition", "work_items_transition"} {
+		name := name
 		go func() {
-			results <- callHTTPTool(t, s, broad, localProfile, name, concurrentArgs)
+			result, err := doHTTPToolCall(s, broad, localProfile, name, concurrentArgs)
+			results <- concurrentCallResult{name: name, result: result, err: err}
 		}()
 	}
 	concurrentFirst, concurrentSecond := <-results, <-results
-	if concurrentFirst.IsError || concurrentFirst.TransportError != "" ||
-		concurrentSecond.IsError || concurrentSecond.TransportError != "" ||
-		concurrentFirst.Text != concurrentSecond.Text {
+	if concurrentFirst.err != nil || concurrentSecond.err != nil {
+		t.Fatalf("concurrent HTTP MCP helper failure: first %s: %v; second %s: %v", concurrentFirst.name, concurrentFirst.err, concurrentSecond.name, concurrentSecond.err)
+	}
+	if concurrentFirst.result.IsError || concurrentFirst.result.TransportError != "" ||
+		concurrentSecond.result.IsError || concurrentSecond.result.TransportError != "" ||
+		concurrentFirst.result.Text != concurrentSecond.result.Text {
 		t.Fatalf("concurrent canonical/alias replay mismatch: first=%+v second=%+v", concurrentFirst, concurrentSecond)
 	}
 	if got := eventCount(t, pool, domain.EventWorkItemTransitioned); got != 2 {
