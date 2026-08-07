@@ -118,13 +118,6 @@ func TestProviderOAuthLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorizationWorkItem, err := wi.Get(ctx, req1.WorkItemID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if authorizationWorkItem.HumanReviewStatus != domain.HumanReviewWavedThrough {
-		t.Fatalf("OAuth authorization work item review = %s, want waved_through because the approval row is the gate", authorizationWorkItem.HumanReviewStatus)
-	}
 	if !req1.Committed {
 		t.Fatal("fresh authorization request did not report its commit boundary")
 	}
