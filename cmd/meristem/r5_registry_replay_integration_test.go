@@ -136,13 +136,6 @@ func TestR5CultivarActivationRebuildsFromEvents(t *testing.T) {
 		t.Fatalf("create root token: %v", err)
 	}
 	root := rootResult.Token
-	reviewerResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
-		Name: "r5-reviewer", Source: domain.SourceHuman,
-		Scopes: []string{access.ScopeWorkItemsReviewDecide}, Actor: &root,
-	})
-	if err != nil {
-		t.Fatalf("create reviewer token: %v", err)
-	}
 	registrySvc := registry.NewService(pool, writer)
 	_, fresh, err := registrySvc.DefineTropism(ctx, root, registry.DefineTropismInput{
 		Name:    "r5-activation-checklist",
@@ -160,7 +153,7 @@ func TestR5CultivarActivationRebuildsFromEvents(t *testing.T) {
 
 	proposal, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
 		Title:             "R5 activation replay proposal",
-		Actor:             reviewerResult.Token,
+		Actor:             root,
 		HumanReviewStatus: domain.HumanReviewApproved,
 	})
 	if err != nil {

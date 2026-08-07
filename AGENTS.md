@@ -182,8 +182,7 @@ A projection writer turns appended events into derived rows. It is the *only* co
   work-item/feed projections; delegated profiles remain tree-scoped. Tracker
   write profiles use `work_items.tracker_write*` and may only create
   human-review-blocked work, append tracker-safe note/progress payloads, update
-  blocked metadata, block, fail, or cancel; they may complete only work whose
-  human-review gate is already non-blocked. They never imply approval,
+  blocked metadata, block, or terminalize. They never imply approval,
   connector, inbox, registry/policy, convergence-signal, or execution access.
 - The sealed provider marker is transport-independent: the shared MCP
   dispatcher applies the same profile tool allowlist and provider-safe response
@@ -192,13 +191,6 @@ A projection writer turns appended events into derived rows. It is the *only* co
 - OAuth client binding/revocation requires an explicitly scoped non-root human
   token (`oauth_clients.bind` / `oauth_clients.revoke`). The root token remains
   mint/revoke-only. Unknown or inexact provider profiles fail closed.
-- Clearing a human-review block or creating/retaining
-  `human_review_status=approved` requires an active non-root human token with
-  exact `work_items.review_decide`; ordinary/tracker scopes, agents, systems,
-  root, revoked, and legacy-unscoped tokens never imply that authority. The
-  domain service refuses before append, replay independently folds an
-  unauthorized clearance attempt to `blocked`, and blocked work cannot
-  transition to `done`.
 
 ## Prompt-level data controls for external agents
 

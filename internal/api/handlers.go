@@ -621,11 +621,6 @@ func (s *Server) handleCreateWorkItem(w http.ResponseWriter, r *http.Request) {
 		Actor:                      actor,
 	})
 	if err != nil {
-		if errors.Is(err, workitems.ErrHumanReviewDecisionDenied) {
-			idempotency.MarkRefusalUnconsumed(r.Context())
-			writeAPIError(w, http.StatusForbidden, "human_review_decision_denied", err.Error())
-			return
-		}
 		if errors.Is(err, workitems.ErrInvalidRequest) {
 			// Pre-append validation: nothing committed, key stays usable.
 			idempotency.MarkRefusalUnconsumed(r.Context())
@@ -1275,8 +1270,7 @@ func writeWorkItemError(w http.ResponseWriter, r *http.Request, err error) {
 	// mapping stays unmarked and is conservatively recorded; in particular
 	// ErrXylemBudgetExhausted commits authoritative refusal events before
 	// returning and MUST replay rather than re-execute.
-	if errors.Is(err, workitems.ErrNotFound) || errors.Is(err, workitems.ErrInvalidRequest) ||
-		errors.Is(err, workitems.ErrHumanReviewDecisionDenied) || errors.Is(err, workitems.ErrHumanReviewBlocked) {
+	if errors.Is(err, workitems.ErrNotFound) || errors.Is(err, workitems.ErrInvalidRequest) {
 		idempotency.MarkRefusalUnconsumed(r.Context())
 	}
 	if errors.Is(err, workitems.ErrNotFound) {
@@ -1289,14 +1283,6 @@ func writeWorkItemError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	if errors.Is(err, workitems.ErrConvergenceChecksRequired) {
 		writeAPIError(w, http.StatusConflict, "convergence_checks_required", err.Error())
-		return
-	}
-	if errors.Is(err, workitems.ErrHumanReviewDecisionDenied) {
-		writeAPIError(w, http.StatusForbidden, "human_review_decision_denied", err.Error())
-		return
-	}
-	if errors.Is(err, workitems.ErrHumanReviewBlocked) {
-		writeAPIError(w, http.StatusConflict, "human_review_blocked", err.Error())
 		return
 	}
 	if errors.Is(err, workitems.ErrXylemBudgetExhausted) {

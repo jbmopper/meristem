@@ -1809,9 +1809,6 @@ func workItemToolErr(err error, notFound error) error {
 			return replayableToolErr(notFoundToolError{msg: notFound.Error()})
 		}
 		return replayableToolErr(notFoundToolError{msg: "work_item_not_found: work item not found"})
-	case errors.Is(err, workitems.ErrHumanReviewDecisionDenied),
-		errors.Is(err, workitems.ErrHumanReviewBlocked):
-		return replayableToolErr(pureToolErr(err))
 	case errors.Is(err, workitems.ErrInvalidRequest),
 		errors.Is(err, workitems.ErrInvalidState),
 		errors.Is(err, workitems.ErrInvalidTransition),

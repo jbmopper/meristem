@@ -355,8 +355,6 @@ func TestExportedErrorSentinels_AreStable(t *testing.T) {
 		ErrInvalidTransition,
 		ErrRelationCycle,
 		ErrConvergenceChecksRequired,
-		ErrHumanReviewDecisionDenied,
-		ErrHumanReviewBlocked,
 		ErrXylemBudgetExhausted,
 	} {
 		t.Run(sentinel.Error(), func(t *testing.T) {

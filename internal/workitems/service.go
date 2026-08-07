@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/feed"
@@ -42,13 +41,6 @@ var (
 	// convergence checks tries to move into execution states. The scribe worker
 	// is the deterministic path for filling those checks.
 	ErrConvergenceChecksRequired = errors.New("workitems: convergence checks required")
-	// ErrHumanReviewDecisionDenied is a pure pre-append refusal: clearing a
-	// human-review block or asserting approved review requires one explicit
-	// non-root human authority.
-	ErrHumanReviewDecisionDenied = errors.New("workitems: human review decision requires an active non-root human token with work_items.review_decide")
-	// ErrHumanReviewBlocked prevents a completion claim from terminalizing an
-	// item that still waits on its human-review gate.
-	ErrHumanReviewBlocked = errors.New("workitems: human review is blocked")
 	// ErrUnexpectedEventDedupe is returned when a first-attempt mutation's
 	// event collides with an existing row while NOT running under the
 	// idempotency contract. Without a discriminator, fresh=false here means
@@ -107,9 +99,6 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (domain.WorkItem, 
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
-	if humanReview == domain.HumanReviewApproved && !access.CanDecideHumanReview(in.Actor) {
-		return domain.WorkItem{}, ErrHumanReviewDecisionDenied
-	}
 	createdPayload, err := buildCreatedPayload(ctx, s.pool, in, state, checks, humanReview)
 	if err != nil {
 		return domain.WorkItem{}, err
@@ -163,9 +152,6 @@ func (s *Service) SpawnChildWithID(ctx context.Context, parentID, childID uuid.U
 	humanReview, err := normalizeHumanReviewStatus(in.HumanReviewStatus)
 	if err != nil {
 		return domain.WorkItem{}, false, err
-	}
-	if humanReview == domain.HumanReviewApproved && !access.CanDecideHumanReview(in.Actor) {
-		return domain.WorkItem{}, false, ErrHumanReviewDecisionDenied
 	}
 	createdPayload, err := buildCreatedPayload(ctx, s.pool, in, state, checks, humanReview)
 	if err != nil {
@@ -262,9 +248,6 @@ func (s *Service) UpdateMetadata(ctx context.Context, id uuid.UUID, in UpdateMet
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
-	if humanReviewDecisionRequired(current.HumanReviewStatus, humanReview) && !access.CanDecideHumanReview(in.Actor) {
-		return domain.WorkItem{}, ErrHumanReviewDecisionDenied
-	}
 	spec := events.Spec{
 		SubjectKind:   domain.SubjectWorkItem,
 		SubjectID:     id,
@@ -311,9 +294,6 @@ func (s *Service) Transition(ctx context.Context, id uuid.UUID, to domain.WorkIt
 	current, err := scanWorkItemForUpdate(ctx, tx, id)
 	if err != nil {
 		return domain.WorkItem{}, err
-	}
-	if to == domain.WorkItemDone && current.HumanReviewStatus == domain.HumanReviewBlocked {
-		return domain.WorkItem{}, ErrHumanReviewBlocked
 	}
 	if !domain.CanTransition(current.State, to) {
 		return domain.WorkItem{}, fmt.Errorf("%w: from %s to %s", ErrInvalidTransition, current.State, to)
@@ -1223,15 +1203,6 @@ func normalizeHumanReviewStatus(status domain.HumanReviewStatus) (domain.HumanRe
 		return "", fmt.Errorf("%w: invalid human_review_status %q", ErrInvalidRequest, status)
 	}
 	return status, nil
-}
-
-// humanReviewDecisionRequired identifies changes that confer or retain human
-// clearance. Ordinary actors may always move toward the conservative blocked
-// state and may update checklists on merely waved-through work, but only the
-// owner authority may clear a block or assert/retain approved review.
-func humanReviewDecisionRequired(from, to domain.HumanReviewStatus) bool {
-	return to == domain.HumanReviewApproved ||
-		(from == domain.HumanReviewBlocked && to == domain.HumanReviewWavedThrough)
 }
 
 func normalizeEscalationRule(rule domain.EscalationRule) (domain.EscalationRule, error) {
