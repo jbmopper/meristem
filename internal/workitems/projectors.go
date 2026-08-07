@@ -13,6 +13,8 @@ import (
 	"github.com/jbmopper/meristem/internal/projections"
 )
 
+const humanReviewGateBoundaryMigration int64 = 40
+
 func RegisterProjectors(registry *projections.Registry) {
 	registry.Register(createdProjector{})
 	registry.Register(transitionedProjector{})
@@ -58,7 +60,11 @@ func (createdProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Event
 	if err != nil {
 		return err
 	}
-	if domain.WorkItemState(state) == domain.WorkItemDone && humanReview == domain.HumanReviewBlocked {
+	gateApplies, err := humanReviewTerminalGateApplies(ctx, tx, event.Seq)
+	if err != nil {
+		return fmt.Errorf("work_item.created: read human-review gate boundary: %w", err)
+	}
+	if gateApplies && domain.WorkItemState(state) == domain.WorkItemDone && humanReview == domain.HumanReviewBlocked {
 		return fmt.Errorf("work_item.created: cannot create completed work while human review is blocked")
 	}
 	if humanReview == domain.HumanReviewApproved {
@@ -143,17 +149,27 @@ func (transitionedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 		return fmt.Errorf("work_item.transitioned: invalid transition from %s to %s", effectiveFrom, to)
 	}
 	if to == domain.WorkItemDone {
-		var humanReview domain.HumanReviewStatus
-		if err := tx.QueryRow(ctx, `
-			SELECT human_review_status
-			FROM work_items
-			WHERE id = $1
-			FOR UPDATE
-		`, event.SubjectID).Scan(&humanReview); err != nil {
-			return fmt.Errorf("work_item.transitioned: read human-review gate: %w", err)
+		createdSeq, err := workItemCreatedSeq(ctx, tx, event.SubjectID)
+		if err != nil {
+			return fmt.Errorf("work_item.transitioned: read creation boundary: %w", err)
 		}
-		if humanReview == domain.HumanReviewBlocked {
-			return fmt.Errorf("work_item.transitioned: cannot complete while human review is blocked")
+		gateApplies, err := humanReviewTerminalGateApplies(ctx, tx, createdSeq)
+		if err != nil {
+			return fmt.Errorf("work_item.transitioned: read human-review gate boundary: %w", err)
+		}
+		if gateApplies {
+			var humanReview domain.HumanReviewStatus
+			if err := tx.QueryRow(ctx, `
+				SELECT human_review_status
+				FROM work_items
+				WHERE id = $1
+				FOR UPDATE
+			`, event.SubjectID).Scan(&humanReview); err != nil {
+				return fmt.Errorf("work_item.transitioned: read human-review gate: %w", err)
+			}
+			if humanReview == domain.HumanReviewBlocked {
+				return fmt.Errorf("work_item.transitioned: cannot complete while human review is blocked")
+			}
 		}
 	}
 	_, err = tx.Exec(ctx, `
@@ -180,6 +196,57 @@ func (transitionedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 		effectiveFrom,
 		to,
 	)
+}
+
+// humanReviewTerminalGateApplies preserves the semantics of work items created
+// before migration 0040 while enforcing the terminal review gate for every
+// work item created afterward. Binding activation to the creation event lets an
+// in-flight pre-deploy OAuth authorization finish after deployment. Rebuild
+// reads the same durable migration boundary, so the cohort decision is
+// deterministic across live projection and whole-log replay.
+// A missing migration row means the schema has intentionally been rolled back
+// below 0040. Reading the optional column through to_jsonb keeps that rollback
+// path valid even after the down migration removes the column. A present row
+// with an absent/malformed boundary fails closed.
+func humanReviewTerminalGateApplies(ctx context.Context, tx pgx.Tx, eventSeq int64) (bool, error) {
+	var (
+		applied  bool
+		boundary *int64
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT migration.version IS NOT NULL,
+		       (to_jsonb(migration)->>'event_seq_boundary')::bigint
+		FROM (VALUES (1)) AS singleton(n)
+		LEFT JOIN public.schema_migrations AS migration
+		  ON migration.version = $1
+	`, humanReviewGateBoundaryMigration).Scan(&applied, &boundary)
+	if err != nil {
+		return false, err
+	}
+	if !applied {
+		return false, nil
+	}
+	if boundary == nil {
+		return false, fmt.Errorf("migration %04d has no event sequence boundary", humanReviewGateBoundaryMigration)
+	}
+	return eventSeq > *boundary, nil
+}
+
+func workItemCreatedSeq(ctx context.Context, tx pgx.Tx, id uuid.UUID) (int64, error) {
+	var seq int64
+	err := tx.QueryRow(ctx, `
+		SELECT seq
+		FROM public.events
+		WHERE subject_kind = $1
+		  AND subject_id = $2
+		  AND kind = $3
+		ORDER BY seq ASC
+		LIMIT 1
+	`, domain.SubjectWorkItem, id, domain.EventWorkItemCreated).Scan(&seq)
+	if err != nil {
+		return 0, err
+	}
+	return seq, nil
 }
 
 // precedingLifecycleState derives transition authority from immutable event

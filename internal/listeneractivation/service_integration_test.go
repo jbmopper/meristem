@@ -125,8 +125,17 @@ func TestListenerActivationMigrationDownUpRoundTrip(t *testing.T) {
 	if err := storage.Migrate(ctx, pool, nil); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("migrate 0039 down: %v", err)
+	for {
+		var maxVersion *int64
+		if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&maxVersion); err != nil {
+			t.Fatalf("read migration tip: %v", err)
+		}
+		if maxVersion == nil || *maxVersion < 39 {
+			break
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("migrate down through 0039: %v", err)
+		}
 	}
 	var exists bool
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.listener_activations') IS NOT NULL`).Scan(&exists); err != nil {

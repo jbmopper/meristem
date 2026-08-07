@@ -3,6 +3,7 @@ package workitems
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -241,6 +242,10 @@ func TestHistoricalUnauthorizedReviewEventRemainsButProjectsBlocked(t *testing.T
 	if err == nil {
 		_ = tx.Rollback(ctx)
 		t.Fatal("direct transition append completed blocked work item")
+	}
+	if !strings.Contains(err.Error(), "cannot complete while human review is blocked") {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("direct transition append error = %v, want blocked human-review gate", err)
 	}
 	if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
 		t.Fatalf("roll back rejected direct transition: %v", rollbackErr)
