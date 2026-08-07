@@ -186,8 +186,12 @@ A projection writer turns appended events into derived rows. It is the *only* co
   connector, inbox, registry/policy, convergence-signal, or execution access.
 - The sealed provider marker is transport-independent: the shared MCP
   dispatcher applies the same profile tool allowlist and provider-safe response
-  reducer over HTTP and stdio. Missing markers retain the transport's ordinary
-  local-token policy; unknown or inexact markers fail closed.
+  reducer over HTTP and stdio. An exact `mcp.profile:local_agent_v1` marker on
+  an active non-root agent token selects the ordinary scope-derived tool/DTO
+  policy over either transport and grants no authority of its own. Unmarked
+  stdio tokens retain compatibility behavior; unmarked HTTP tokens retain the
+  provider-safe read fallback. Unknown, repeated, ambiguous, or inexact markers
+  fail closed.
 - OAuth client binding/revocation requires an explicitly scoped non-root human
   token (`oauth_clients.bind` / `oauth_clients.revoke`). The root token remains
   mint/revoke-only. Unknown or inexact provider profiles fail closed.

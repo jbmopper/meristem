@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 )
@@ -144,6 +145,9 @@ func (s *Service) CreateDelegatedToken(ctx context.Context, tx pgx.Tx, in Create
 	}
 	if source != domain.SourceAgent {
 		return CreateTokenResult{}, fmt.Errorf("auth: delegated token source must be %q", domain.SourceAgent)
+	}
+	if access.HasLocalMCPProfileMarker(in.Scopes) {
+		return CreateTokenResult{}, fmt.Errorf("auth: delegated token cannot carry a local MCP profile marker")
 	}
 	return s.appendTokenCreated(ctx, tx, appendTokenInput{
 		Name:   in.Name,

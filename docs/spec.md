@@ -101,14 +101,20 @@ profile boundary. Sealed read profiles expose only provider-safe work-item/feed
 projections; sealed tracker-write profiles additionally expose narrowly
 validated, idempotent work-item coordination mutations. They never expose
 approval, connector, inbox, registry/policy, private payload, or execution
-authority. Missing markers retain the transport's ordinary local-token policy;
-unknown or inexact markers fail closed.
+authority. An exact `mcp.profile:local_agent_v1` marker on an active, non-root
+agent token selects the ordinary scope-derived MCP surface and ordinary DTOs on
+both stdio and HTTP; the marker grants no authority beyond the token's other
+scopes. Unmarked stdio tokens retain their compatibility behavior, while
+unmarked HTTP tokens retain the provider-safe read fallback. Unknown, repeated,
+ambiguous, or inexact markers fail closed.
 
 `docs/network-layer-spec.md` gives the detailed registry, origin-validation,
 queue, patience, staging, and acceptance contract. In particular, Stage 1 is
 peer REST plus queue fallback; provider MCP ingress is Stage 2. Remote-reference
-caching, object re-homing implementation, application relay, and HTTP MCP
-writes are explicit follow-up work, not implicit parts of Stage 1.
+caching, object re-homing implementation, and application relay are explicit
+follow-up work, not implicit parts of Stage 1. Local-agent HTTP MCP mutations
+use the same canonical services and durable MCP argument-idempotency contract
+as stdio; this does not make them part of peer networking.
 
 ### Deterministic and Probabilistic Subsystems
 
@@ -350,6 +356,11 @@ receipt operations through the same services.
   or ceiling mismatches fail at binding, authorization, token exchange,
   refresh, and access. The shared MCP dispatcher enforces the marker's sealed
   tool and provider-safe data profile over both HTTP and stdio.
+- Local-agent HTTP actors carry exactly one `mcp.profile:local_agent_v1`
+  marker. Only the root-controlled token creation path may issue it; delegated
+  issuance rejects it. The marker selects transport behavior but grants no
+  tool authority: advertisement and dispatch remain a deterministic reduction
+  over the actor's ordinary scopes, including object-level tree checks.
 - Token revocation is instant; the next request fails. A panic-revoke endpoint reachable from the iPhone invalidates every non-root token.
 - Tokens are recorded on every event. Audit answers "who, via what client, when, with what authority."
 
@@ -541,9 +552,11 @@ v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the 
 - 🚧 MCP server with REST parity ✅ for read/triage paths, feed projections,
   registry/projection reads, substrate `work_item` mutations, and approval
   request/decision tools plus approval-gated HTTP connector requests over
-  stdio; provider HTTP MCP has provider-safe reads plus a sealed tracker-only
-  mutation profile with durable replay and no execution/external-write tools.
-  Artifact attachment remains open.
+  stdio and explicitly marked local-agent HTTP clients; local HTTP calls retain
+  scope-derived tool filtering, ordinary DTOs, request attribution, and durable
+  argument-level replay. Provider HTTP MCP remains separately sealed to
+  provider-safe reads plus its tracker-only mutation profile, with no
+  execution/external-write tools. Artifact attachment remains open.
 - ◻︎ Nightly Postgres dumps to object storage; documented and rehearsed restore.
 - 🚧 Single-VM deploy with TLS, disk encryption, and object overflow.
 

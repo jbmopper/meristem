@@ -126,6 +126,7 @@ func TestBuildGuardBlocksAuthoritativeRoutesButLeavesDiagnostics(t *testing.T) {
 		Version:     "fallback",
 		BuildStatus: provider,
 	}, nil)
+	allowMCPWriteDeadlines(s)
 	s.routes()
 
 	for _, request := range []*http.Request{

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -18,17 +19,12 @@ import (
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
-// TestLocalAgentHTTPReadSurfaceParityGuardIntegration pins the current
-// local-agent HTTP MCP surface for item 4473e765. A local agent token (no
-// sealed provider.profile marker) is routed by internal/api/mcp.go's
-// providerHTTPProfile onto ProviderSafeReadHTTPProfile, so its HTTP surface is
-// capped at the four provider-safe reads even though stdio advertises the full
-// read surface. This guard makes the parity gap explicit: if a future slice
-// widens the local HTTP surface (the parent item), it must consciously update
-// this test rather than drift silently. It also proves that tools denied at the
-// HTTP profile boundary append no events. See docs/mcp-parity.md, section
-// "Local-Agent HTTP MCP Parity Audit".
-func TestLocalAgentHTTPReadSurfaceParityGuardIntegration(t *testing.T) {
+// TestLocalAgentHTTPSurfaceAndIdempotencyParityIntegration proves that an
+// explicitly local-profiled actor receives the same scope-derived tools and
+// ordinary DTOs over stdio and HTTP. Canonical and cursor aliases share one
+// canonical idempotency identity; changed-body reuse conflicts without a
+// second authoritative event.
+func TestLocalAgentHTTPSurfaceAndIdempotencyParityIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newMCPIntegrationPool(t)
 	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
@@ -58,11 +54,26 @@ func TestLocalAgentHTTPReadSurfaceParityGuardIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn A1: %v", err)
 	}
+	b, err := workSvc.Create(ctx, workitems.CreateInput{Title: "B", Actor: rootResult.Token})
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	b1, err := workSvc.SpawnChild(ctx, b.ID, workitems.CreateInput{Title: "B1", Actor: rootResult.Token})
+	if err != nil {
+		t.Fatalf("spawn B1: %v", err)
+	}
 
-	// Legacy scope-less broad local agent token: source=agent, no scopes, not
-	// root -> access.legacyUnscoped grants the full stdio surface.
+	// Explicit local profile plus explicit business scopes: the profile changes
+	// presentation only and cannot revive the legacy empty-scope shortcut.
 	broadResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
-		Name:   "local-broad-agent",
+		Name: "local-broad-agent",
+		Scopes: []string{
+			access.ScopeMCPLocalAgentProfileV1,
+			access.ScopeFeedRead,
+			access.ScopeWorkItemsReadAll,
+			access.ScopeWorkItemsWriteAll,
+			access.ScopeWorkItemsCreate,
+		},
 		Source: domain.SourceAgent,
 		Actor:  &rootResult.Token,
 	})
@@ -79,8 +90,7 @@ func TestLocalAgentHTTPReadSurfaceParityGuardIntegration(t *testing.T) {
 		Feed:        feed.NewService(pool),
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
-	// stdio: the broad token sees the full read surface plus its permitted
-	// mutations.
+	// Stdio and HTTP both derive the surface from the same explicit scopes.
 	if err := s.Authenticate(ctx, broadResult.Secret); err != nil {
 		t.Fatalf("authenticate broad agent: %v", err)
 	}
@@ -89,7 +99,6 @@ func TestLocalAgentHTTPReadSurfaceParityGuardIntegration(t *testing.T) {
 		"feed.read", "backlog.readiness", "work_items.list", "work_items.get",
 		"registry.list", "registry.get", "projections.list", "projections.get",
 		"approvals.get", "approvals.list_for_work_item",
-		"deterministic_errors.list", "deterministic_errors.get",
 		"work_items.create", "work_items.transition", "convergence.propose_checks",
 	} {
 		if !stdioNames[name] {
@@ -97,68 +106,125 @@ func TestLocalAgentHTTPReadSurfaceParityGuardIntegration(t *testing.T) {
 		}
 	}
 
-	// HTTP: the same local token gets ProviderSafeReadHTTPProfile (the API's
-	// fallback for an unmarked token) and is capped at exactly four reads.
-	localProfile := ProviderSafeReadHTTPProfile()
+	localProfile := LocalAgentHTTPProfile()
 	httpNames := toolListNamesHTTP(t, s, broad, localProfile)
-	wantHTTP := map[string]bool{
-		"feed.read": true, "backlog.readiness": true,
-		"work_items.list": true, "work_items.get": true,
+	if len(httpNames) != len(stdioNames) {
+		t.Fatalf("HTTP local surface count=%d, stdio=%d; HTTP=%v stdio=%v", len(httpNames), len(stdioNames), httpNames, stdioNames)
 	}
-	if len(httpNames) != len(wantHTTP) {
-		t.Fatalf("HTTP local surface = %v, want exactly %v", httpNames, wantHTTP)
-	}
-	for name := range wantHTTP {
+	for name := range stdioNames {
 		if !httpNames[name] {
-			t.Fatalf("HTTP local surface missing %q: %v", name, httpNames)
-		}
-	}
-	for _, denied := range []string{
-		"registry.list", "registry.get", "projections.list", "projections.get",
-		"approvals.get", "approvals.list_for_work_item",
-		"deterministic_errors.list", "deterministic_errors.get",
-		"work_items.create", "work_items.spawn_child", "work_items.transition",
-		"work_items.append_event", "work_items.update_metadata",
-		"convergence.propose_checks", "inbox.capture",
-	} {
-		if httpNames[denied] {
-			t.Fatalf("HTTP local surface leaked %q that stdio-only should keep: %v", denied, httpNames)
+			t.Fatalf("HTTP local surface missing stdio tool %q: %v", name, httpNames)
 		}
 	}
 
-	// Denied tools append no events. registry.list is a stdio-visible read;
-	// work_items.transition is a mutation. Both must be rejected at the HTTP
-	// profile boundary before any handler or event append.
-	before := durableEffectCounts(t, ctx, pool)
-
-	deniedRead := callHTTPTool(t, s, broad, localProfile, "registry.list", map[string]any{})
-	if deniedRead.TransportError == "" {
-		t.Fatalf("registry.list should be rejected at the HTTP profile boundary, got %+v", deniedRead)
+	ordinary := callHTTPTool(t, s, broad, localProfile, "work_items.get", map[string]any{"id": a1.ID.String()})
+	if ordinary.IsError || ordinary.TransportError != "" || !strings.Contains(ordinary.Text, "created_by") || strings.Contains(ordinary.Text, ProviderSafeWorkItemsContract) {
+		t.Fatalf("local HTTP did not retain the ordinary work-item DTO: %+v", ordinary)
 	}
 
-	deniedWrite := callHTTPTool(t, s, broad, localProfile, "work_items.transition", map[string]any{
+	args := map[string]any{
 		"id":              a1.ID.String(),
-		"to":              string(domain.WorkItemRunning),
-		"reason":          "should never run over the local HTTP fallback",
-		"idempotency_key": "local-http-transition-denied",
-	})
-	if deniedWrite.TransportError == "" {
-		t.Fatalf("work_items.transition should be rejected at the HTTP profile boundary, got %+v", deniedWrite)
+		"to":              string(domain.WorkItemTriaged),
+		"reason":          "local HTTP canonical mutation",
+		"idempotency_key": "local-http-transition",
+	}
+	first := callHTTPTool(t, s, broad, localProfile, "work_items.transition", args)
+	aliasReplay := callHTTPTool(t, s, broad, localProfile, "work_items_transition", args)
+	if first.IsError || first.TransportError != "" || aliasReplay.IsError || aliasReplay.TransportError != "" || first.Text != aliasReplay.Text {
+		t.Fatalf("canonical/alias replay mismatch: first=%+v replay=%+v", first, aliasReplay)
+	}
+	changed := map[string]any{
+		"id":              a1.ID.String(),
+		"to":              string(domain.WorkItemTriaged),
+		"reason":          "changed body under reused key",
+		"idempotency_key": "local-http-transition",
+	}
+	conflict := callHTTPTool(t, s, broad, localProfile, "work_items.transition", changed)
+	if !conflict.IsError || !strings.Contains(conflict.Text, "idempotency") {
+		t.Fatalf("changed-body reuse did not conflict: %+v", conflict)
+	}
+	if got := eventCount(t, pool, domain.EventWorkItemTransitioned); got != 1 {
+		t.Fatalf("canonical/alias replay plus changed-body conflict appended %d transition events, want 1", got)
 	}
 
-	after := durableEffectCounts(t, ctx, pool)
-	if after != before {
-		t.Fatalf("denied HTTP local-profile calls changed durable state: before=%+v after=%+v", before, after)
+	// Concurrent first-seen calls through the two spellings serialize on the
+	// same canonical identity. Exactly one handler may append the transition.
+	concurrentArgs := map[string]any{
+		"id":              b1.ID.String(),
+		"to":              string(domain.WorkItemTriaged),
+		"reason":          "local HTTP concurrent mutation",
+		"idempotency_key": "local-http-concurrent-transition",
+	}
+	results := make(chan httpToolCallResult, 2)
+	for _, name := range []string{"work_items.transition", "work_items_transition"} {
+		go func() {
+			results <- callHTTPTool(t, s, broad, localProfile, name, concurrentArgs)
+		}()
+	}
+	concurrentFirst, concurrentSecond := <-results, <-results
+	if concurrentFirst.IsError || concurrentFirst.TransportError != "" ||
+		concurrentSecond.IsError || concurrentSecond.TransportError != "" ||
+		concurrentFirst.Text != concurrentSecond.Text {
+		t.Fatalf("concurrent canonical/alias replay mismatch: first=%+v second=%+v", concurrentFirst, concurrentSecond)
+	}
+	if got := eventCount(t, pool, domain.EventWorkItemTransitioned); got != 2 {
+		t.Fatalf("concurrent canonical/alias mutation produced %d total transition events, want 2", got)
+	}
+
+	treeResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "local-tree-agent",
+		Scopes: []string{
+			access.ScopeMCPLocalAgentProfileV1,
+			access.ScopeFeedReadAssigned,
+			access.ScopeWorkItemsRead,
+			access.ScopeWorkItemsWrite,
+			access.WorkItemTreeScope(a.ID),
+		},
+		Source: domain.SourceAgent,
+		Actor:  &rootResult.Token,
+	})
+	if err != nil {
+		t.Fatalf("create tree local agent: %v", err)
+	}
+	if err := s.Authenticate(ctx, treeResult.Secret); err != nil {
+		t.Fatalf("authenticate tree local agent: %v", err)
+	}
+	treeStdio := toolListNamesStdio(t, s)
+	treeHTTP := toolListNamesHTTP(t, s, treeResult.Token, localProfile)
+	if len(treeHTTP) != len(treeStdio) {
+		t.Fatalf("tree-scoped HTTP/stdin surface count differs: HTTP=%v stdio=%v", treeHTTP, treeStdio)
+	}
+	for name := range treeStdio {
+		if !treeHTTP[name] {
+			t.Fatalf("tree-scoped HTTP missing stdio tool %q: %v", name, treeHTTP)
+		}
+	}
+	if treeHTTP["work_items.create"] || !treeHTTP["work_items.get"] || !treeHTTP["work_items.transition"] {
+		t.Fatalf("tree-scoped surface did not remain narrowed: %v", treeHTTP)
+	}
+	inside := callHTTPTool(t, s, treeResult.Token, localProfile, "work_items.get", map[string]any{"id": a1.ID.String()})
+	outside := callHTTPTool(t, s, treeResult.Token, localProfile, "work_items.get", map[string]any{"id": b1.ID.String()})
+	if inside.IsError || inside.TransportError != "" || !outside.IsError {
+		t.Fatalf("tree object boundary failed: inside=%+v outside=%+v", inside, outside)
+	}
+	beforeDenied := eventCount(t, pool, domain.EventWorkItemTransitioned)
+	deniedWrite := callHTTPTool(t, s, treeResult.Token, localProfile, "work_items.transition", map[string]any{
+		"id":              b1.ID.String(),
+		"to":              string(domain.WorkItemPlanned),
+		"reason":          "must remain outside tree",
+		"idempotency_key": "local-http-outside-tree",
+	})
+	if !deniedWrite.IsError || deniedWrite.TransportError != "" {
+		t.Fatalf("tree-scoped HTTP mutation escaped object boundary: %+v", deniedWrite)
+	}
+	if afterDenied := eventCount(t, pool, domain.EventWorkItemTransitioned); afterDenied != beforeDenied {
+		t.Fatalf("denied tree-scoped HTTP mutation appended an event: before=%d after=%d", beforeDenied, afterDenied)
 	}
 }
 
-// TestHTTPPermittedWriteAttributesPerAgentActorIntegration proves item
-// 4473e765(2c): events created over an already-permitted HTTP write path carry
-// actor_token_id equal to the calling bearer, and two distinct bearers produce
-// two distinct actor attributions. The provider-tracker profile is the only
-// already-permitted HTTP write path today; local-token writes wait on 95c24a80.
-// This locks the per-agent attribution property local agents must inherit once
-// HTTP writes are enabled.
+// TestHTTPPermittedWriteAttributesPerAgentActorIntegration proves that events
+// created over the local HTTP write path carry actor_token_id equal to the
+// calling bearer and two distinct bearers retain distinct attribution.
 func TestHTTPPermittedWriteAttributesPerAgentActorIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newMCPIntegrationPool(t)
@@ -176,11 +242,12 @@ func TestHTTPPermittedWriteAttributesPerAgentActorIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root token: %v", err)
 	}
-	actorAResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-attr-a", Source: domain.SourceAgent, Actor: &rootResult.Token})
+	localScopes := []string{access.ScopeMCPLocalAgentProfileV1, access.ScopeWorkItemsWriteAll, access.ScopeWorkItemsReadAll, access.ScopeWorkItemsCreate}
+	actorAResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-attr-a", Source: domain.SourceAgent, Scopes: localScopes, Actor: &rootResult.Token})
 	if err != nil {
 		t.Fatalf("create actor A: %v", err)
 	}
-	actorBResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-attr-b", Source: domain.SourceAgent, Actor: &rootResult.Token})
+	actorBResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-attr-b", Source: domain.SourceAgent, Scopes: localScopes, Actor: &rootResult.Token})
 	if err != nil {
 		t.Fatalf("create actor B: %v", err)
 	}
@@ -189,9 +256,10 @@ func TestHTTPPermittedWriteAttributesPerAgentActorIntegration(t *testing.T) {
 
 	s := New(Deps{
 		Idempotency: idempotency.NewMiddleware(pool, writer),
+		Access:      access.NewService(pool),
 		WorkItems:   workitems.NewService(pool, writer),
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
-	profile := ProviderTrackerHTTPProfile()
+	profile := LocalAgentHTTPProfile()
 
 	baseArgs := func(key string) map[string]any {
 		return map[string]any{

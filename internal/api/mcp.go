@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/mcp"
@@ -123,16 +123,35 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request, actor dom
 		writeAPIError(w, http.StatusBadRequest, "request_read_failed", "could not read request body")
 		return
 	}
-	profile, err := providerHTTPProfile(actor)
+	profile, err := mcp.HTTPProfileForActor(actor)
 	if err != nil {
-		writeAPIError(w, http.StatusForbidden, "provider_authority_denied", "bearer token does not carry one exact sealed provider authority profile")
+		writeAPIError(w, http.StatusForbidden, "mcp_profile_denied", "bearer token does not carry one exact valid MCP authority profile")
 		return
 	}
+	toolNameMode, err := mcpToolNameMode(r)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_mcp_tool_names", err.Error())
+		return
+	}
+	if err := s.setMCPWriteDeadline(w, time.Now().Add(s.policy.MaxFeedWait+5*time.Second)); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "mcp_write_deadline_unavailable", "could not establish the MCP response write deadline")
+		return
+	}
+	defer func() {
+		// SetWriteDeadline is connection-scoped. Clear this request's bounded
+		// long-poll allowance so a keep-alive connection is not poisoned after
+		// the absolute deadline passes. The response may already be committed;
+		// a clear failure is diagnostic only and must not rewrite it.
+		if err := s.setMCPWriteDeadline(w, time.Time{}); err != nil && s.logger != nil {
+			s.logger.Debug("mcp: clear write deadline failed", "error", err.Error())
+		}
+	}()
 	protocolHeader, hasProtocolHeader := headerValue(r, mcp.HeaderProtocolVersion)
 	mcpMethod, hasMcpMethod := headerValue(r, "Mcp-Method")
 	mcpName, hasMcpName := headerValue(r, "Mcp-Name")
 	resp := s.mcpServer.HandleHTTPMessageWithOptions(r.Context(), raw, actor, mcp.HTTPOptions{
-		Profile: profile,
+		Profile:      profile,
+		ToolNameMode: toolNameMode,
 		Transport: &mcp.HTTPTransportContext{
 			ProtocolVersion:    protocolHeader,
 			HasProtocolVersion: hasProtocolHeader,
@@ -156,6 +175,31 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request, actor dom
 	}
 }
 
+func (s *Server) setMCPWriteDeadline(w http.ResponseWriter, deadline time.Time) error {
+	if s.mcpSetWriteDeadline != nil {
+		return s.mcpSetWriteDeadline(w, deadline)
+	}
+	return http.NewResponseController(w).SetWriteDeadline(deadline)
+}
+
+func mcpToolNameMode(r *http.Request) (mcp.ToolNameMode, error) {
+	values := r.Header.Values(mcp.HeaderToolNames)
+	if len(values) == 0 {
+		return mcp.ToolNameModeCanonical, nil
+	}
+	if len(values) != 1 {
+		return "", errors.New("X-Meristem-Tool-Names must appear at most once")
+	}
+	switch strings.TrimSpace(values[0]) {
+	case "canonical":
+		return mcp.ToolNameModeCanonical, nil
+	case "cursor":
+		return mcp.ToolNameModeCursor, nil
+	default:
+		return "", errors.New("X-Meristem-Tool-Names must be canonical or cursor")
+	}
+}
+
 // headerValue distinguishes an absent header from an empty one; the era
 // classifier needs the difference for the required-header rules.
 func headerValue(r *http.Request, name string) (string, bool) {
@@ -164,25 +208,4 @@ func headerValue(r *http.Request, name string) (string, bool) {
 		return "", false
 	}
 	return values[0], true
-}
-
-func providerHTTPProfile(actor domain.Token) (*mcp.HTTPToolProfile, error) {
-	profile, err := access.ProviderAuthorityProfileFromScopes(actor.Scopes)
-	if err != nil {
-		if access.HasProviderAuthorityMarker(actor.Scopes) {
-			return nil, err
-		}
-		// Static internal/debug bearers predate provider profiles. Preserve
-		// their provider-safe read-only HTTP surface; ordinary access policy
-		// still filters tools and objects from the token's actual scopes.
-		return mcp.ProviderSafeReadHTTPProfile(), nil
-	}
-	switch profile {
-	case access.ProviderOwnerTrackerReadV1, access.ProviderDelegatedTreeReadV1:
-		return mcp.ProviderSafeReadHTTPProfile(), nil
-	case access.ProviderOwnerTrackerWriteV1, access.ProviderDelegatedTreeWriteV1:
-		return mcp.ProviderTrackerHTTPProfile(), nil
-	default:
-		return nil, access.ErrInvalidProviderAuthority
-	}
 }

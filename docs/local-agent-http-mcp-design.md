@@ -50,7 +50,10 @@ marker.
   `/mcp` POST extends its write deadline to the configured maximum feed wait
   plus a five-second response margin through `http.ResponseController`. Failure
   to establish that deadline rejects the request before tool dispatch; the
-  transport never accepts a wait it cannot return as a JSON-RPC response.
+  transport never accepts a wait it cannot return as a JSON-RPC response. The
+  handler clears the connection-scoped deadline on exit so keep-alive requests
+  cannot inherit an expired absolute deadline; a clear failure is diagnostic
+  only and never rewrites an already-committed response.
 - OAuth or token exchange for local agents. Those belong to the later token
   ergonomics work.
 - Removing the root-only local administration path used to mint and revoke
