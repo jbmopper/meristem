@@ -1,7 +1,7 @@
 # Local-Agent HTTP MCP Parity and Client Cutover
 
 Status: accepted after Claude round-two review
-Work item: `35991736-bdae-53ac-9760-1121a1855189`  
+Work item: `35991736-bdae-53ac-9760-1121a1855189`
 Implementation base: `c22fc5e81f188f83ccd5eb502dfc328ef6024b81`
 
 ## Decision
