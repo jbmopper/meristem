@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -60,11 +61,21 @@ func (cultivarDefinedProjector) Apply(ctx context.Context, tx pgx.Tx, event doma
 	if event.SubjectKind != domain.SubjectCultivar {
 		return fmt.Errorf("cultivar.defined: expected subject_kind %q, got %q", domain.SubjectCultivar, event.SubjectKind)
 	}
-	payload, err := decodeCultivarPayload(event.Payload)
+	payload, dispatchCapabilityDeclared, err := decodeCultivarPayload(event.Payload)
 	if err != nil {
 		return err
 	}
-	profile, err := json.Marshal(payload.Profile)
+	profileValue := any(payload.Profile)
+	if !dispatchCapabilityDeclared {
+		// Preserve the stored shape of historical profile payloads. The read
+		// model derives their compatibility capability in memory, so a rebuild
+		// does not manufacture a field that the authoritative event never had.
+		profileValue = struct {
+			Briefing       string   `json:"briefing"`
+			ScopesTemplate []string `json:"scopes_template"`
+		}{payload.Profile.Briefing, payload.Profile.ScopesTemplate}
+	}
+	profile, err := json.Marshal(profileValue)
 	if err != nil {
 		return fmt.Errorf("cultivar.defined: marshal profile: %w", err)
 	}
@@ -115,18 +126,19 @@ func decodeTropismPayload(raw any) (DefineTropismInput, error) {
 	return p, nil
 }
 
-func decodeCultivarPayload(raw any) (DefineCultivarInput, error) {
+func decodeCultivarPayload(raw any) (DefineCultivarInput, bool, error) {
 	b, err := json.Marshal(raw)
 	if err != nil {
-		return DefineCultivarInput{}, fmt.Errorf("cultivar.defined: marshal payload: %w", err)
+		return DefineCultivarInput{}, false, fmt.Errorf("cultivar.defined: marshal payload: %w", err)
 	}
 	var p DefineCultivarInput
 	if err := json.Unmarshal(b, &p); err != nil {
-		return DefineCultivarInput{}, fmt.Errorf("cultivar.defined: unmarshal payload: %w", err)
+		return DefineCultivarInput{}, false, fmt.Errorf("cultivar.defined: unmarshal payload: %w", err)
 	}
+	declared := strings.TrimSpace(p.Profile.DispatchCapability) != ""
 	p, _, err = normalizeCultivarInput(p)
 	if err != nil {
-		return DefineCultivarInput{}, fmt.Errorf("cultivar.defined: %w", err)
+		return DefineCultivarInput{}, false, fmt.Errorf("cultivar.defined: %w", err)
 	}
-	return p, nil
+	return p, declared, nil
 }

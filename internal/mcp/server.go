@@ -26,6 +26,8 @@ import (
 	"github.com/jbmopper/meristem/internal/httpconnector"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
+	"github.com/jbmopper/meristem/internal/listeneractivation"
+	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
 	"github.com/jbmopper/meristem/internal/projectiondefs"
@@ -54,6 +56,8 @@ type Deps struct {
 	Inbox               *inbox.Service
 	OAuthClientAdmin    *oauth.ClientAdminService
 	WorkItems           *workitems.Service
+	Listeners           *listeners.Service
+	ListenerActivations *listeneractivation.Service
 	Approvals           *approvals.Service
 	HTTPConnector       *httpconnector.Service
 	CheckProposals      *convergence.ChecksProposalService
@@ -127,11 +131,31 @@ func New(deps Deps, info ServerInfo, logger *slog.Logger) *Server {
 		toolsByName:    make(map[string]Tool),
 	}
 	s.tools = s.buildTools()
-	for _, t := range s.tools {
-		s.toolsByName[t.Name] = t
-		s.toolsByName[cursorToolName(t.Name)] = t
+	indexed, err := indexTools(s.tools)
+	if err != nil {
+		panic(err)
 	}
+	s.toolsByName = indexed
 	return s
+}
+
+func indexTools(tools []Tool) (map[string]Tool, error) {
+	indexed := make(map[string]Tool, len(tools)*2)
+	for _, tool := range tools {
+		if existing, ok := indexed[tool.Name]; ok {
+			return nil, fmt.Errorf("mcp: tool name collision %q between %q and %q", tool.Name, existing.Name, tool.Name)
+		}
+		indexed[tool.Name] = tool
+		alias := cursorToolName(tool.Name)
+		if alias == tool.Name {
+			continue
+		}
+		if existing, ok := indexed[alias]; ok {
+			return nil, fmt.Errorf("mcp: tool name collision %q between %q and %q", alias, existing.Name, tool.Name)
+		}
+		indexed[alias] = tool
+	}
+	return indexed, nil
 }
 
 // SetToolNameMode changes only the names advertised in tools/list. Dispatch
@@ -158,8 +182,8 @@ func (s *Server) Authenticate(ctx context.Context, secret string) error {
 	if err != nil {
 		return err
 	}
-	if _, _, err := providerMCPProfileForActor(tok); err != nil {
-		return fmt.Errorf("mcp: invalid sealed provider authority: %w", err)
+	if _, _, err := mcpProfileForActor(tok); err != nil {
+		return fmt.Errorf("mcp: invalid MCP actor profile: %w", err)
 	}
 	s.mu.Lock()
 	s.actor = tok
@@ -420,27 +444,29 @@ func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor do
 // shared verbatim by the legacy and modern eras — the era boundary renders
 // envelopes, it never grows a second policy path.
 func (s *Server) gatedToolsList(actor domain.Token) (any, *rpcError) {
-	profile, restricted, err := providerMCPProfileForActor(actor)
+	profile, marked, err := mcpProfileForActor(actor)
 	if err != nil {
-		return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
+		return nil, rpcErrorf(errCodeInvalidRequest, "invalid MCP actor profile")
 	}
-	if restricted {
-		return s.handleListToolsFiltered(actor, HTTPOptions{Profile: profile})
+	if marked {
+		return s.handleListToolsFiltered(actor, HTTPOptions{Profile: profile, ToolNameMode: s.toolNameMode})
 	}
 	return s.handleListTools(actor)
 }
 
 func (s *Server) gatedToolsCall(ctx context.Context, actor domain.Token, params json.RawMessage) (any, *rpcError) {
-	profile, restricted, err := providerMCPProfileForActor(actor)
+	profile, marked, err := mcpProfileForActor(actor)
 	if err != nil {
-		return nil, rpcErrorf(errCodeInvalidRequest, "invalid sealed provider authority")
+		return nil, rpcErrorf(errCodeInvalidRequest, "invalid MCP actor profile")
 	}
-	if restricted {
+	if marked {
 		opts := HTTPOptions{Profile: profile}
-		if rerr := s.checkHTTPToolAllowed(params, opts); rerr != nil {
+		if rerr := s.checkHTTPToolAllowedForActor(actor, params, opts); rerr != nil {
 			return nil, rerr
 		}
-		ctx = withProviderSafeContext(ctx)
+		if profile.providerSafe() {
+			ctx = withProviderSafeContext(ctx)
+		}
 	}
 	return s.handleCallTool(ctx, actor, params)
 }
@@ -570,13 +596,17 @@ func (s *Server) modernizeResult(result any, cacheable bool) any {
 }
 
 func (s *Server) handleListTools(actor domain.Token) (any, *rpcError) {
+	return s.handleListToolsWithMode(actor, s.toolNameMode)
+}
+
+func (s *Server) handleListToolsWithMode(actor domain.Token, mode ToolNameMode) (any, *rpcError) {
 	descs := make([]toolDescriptor, 0, len(s.tools))
 	for _, t := range s.tools {
 		if !access.ToolVisible(actor, t.Name) {
 			continue
 		}
 		descs = append(descs, toolDescriptor{
-			Name:        s.advertisedToolName(t.Name),
+			Name:        advertisedToolName(t.Name, mode),
 			Description: t.Description,
 			InputSchema: t.InputSchema,
 		})
@@ -584,8 +614,8 @@ func (s *Server) handleListTools(actor domain.Token) (any, *rpcError) {
 	return map[string]any{"tools": descs}, nil
 }
 
-func (s *Server) advertisedToolName(canonical string) string {
-	if s.toolNameMode == ToolNameModeCursor {
+func advertisedToolName(canonical string, mode ToolNameMode) string {
+	if mode == ToolNameModeCursor {
 		return cursorToolName(canonical)
 	}
 	return canonical

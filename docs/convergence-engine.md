@@ -56,7 +56,7 @@ a running `work_item` with nonempty `suggested_convergence_checks` uses
   - verdict persistence uses `convergence.AppendVerdict`;
   - unchanged rejected input digests do not consume another attempt;
   - generic budget is three fresh input digests, then `hand_to_human`
-    escalation (`blocked` + `human_review_status=blocked`).
+    escalation (lifecycle `blocked`, prior `human_review_status` preserved).
 - `internal/app/projectors.go` and `cmd/meristem/rebuild.go` — registry and
   rebuild wiring for the new projection.
 - `internal/domain` — convergence taxonomy:
@@ -225,9 +225,10 @@ are produced by projectors, not ad hoc migration DML.
    - `OutcomeRetry` → leave `running`; the next scan only records a new attempt
      if the input digest changed.
    - `OutcomeEscalate` → apply the `Escalation` rule: `EscalateFail` →
-     `failed`; `EscalateHandToHuman` → `blocked` + `human_review_status`
-     blocked; `EscalateRequestApproval` → the approval system (v1; until
-     approvals ship, treat as `blocked` with a reason, never auto-approve).
+     `failed`; `EscalateHandToHuman` → lifecycle `blocked` with the prior
+     `human_review_status` preserved; `EscalateRequestApproval` → the
+     approval system (v1; until approvals ship, treat lifecycle as `blocked`
+     with a reason, never auto-approve).
 2. The worker then runs the patience metronome over remaining non-terminal
    items. The dwell clock is `work_items.state_entered_at`, not `updated_at`;
    appended progress, metadata changes, and other chatter update activity
@@ -235,11 +236,13 @@ are produced by projectors, not ad hoc migration DML.
    `patience.breached`. If the item is not already
    `human_review_status=blocked`, the same tick routes through the default
    timeout rule: request a human escalation, create the human-visible child,
-   set `human_review_status=blocked`, and transition the original item to
-   `blocked`. Items already waiting on human review are the fixed point: the
-   worker keeps recording breach observations for owner visibility, but it
+   preserve the origin's prior human-review decision, and transition the
+   original item to lifecycle `blocked`. Items already waiting on human review
+   are the fixed point: the worker keeps recording breach observations for
+   owner visibility, but it
    never recursively escalates them. The escalation reason excludes observed
-   age, so re-scanning the same state epoch converges on the same escalation id.
+   age, so a waved-through or approved origin re-scanned in the same blocked
+   state epoch also converges on the same escalation id without another child.
 3. Every transition is its own event (one state change = one event). The
    verdict event and the transition event are distinct.
 4. Where the work_item declares no checks, skip the convergence reducer; the

@@ -23,8 +23,9 @@ type TropismRef struct {
 }
 
 type Profile struct {
-	Briefing       string   `json:"briefing"`
-	ScopesTemplate []string `json:"scopes_template"`
+	Briefing           string   `json:"briefing"`
+	ScopesTemplate     []string `json:"scopes_template"`
+	DispatchCapability string   `json:"dispatch_capability"`
 }
 
 type Xylem struct {

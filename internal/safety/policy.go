@@ -116,8 +116,8 @@ func DefaultPolicy() Policy {
 			// 7d budget keeps bounded patience (spec principle 3) while giving
 			// the owner a working week before a blocked stay re-escalates. One
 			// escalation per blocked epoch is already guaranteed by the
-			// deterministic escalation id and the human_review_status=blocked
-			// skip (see internal/worker: TestScanOnceEscalationChildrenDoNotBreed).
+			// deterministic escalation id; human-review-blocked items skip the
+			// request entirely (see internal/worker integration tests).
 			domain.WorkItemBlocked: 7 * 24 * time.Hour,
 		},
 	}

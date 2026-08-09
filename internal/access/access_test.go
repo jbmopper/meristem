@@ -124,6 +124,9 @@ func TestToolVisible_ScopedWorkerSurface(t *testing.T) {
 		"registry.activate_cultivar",
 		"work_items.update_metadata",
 		"work_items.transition",
+		"listeners.ensure_activation",
+		"listener_activations.begin",
+		"listener_activations.record_receipt",
 	}
 	for _, tool := range visible {
 		if !ToolVisible(actor, tool) {

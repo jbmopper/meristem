@@ -228,10 +228,11 @@ func TestAssignedFeedSSEResumeAndExactAssignmentControlsIntegration(t *testing.T
 	fixture := newAssignedFeedFixture(t)
 	cursor := fetchHeadCursor(t, fixture.server.Handler(), fixture.actorA.Secret)
 
-	if _, err := fixture.work.Claim(fixture.ctx, fixture.sseItem.ID, fixture.actorA.Token); err != nil {
+	claimA, err := fixture.work.Claim(fixture.ctx, fixture.sseItem.ID, fixture.actorA.Token)
+	if err != nil {
 		t.Fatalf("claim SSE item for A: %v", err)
 	}
-	if _, err := fixture.work.Yield(fixture.ctx, fixture.sseItem.ID, fixture.actorA.Token); err != nil {
+	if _, err := fixture.work.Yield(fixture.ctx, fixture.sseItem.ID, claimA.AssignmentEventID, fixture.actorA.Token); err != nil {
 		t.Fatalf("yield SSE item for A: %v", err)
 	}
 	if _, err := fixture.work.Claim(fixture.ctx, fixture.sseItem.ID, fixture.actorB.Token); err != nil {

@@ -24,6 +24,11 @@ var (
 	ErrAssignmentNotFound     = errors.New("workitems: no active assignment")
 	ErrAssignmentNotHeld      = errors.New("workitems: assignment is held by another token")
 	ErrAssignmentStateMissing = errors.New("workitems: assignment-state projection missing")
+	// ErrStaleAssignmentGeneration refuses a yield naming an assignment event
+	// that is not the CURRENT generation. A delayed yield from a released
+	// epoch must never close a newer lease — even one held by the same token
+	// after reacquiring (review finding LCP-B1).
+	ErrStaleAssignmentGeneration = errors.New("workitems: yield names a stale assignment generation")
 )
 
 // ClaimHeldError reports the current holder without granting a takeover. It
@@ -48,6 +53,28 @@ type assignmentState struct {
 	UpdatedAt     time.Time
 }
 
+// ClaimBinding attributes a claim to the listener-bound operation that
+// authorized it: the listener registration, the durable demand event, and
+// the policy revision in force. The three travel together (all-or-none) and
+// land on both the assignment event payload and the projection, so restart
+// derivation is generation-bound to the listener rather than just the token.
+type ClaimBinding struct {
+	ListenerID    uuid.UUID
+	DemandEventID uuid.UUID
+	PolicyEventID uuid.UUID
+}
+
+func bindingField(binding *ClaimBinding, pick func(ClaimBinding) uuid.UUID) *uuid.UUID {
+	if binding == nil {
+		return nil
+	}
+	v := pick(*binding)
+	if v == uuid.Nil {
+		return nil
+	}
+	return &v
+}
+
 // Claim atomically checks and appends a mode=claim assignment. The global
 // lock order is work_items first, then its permanent assignment-state row.
 // That placeholder makes the empty state lockable, so two first claimers
@@ -57,42 +84,58 @@ type assignmentState struct {
 // is returned as a typed conflict; no takeover path exists. An expired epoch
 // is released as expired in the same transaction before the fresh claim.
 func (s *Service) Claim(ctx context.Context, id uuid.UUID, actor domain.Token) (domain.WorkItemAssignment, error) {
-	if actor.ID == uuid.Nil {
-		return domain.WorkItemAssignment{}, fmt.Errorf("%w: actor token id is required", ErrInvalidRequest)
-	}
-	if actor.IsRoot {
-		return domain.WorkItemAssignment{}, fmt.Errorf("%w: root token is mint/revoke-only", ErrClaimUnavailable)
-	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return domain.WorkItemAssignment{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	item, err := scanWorkItemForUpdate(ctx, tx, id)
+	assignment, budgetErr, err := s.ClaimInTx(ctx, tx, id, actor, nil)
 	if err != nil {
 		return domain.WorkItemAssignment{}, err
 	}
-	if err := claimableWorkItem(item); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return domain.WorkItemAssignment{}, err
+	}
+	if budgetErr != nil {
+		return domain.WorkItemAssignment{}, budgetErr
+	}
+	return assignment, nil
+}
+
+// ClaimInTx is the full claim reduction inside the CALLER'S transaction —
+// the composition seam for the listener-bound claim operation, which locks
+// and revalidates the listener registration in the same transaction before
+// delegating here. The caller owns commit/rollback; a non-nil budgetErr must
+// still be committed (the exhaustion event is recorded) and then surfaced.
+func (s *Service) ClaimInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor domain.Token, binding *ClaimBinding) (domain.WorkItemAssignment, error, error) {
+	if actor.ID == uuid.Nil {
+		return domain.WorkItemAssignment{}, nil, fmt.Errorf("%w: actor token id is required", ErrInvalidRequest)
+	}
+	if actor.IsRoot {
+		return domain.WorkItemAssignment{}, nil, fmt.Errorf("%w: root token is mint/revoke-only", ErrClaimUnavailable)
+	}
+	item, err := scanWorkItemForUpdate(ctx, tx, id)
+	if err != nil {
+		return domain.WorkItemAssignment{}, nil, err
+	}
+	if err := claimableWorkItem(item); err != nil {
+		return domain.WorkItemAssignment{}, nil, err
 	}
 	state, err := scanAssignmentStateForUpdate(ctx, tx, id)
 	if err != nil {
-		return domain.WorkItemAssignment{}, err
+		return domain.WorkItemAssignment{}, nil, err
 	}
 	observedAt, err := readAssignmentClock(ctx, tx)
 	if err != nil {
-		return domain.WorkItemAssignment{}, err
+		return domain.WorkItemAssignment{}, nil, err
 	}
 
 	if state.Assignment != nil && state.Assignment.ExpiresAt.After(observedAt) {
-		if state.Assignment.HolderTokenID == actor.ID && state.Assignment.Mode == domain.WorkItemAssignmentClaim {
-			if err := tx.Commit(ctx); err != nil {
-				return domain.WorkItemAssignment{}, err
-			}
-			return *state.Assignment, nil
+		if state.Assignment.HolderTokenID == actor.ID && state.Assignment.Mode == domain.WorkItemAssignmentClaim &&
+			sameClaimBinding(state.Assignment, binding) {
+			return *state.Assignment, nil, nil
 		}
-		return domain.WorkItemAssignment{}, &ClaimHeldError{
+		return domain.WorkItemAssignment{}, nil, &ClaimHeldError{
 			HolderTokenID:     state.Assignment.HolderTokenID,
 			AssignmentEventID: state.Assignment.AssignmentEventID,
 			ExpiresAt:         state.Assignment.ExpiresAt,
@@ -100,17 +143,17 @@ func (s *Service) Claim(ctx context.Context, id uuid.UUID, actor domain.Token) (
 	}
 	if state.Assignment != nil {
 		if _, err := s.appendAssignmentReleaseInTx(ctx, tx, *state.Assignment, domain.AssignmentReleaseExpired, "", observedAt, actor); err != nil {
-			return domain.WorkItemAssignment{}, err
+			return domain.WorkItemAssignment{}, nil, err
 		}
 		state, err = scanAssignmentState(ctx, tx, id, false)
 		if err != nil {
-			return domain.WorkItemAssignment{}, err
+			return domain.WorkItemAssignment{}, nil, err
 		}
 	}
 
 	lease, leaseSource, err := s.resolveClaimLease(ctx, tx, id)
 	if err != nil {
-		return domain.WorkItemAssignment{}, err
+		return domain.WorkItemAssignment{}, nil, err
 	}
 	// Lease birth is a second DB-clock observation immediately before the
 	// append path. The earlier observation decides incumbent expiry; keeping
@@ -118,33 +161,39 @@ func (s *Service) Claim(ctx context.Context, id uuid.UUID, actor domain.Token) (
 	// consuming the replacement's short lease before it is even recorded.
 	claimedAt, err := readAssignmentClock(ctx, tx)
 	if err != nil {
-		return domain.WorkItemAssignment{}, err
+		return domain.WorkItemAssignment{}, nil, err
 	}
-	assignment, budgetErr, err := s.appendClaimInTx(ctx, tx, item, actor, lease, leaseSource, claimedAt, state.StateEventID)
-	if err != nil {
-		return domain.WorkItemAssignment{}, err
-	}
-	if budgetErr != nil {
-		if err := tx.Commit(ctx); err != nil {
-			return domain.WorkItemAssignment{}, err
-		}
-		return domain.WorkItemAssignment{}, budgetErr
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.WorkItemAssignment{}, err
-	}
-	return assignment, nil
+	return s.appendClaimInTx(ctx, tx, item, actor, lease, leaseSource, claimedAt, state.StateEventID, binding)
 }
 
-// Yield releases the caller's active assignment. Yield is holder-only and is
-// the sole voluntary release reason; terminal transitions and the worker own
+// sameClaimBinding decides whether an existing unexpired same-holder claim is
+// THIS logical claim (idempotent success) or a different one (held conflict).
+// An unbound retry matches an unbound claim; a listener-bound retry matches
+// only an assignment attributed to the SAME listener — the same token backing
+// two listener registrations must not treat one listener's lease as the
+// other's.
+func sameClaimBinding(existing *domain.WorkItemAssignment, binding *ClaimBinding) bool {
+	if binding == nil {
+		return existing.ListenerID == nil
+	}
+	return existing.ListenerID != nil && *existing.ListenerID == binding.ListenerID
+}
+
+// Yield releases the caller's active assignment. Yield is holder-only AND
+// generation-fenced: the caller names the exact work_item.assigned event it
+// intends to release, so a delayed stale yield appends nothing even when the
+// same token has since reacquired the item under a new lease. Yield is the
+// sole voluntary release reason; terminal transitions and the worker own
 // done and expired respectively.
-func (s *Service) Yield(ctx context.Context, id uuid.UUID, actor domain.Token) (domain.WorkItemAssignment, error) {
+func (s *Service) Yield(ctx context.Context, id uuid.UUID, assignmentEventID uuid.UUID, actor domain.Token) (domain.WorkItemAssignment, error) {
 	if actor.ID == uuid.Nil {
 		return domain.WorkItemAssignment{}, fmt.Errorf("%w: actor token id is required", ErrInvalidRequest)
 	}
 	if actor.IsRoot {
 		return domain.WorkItemAssignment{}, fmt.Errorf("%w: root token is mint/revoke-only", ErrClaimUnavailable)
+	}
+	if assignmentEventID == uuid.Nil {
+		return domain.WorkItemAssignment{}, fmt.Errorf("%w: assignment_event_id is required", ErrInvalidRequest)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -163,6 +212,10 @@ func (s *Service) Yield(ctx context.Context, id uuid.UUID, actor domain.Token) (
 	}
 	if state.Assignment.HolderTokenID != actor.ID {
 		return domain.WorkItemAssignment{}, ErrAssignmentNotHeld
+	}
+	if state.Assignment.AssignmentEventID != assignmentEventID {
+		return domain.WorkItemAssignment{}, fmt.Errorf("%w: current=%s named=%s",
+			ErrStaleAssignmentGeneration, state.Assignment.AssignmentEventID, assignmentEventID)
 	}
 	assignment := *state.Assignment
 	releasedAt, err := readAssignmentClock(ctx, tx)
@@ -191,6 +244,57 @@ func (s *Service) GetAssignment(ctx context.Context, id uuid.UUID) (domain.WorkI
 		return domain.WorkItemAssignment{}, ErrAssignmentNotFound
 	}
 	return *state.Assignment, nil
+}
+
+// ListAssignmentsForHolder is the restart-derivation read (listener control
+// plane, slice 3): the active assignments a principal currently holds,
+// ordered deterministically by (claimed_at, work_item_id). A restarted
+// supervisor derives IDLE/FOCUSED from this projection — never from process
+// memory. Expiry stays worker-owned: an expired-but-unreleased lease is still
+// returned here (the holder resumes FOCUSED and observes the release), so a
+// supervisor cannot silently double-claim during the expiry window.
+func (s *Service) ListAssignmentsForHolder(ctx context.Context, holder uuid.UUID) ([]domain.WorkItemAssignment, error) {
+	if holder == uuid.Nil {
+		return nil, fmt.Errorf("workitems: holder token id is required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT work_item_id, mode, assignment_event_id, claimed_at, expires_at, updated_at,
+		       listener_id, demand_event_id, policy_event_id
+		FROM work_item_assignment_state
+		WHERE holder_token_id = $1
+		ORDER BY claimed_at, work_item_id`, holder)
+	if err != nil {
+		return nil, fmt.Errorf("workitems: list assignments for holder: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.WorkItemAssignment
+	for rows.Next() {
+		assignment := domain.WorkItemAssignment{HolderTokenID: holder}
+		var (
+			mode                                   string
+			listenerID, demandEventID, policyEvent pgtype.UUID
+		)
+		if err := rows.Scan(&assignment.WorkItemID, &mode, &assignment.AssignmentEventID,
+			&assignment.ClaimedAt, &assignment.ExpiresAt, &assignment.UpdatedAt,
+			&listenerID, &demandEventID, &policyEvent); err != nil {
+			return nil, fmt.Errorf("workitems: scan holder assignment: %w", err)
+		}
+		assignment.Mode = domain.WorkItemAssignmentMode(mode)
+		if listenerID.Valid {
+			v := uuid.UUID(listenerID.Bytes)
+			assignment.ListenerID = &v
+		}
+		if demandEventID.Valid {
+			v := uuid.UUID(demandEventID.Bytes)
+			assignment.DemandEventID = &v
+		}
+		if policyEvent.Valid {
+			v := uuid.UUID(policyEvent.Bytes)
+			assignment.PolicyEventID = &v
+		}
+		out = append(out, assignment)
+	}
+	return out, rows.Err()
 }
 
 // ExpireAssignment is the worker-owned cleanup seam. It revalidates one
@@ -348,7 +452,7 @@ func boundedClaimLeaseSeconds(seconds int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func (s *Service) appendClaimInTx(ctx context.Context, tx pgx.Tx, item domain.WorkItem, actor domain.Token, lease time.Duration, leaseSource string, claimedAt time.Time, predecessorEventID uuid.UUID) (domain.WorkItemAssignment, error, error) {
+func (s *Service) appendClaimInTx(ctx context.Context, tx pgx.Tx, item domain.WorkItem, actor domain.Token, lease time.Duration, leaseSource string, claimedAt time.Time, predecessorEventID uuid.UUID, binding *ClaimBinding) (domain.WorkItemAssignment, error, error) {
 	if lease <= 0 || lease > safety.MaxPatienceBudget || lease%time.Second != 0 {
 		return domain.WorkItemAssignment{}, nil, fmt.Errorf("%w: claim lease must be positive whole seconds and <= %s", ErrInvalidRequest, safety.MaxPatienceBudget)
 	}
@@ -374,6 +478,9 @@ func (s *Service) appendClaimInTx(ctx context.Context, tx pgx.Tx, item domain.Wo
 			LeaseSource:     leaseSource,
 			ClaimedAt:       claimedAt,
 			ExpiresAt:       claimedAt.Add(lease),
+			ListenerID:      bindingField(binding, func(b ClaimBinding) uuid.UUID { return b.ListenerID }),
+			DemandEventID:   bindingField(binding, func(b ClaimBinding) uuid.UUID { return b.DemandEventID }),
+			PolicyEventID:   bindingField(binding, func(b ClaimBinding) uuid.UUID { return b.PolicyEventID }),
 		},
 	}
 	eventID, err := events.DeterministicID(spec)
@@ -431,6 +538,7 @@ func scanAssignmentStateForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) 
 func scanAssignmentState(ctx context.Context, q queryer, id uuid.UUID, forUpdate bool) (assignmentState, error) {
 	query := `
 		SELECT holder_token_id, mode, assignment_event_id, claimed_at, expires_at,
+		       listener_id, demand_event_id, policy_event_id,
 		       state_event_id, state_event_seq, updated_at
 		FROM work_item_assignment_state
 		WHERE work_item_id = $1`
@@ -443,11 +551,15 @@ func scanAssignmentState(ctx context.Context, q queryer, id uuid.UUID, forUpdate
 		assignmentEvent pgtype.UUID
 		claimedAt       pgtype.Timestamptz
 		expiresAt       pgtype.Timestamptz
+		listenerID      pgtype.UUID
+		demandEventID   pgtype.UUID
+		policyEventID   pgtype.UUID
 		stateEvent      uuid.UUID
 		state           assignmentState
 	)
 	if err := q.QueryRow(ctx, query, id).Scan(
 		&holder, &mode, &assignmentEvent, &claimedAt, &expiresAt,
+		&listenerID, &demandEventID, &policyEventID,
 		&stateEvent, &state.StateEventSeq, &state.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -477,6 +589,18 @@ func scanAssignmentState(ctx context.Context, q queryer, id uuid.UUID, forUpdate
 		ClaimedAt:         claimedAt.Time,
 		ExpiresAt:         expiresAt.Time,
 		UpdatedAt:         state.UpdatedAt,
+	}
+	if listenerID.Valid {
+		v := uuid.UUID(listenerID.Bytes)
+		assignment.ListenerID = &v
+	}
+	if demandEventID.Valid {
+		v := uuid.UUID(demandEventID.Bytes)
+		assignment.DemandEventID = &v
+	}
+	if policyEventID.Valid {
+		v := uuid.UUID(policyEventID.Bytes)
+		assignment.PolicyEventID = &v
 	}
 	if !assignment.Mode.Valid() {
 		return assignmentState{}, fmt.Errorf("workitems: invalid assignment mode %q for %s", assignment.Mode, id)

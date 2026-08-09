@@ -37,12 +37,7 @@ func TestAssignmentMigrationBackfillsNonterminalItemFromCreatedEvent(t *testing.
 	if err != nil {
 		t.Fatalf("create actor: %v", err)
 	}
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back terminal addressee migration: %v", err)
-	}
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back assignment migration: %v", err)
-	}
+	migrateDownBelow(t, ctx, pool, 35)
 
 	legacyRegistry := projections.NewRegistry()
 	legacyRegistry.Register(preAssignmentCreatedProjector{})
@@ -113,10 +108,11 @@ func TestTerminalAddresseeMigrationBackfillsActiveEpochOnly(t *testing.T) {
 	activeEntry := loadLatestAssignmentEvent(t, ctx, pool, activeAtTerminal.ID, domain.EventWorkItemTransitioned)
 
 	releasedBeforeTerminal := createClaimableItem(t, ctx, svc, holder, "terminal addressee migration released")
-	if _, err := svc.Claim(ctx, releasedBeforeTerminal.ID, holder); err != nil {
+	releasedClaim, err := svc.Claim(ctx, releasedBeforeTerminal.ID, holder)
+	if err != nil {
 		t.Fatalf("claim released fixture: %v", err)
 	}
-	if _, err := svc.Yield(ctx, releasedBeforeTerminal.ID, holder); err != nil {
+	if _, err := svc.Yield(ctx, releasedBeforeTerminal.ID, releasedClaim.AssignmentEventID, holder); err != nil {
 		t.Fatalf("yield released fixture: %v", err)
 	}
 	if _, err := svc.Transition(ctx, releasedBeforeTerminal.ID, domain.WorkItemDone, "pre-0036 released terminal", closer); err != nil {
@@ -146,9 +142,7 @@ func TestTerminalAddresseeMigrationBackfillsActiveEpochOnly(t *testing.T) {
 	// Dropping 0036 erases only the new projection column. The events and
 	// 0035 lifecycle rows left behind are exactly the state an older binary
 	// would present at guarded upgrade time.
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back terminal addressee migration: %v", err)
-	}
+	migrateDownBelow(t, ctx, pool, 36)
 	// Legacy producers omitted payload.from. Append both a terminal entry and a
 	// terminal same-state no-op in that historical shape, then fold the exact
 	// 0035 pointers in the same transaction. The no-op must not become a second
@@ -347,9 +341,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		if _, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "first terminal entry", closer); err != nil {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownBelow(t, ctx, pool, 36)
 
 		// Model corrupted pre-0036 history without running today's fail-closed
 		// projector: a later event attempts to change one terminal into another.
@@ -415,9 +407,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		if _, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "terminal entry done", closer); err != nil {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownBelow(t, ctx, pool, 36)
 		// Simulate pre-upgrade projection drift. The migration must abort rather
 		// than silently bind a done event to a failed terminal sentinel.
 		if _, err := pool.Exec(ctx, `
@@ -442,9 +432,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		if _, err := svc.Transition(ctx, item.ID, domain.WorkItemDone, "terminal entry done", closer); err != nil {
 			t.Fatalf("terminalize fixture: %v", err)
 		}
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownBelow(t, ctx, pool, 36)
 		// A terminal work_item with a nonterminal assignment sentinel cannot be
 		// repaired safely by guessing. The guarded cutover must reject it before
 		// deriving an address from history.
@@ -467,9 +455,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		ctx := context.Background()
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "missing assignment placeholder")
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownBelow(t, ctx, pool, 36)
 		if _, err := pool.Exec(ctx, `DELETE FROM work_item_assignment_state WHERE work_item_id=$1`, item.ID); err != nil {
 			t.Fatalf("remove assignment placeholder fixture: %v", err)
 		}
@@ -484,9 +470,7 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 		ctx := context.Background()
 		pool, writer, _, holder, _ := newAssignmentTestStack(t, ctx)
 		item := createClaimableItem(t, ctx, NewService(pool, writer), holder, "nonterminal lifecycle drift")
-		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-			t.Fatalf("roll back terminal addressee migration: %v", err)
-		}
+		migrateDownBelow(t, ctx, pool, 36)
 		if _, err := pool.Exec(ctx, `UPDATE work_items SET state='planned' WHERE id=$1`, item.ID); err != nil {
 			t.Fatalf("prepare nonterminal lifecycle drift fixture: %v", err)
 		}
@@ -517,14 +501,32 @@ func TestTerminalAddresseeMigrationRejectsInvalidTerminalHistory(t *testing.T) {
 	})
 }
 
+// migrateDownBelow rolls back until every applied migration version is below
+// target. The fixtures in this file mean "the pre-0035/0036 schema", not "N
+// steps down from wherever head happens to be" — counting steps broke every
+// time a later migration landed above the assignment pair.
+func migrateDownBelow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, target int64) {
+	t.Helper()
+	for {
+		var max *int64
+		if err := pool.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&max); err != nil {
+			t.Fatalf("read migration version: %v", err)
+		}
+		if max == nil || *max < target {
+			return
+		}
+		if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+			t.Fatalf("migrate down below %d: %v", target, err)
+		}
+	}
+}
+
 func migrateMalformedPriorAssignedFixture(t *testing.T, assigneeValue string) error {
 	t.Helper()
 	ctx := context.Background()
 	pool, writer, _, actor, _ := newAssignmentTestStack(t, ctx)
 	item := createClaimableItem(t, ctx, NewService(pool, writer), actor, "malformed prior assigned control")
-	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("roll back terminal addressee migration: %v", err)
-	}
+	migrateDownBelow(t, ctx, pool, 36)
 
 	legacyWriter := events.NewWriter(projections.NewRegistry())
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})

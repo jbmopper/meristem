@@ -11,11 +11,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -115,12 +117,11 @@ func TestScanOnceEmitsBreachAndEscalates(t *testing.T) {
 		t.Errorf("events count for %s = %d after first pass, want %d", domain.EventEscalationRequested, got, wantBreaches)
 	}
 	assertEventKindDeltaAllowed(t, beforeKinds, eventKindCounts(t, ctx, pool), map[string]bool{
-		domain.EventPatienceBreached:        true,
-		domain.EventEscalationRequested:     true,
-		domain.EventWorkItemCreated:         true,
-		domain.EventWorkItemRelationAdded:   true,
-		domain.EventWorkItemMetadataUpdated: true,
-		domain.EventWorkItemTransitioned:    true,
+		domain.EventPatienceBreached:      true,
+		domain.EventEscalationRequested:   true,
+		domain.EventWorkItemCreated:       true,
+		domain.EventWorkItemRelationAdded: true,
+		domain.EventWorkItemTransitioned:  true,
 	})
 
 	// Per-row check: the under-budget seed must not have a breach event.
@@ -142,7 +143,6 @@ func TestScanOnceEmitsBreachAndEscalates(t *testing.T) {
 		wantReview := domain.HumanReviewWavedThrough
 		if s.expectHit {
 			wantState = domain.WorkItemBlocked
-			wantReview = domain.HumanReviewBlocked
 		}
 		if gotItem.State != wantState {
 			t.Errorf("planted[%d] state = %s, want %s", i, gotItem.State, wantState)
@@ -1012,17 +1012,199 @@ func TestScanDispatchRequestsEligibleItems(t *testing.T) {
 		t.Fatalf("dispatch events = %d, want 2", got)
 	}
 	defaultPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleDefault.ID)
-	if defaultPayload.WorkItemID != eligibleDefault.ID || defaultPayload.Cultivar != "checklist-worker@1" || defaultPayload.State != string(domain.WorkItemTriaged) {
+	if defaultPayload.WorkItemID != eligibleDefault.ID || defaultPayload.Cultivar != "checklist-worker@1" || defaultPayload.Capability != "work_items.execute_checks" || defaultPayload.State != string(domain.WorkItemTriaged) {
 		t.Fatalf("default dispatch payload = %+v", defaultPayload)
 	}
 	explicitPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleExplicit.ID)
-	if explicitPayload.WorkItemID != eligibleExplicit.ID || explicitPayload.Cultivar != "convergence-scribe@1" || explicitPayload.State != string(domain.WorkItemPlanned) {
+	if explicitPayload.WorkItemID != eligibleExplicit.ID || explicitPayload.Cultivar != "convergence-scribe@1" || explicitPayload.Capability != "convergence.propose_checks" || explicitPayload.State != string(domain.WorkItemPlanned) {
 		t.Fatalf("explicit dispatch payload = %+v", explicitPayload)
 	}
 	for _, skipped := range []uuid.UUID{checkless.ID, blocked.ID, running.ID} {
 		if got := countEventsForSubject(t, ctx, pool, skipped, domain.EventDispatchRequested); got != 0 {
 			t.Fatalf("dispatch events for skipped %s = %d, want 0", skipped, got)
 		}
+	}
+}
+
+func TestScanDispatchSkipsUnresolvableExplicitCultivarWithoutBlockingOtherDemand(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "dispatch-skip-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	system, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "dispatch-skip-system", Source: domain.SourceSystem, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create system: %v", err)
+	}
+	seedChecklistWorkerCultivar(t, ctx, pool, writer, system.Token)
+
+	// Simulate a historical event written before cultivar validation existed.
+	// It remains authoritative, but its stale launch reference must not stop the
+	// global dispatch pass.
+	invalidID := uuid.New()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin historical append: %v", err)
+	}
+	if _, _, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: invalidID,
+		Kind: domain.EventWorkItemCreated, Source: domain.SourceSystem,
+		ActorTokenID: &system.Token.ID,
+		Payload: map[string]any{
+			"title": "historical missing cultivar", "state": domain.WorkItemTriaged,
+			"cultivar":                     "missing-worker@1",
+			"suggested_convergence_checks": []string{"cmd:go test ./..."},
+			"human_review_status":          domain.HumanReviewWavedThrough,
+		},
+	}); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("append historical item: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit historical item: %v", err)
+	}
+	valid, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "valid demand after stale cultivar", State: domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough, Actor: system.Token,
+	})
+	if err != nil {
+		t.Fatalf("create valid item: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &system.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	result, err := w.scanDispatch(ctx)
+	if err != nil {
+		t.Fatalf("scan dispatch: %v", err)
+	}
+	if result.DispatchCandidatesScanned != 2 || result.DispatchesSkippedMissingCultivar != 1 || result.DispatchesRequested != 1 {
+		t.Fatalf("dispatch result = %+v, want scanned=2 missing=1 requested=1", result)
+	}
+	if got := countEventsForSubject(t, ctx, pool, invalidID, domain.EventDispatchRequested); got != 0 {
+		t.Fatalf("invalid historical item dispatch events = %d, want 0", got)
+	}
+	if got := countEventsForSubject(t, ctx, pool, valid.ID, domain.EventDispatchRequested); got != 1 {
+		t.Fatalf("valid item dispatch events = %d, want 1", got)
+	}
+}
+
+// TestScanDispatchRoutesOrdinaryDemandToSemanticListener is the production-
+// path regression for f65efff8: the worker, not the test, creates the durable
+// demand. The cultivar remains launch metadata while its profile supplies the
+// semantic capability consumed by listener routing.
+func TestScanDispatchRoutesOrdinaryDemandToSemanticListener(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	system, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-system", Source: domain.SourceSystem, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create system: %v", err)
+	}
+	admin, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-admin", Source: domain.SourceHuman,
+		Scopes: []string{access.ScopeListenersAdmin}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create listener admin: %v", err)
+	}
+	principal, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-listener", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeWorkItemsReadAll, access.ScopeWorkItemsWriteAll}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create listener principal: %v", err)
+	}
+
+	seedChecklistWorkerCultivar(t, ctx, pool, writer, system.Token)
+	listenerSvc := listeners.NewService(pool, writer)
+	reg, err := listenerSvc.Register(ctx, listeners.RegisterInput{
+		Name: "semantic-route", PrincipalTokenID: principal.Token.ID, Provider: "test",
+		Capabilities: []string{"work_items.execute_checks"}, Actor: admin.Token,
+	})
+	if err != nil {
+		t.Fatalf("register listener: %v", err)
+	}
+	reg, err = listenerSvc.SetPolicy(ctx, reg.ID, listeners.SetPolicyInput{
+		Policy: listeners.Policy{
+			Capabilities: []string{"work_items.execute_checks"}, MaxConcurrentAssignments: 1,
+		},
+		Actor: admin.Token,
+	})
+	if err != nil {
+		t.Fatalf("set listener policy: %v", err)
+	}
+
+	item, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "ordinary semantic route", State: domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough, Actor: principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("create ordinary item: %v", err)
+	}
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &system.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	result, err := w.scanDispatch(ctx)
+	if err != nil {
+		t.Fatalf("scan dispatch: %v", err)
+	}
+	if result.DispatchesRequested != 1 {
+		t.Fatalf("dispatch result = %+v, want one worker-produced demand", result)
+	}
+	payload := dispatchPayloadForSubject(t, ctx, pool, item.ID)
+	if payload.Cultivar != "checklist-worker@1" || payload.Capability != "work_items.execute_checks" {
+		t.Fatalf("dispatch route = cultivar %q capability %q", payload.Cultivar, payload.Capability)
+	}
+
+	var demandEventID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM events
+		WHERE subject_kind=$1 AND subject_id=$2 AND kind=$3
+		ORDER BY seq DESC LIMIT 1
+	`, domain.SubjectWorkItem, item.ID, domain.EventDispatchRequested).Scan(&demandEventID); err != nil {
+		t.Fatalf("read worker-produced demand event: %v", err)
+	}
+	routed, err := listenerSvc.ResolveForDemand(ctx, demandEventID)
+	if err != nil {
+		t.Fatalf("route worker-produced demand: %v", err)
+	}
+	if routed.ID != reg.ID {
+		t.Fatalf("routed listener = %s, want %s", routed.ID, reg.ID)
+	}
+	candidates, err := listenerSvc.ListDemandCandidates(ctx, reg.ID, principal.Token)
+	if err != nil {
+		t.Fatalf("list worker-produced candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].DemandEventID != demandEventID || candidates[0].Envelope.Capability != "work_items.execute_checks" {
+		t.Fatalf("listener candidates = %+v, want exact worker-produced semantic demand", candidates)
 	}
 }
 
@@ -1120,7 +1302,7 @@ func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
 		t.Fatalf("child body missing commit ref:\n%s", child.Body)
 	}
 	payload := dispatchPayloadForSubject(t, ctx, pool, childID)
-	if payload.WorkItemID != childID || payload.Cultivar != "reviewer@1" || payload.State != string(domain.WorkItemTriaged) {
+	if payload.WorkItemID != childID || payload.Cultivar != "reviewer@1" || payload.Capability != "review.exact_artifact" || payload.State != string(domain.WorkItemTriaged) {
 		t.Fatalf("review dispatch payload = %+v", payload)
 	}
 
@@ -1238,7 +1420,7 @@ func TestScanOnceDoesNotSpawnScribeForHumanReviewBlockedItem(t *testing.T) {
 	}
 }
 
-func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
+func TestScanOnceEscalationAttentionChildrenDoNotBreed(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
 	if err := storage.Migrate(ctx, pool, nil); err != nil {
@@ -1298,11 +1480,11 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 	if second.BreachesEmitted != 2 {
 		t.Fatalf("second breaches emitted = %d, want 2", second.BreachesEmitted)
 	}
-	if second.PatienceEscalationsSkippedAwaitingHuman != 2 {
-		t.Fatalf("second skipped awaiting human = %d, want 2", second.PatienceEscalationsSkippedAwaitingHuman)
+	if second.PatienceEscalationsSkippedAwaitingHuman != 1 {
+		t.Fatalf("second skipped awaiting human = %d, want 1", second.PatienceEscalationsSkippedAwaitingHuman)
 	}
-	if second.PatienceEscalationsRequested != 0 {
-		t.Fatalf("second patience escalations = %d, want 0", second.PatienceEscalationsRequested)
+	if second.PatienceEscalationsRequested != 1 {
+		t.Fatalf("second patience escalations = %d, want 1 for the new blocked-state epoch", second.PatienceEscalationsRequested)
 	}
 
 	thirdNow := now.Add(4 * time.Hour)
@@ -1317,17 +1499,20 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 	if third.PatienceEscalationsRequested != 0 {
 		t.Fatalf("third patience escalations = %d, want 0", third.PatienceEscalationsRequested)
 	}
-	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
-		t.Fatalf("escalation requests after later scans = %d, want 1", got)
+	if third.PatienceEscalationsAlreadyRequested != 1 {
+		t.Fatalf("third already-requested escalations = %d, want 1", third.PatienceEscalationsAlreadyRequested)
 	}
-	if got := countRelationsForParent(t, ctx, pool, item.ID); got != 1 {
-		t.Fatalf("children of original = %d, want 1", got)
+	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 2 {
+		t.Fatalf("escalation requests after later scans = %d, want 2 (captured and blocked epochs)", got)
+	}
+	if got := countRelationsForParent(t, ctx, pool, item.ID); got != 2 {
+		t.Fatalf("children of original = %d, want 2", got)
 	}
 	if got := countRelationsForParent(t, ctx, pool, childID); got != 0 {
 		t.Fatalf("children of human attention item = %d, want 0", got)
 	}
-	if got := countHumanAttentionItems(t, ctx, pool); got != 1 {
-		t.Fatalf("human attention items = %d, want 1", got)
+	if got := countHumanAttentionItems(t, ctx, pool); got != 2 {
+		t.Fatalf("human attention items = %d, want 2", got)
 	}
 }
 
@@ -1336,8 +1521,8 @@ func TestScanOnceEscalationChildrenDoNotBreed(t *testing.T) {
 // (lifecycle state=blocked, human_review_status=waved_through) that overshoots
 // its blocked-state patience budget spawns exactly one human-attention child,
 // no matter how many scans observe the same blocked epoch. The first breach
-// escalates and flips human_review_status to blocked; every later scan of the
-// same epoch takes the awaiting-human skip instead of breeding another child.
+// preserves human_review_status; every later scan converges on the same
+// deterministic escalation instead of breeding another child.
 func TestScanOnceBlockedOwnerCourtEscalatesOnce(t *testing.T) {
 	ctx := context.Background()
 	pool := newIntegrationPool(t)
@@ -1384,10 +1569,17 @@ func TestScanOnceBlockedOwnerCourtEscalatesOnce(t *testing.T) {
 	if got := countHumanAttentionItems(t, ctx, pool); got != 1 {
 		t.Fatalf("human attention items after first = %d, want 1", got)
 	}
+	preserved, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get parent after first escalation: %v", err)
+	}
+	if preserved.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("human_review_status after escalation = %s, want waved_through", preserved.HumanReviewStatus)
+	}
 
 	// A second scan of the same blocked epoch must not breed another child:
-	// the escalation already flipped human_review_status to blocked, so the
-	// breach now takes the awaiting-human skip.
+	// reason and summary are stable for the state epoch, so the escalation id
+	// resolves to the already-recorded request.
 	secondNow := now.Add(24 * time.Hour)
 	secondWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return secondNow })
 	if err != nil {
@@ -1400,8 +1592,11 @@ func TestScanOnceBlockedOwnerCourtEscalatesOnce(t *testing.T) {
 	if second.PatienceEscalationsRequested != 0 {
 		t.Fatalf("second patience escalations = %d, want 0", second.PatienceEscalationsRequested)
 	}
-	if second.PatienceEscalationsSkippedAwaitingHuman != 1 {
-		t.Fatalf("second skipped awaiting human = %d, want 1", second.PatienceEscalationsSkippedAwaitingHuman)
+	if second.PatienceEscalationsAlreadyRequested != 1 {
+		t.Fatalf("second already-requested escalations = %d, want 1", second.PatienceEscalationsAlreadyRequested)
+	}
+	if second.PatienceEscalationsSkippedAwaitingHuman != 0 {
+		t.Fatalf("second skipped awaiting human = %d, want 0", second.PatienceEscalationsSkippedAwaitingHuman)
 	}
 	if got := countEventsByKind(t, ctx, pool, domain.EventEscalationRequested); got != 1 {
 		t.Fatalf("escalation requests after second scan = %d, want 1", got)
@@ -1615,8 +1810,8 @@ func TestScanOnceEscalatesStaleRejectedInputsAfterPatienceBudget(t *testing.T) {
 	if got.State != domain.WorkItemBlocked {
 		t.Fatalf("state = %q, want blocked", got.State)
 	}
-	if got.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("human review status = %q, want blocked", got.HumanReviewStatus)
+	if got.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("human review status = %q, want waved_through", got.HumanReviewStatus)
 	}
 }
 
@@ -1637,7 +1832,7 @@ func TestScanOnceConvergenceBlocksAfterFreshFailedAttempts(t *testing.T) {
 		Title:                      "convergence exhausted reject",
 		State:                      domain.WorkItemRunning,
 		SuggestedConvergenceChecks: []string{"tests_green"},
-		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		HumanReviewStatus:          domain.HumanReviewApproved,
 		Actor:                      systemTok.Token,
 	})
 	if err != nil {
@@ -1671,8 +1866,8 @@ func TestScanOnceConvergenceBlocksAfterFreshFailedAttempts(t *testing.T) {
 	if got.State != domain.WorkItemBlocked {
 		t.Fatalf("state = %q, want blocked", got.State)
 	}
-	if got.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("human review status = %q, want blocked", got.HumanReviewStatus)
+	if got.HumanReviewStatus != domain.HumanReviewApproved {
+		t.Fatalf("human review status = %q, want approved", got.HumanReviewStatus)
 	}
 	if countVerdictsForWorkItem(t, ctx, pool, item.ID) != defaultConvergenceMaxAttempts {
 		t.Fatalf("expected %d verdict rows", defaultConvergenceMaxAttempts)
@@ -2056,6 +2251,7 @@ type dispatchPayload struct {
 	State                string    `json:"state"`
 	StateEnteredAtUnix   int64     `json:"state_entered_at_unix"`
 	Cultivar             string    `json:"cultivar"`
+	Capability           string    `json:"capability"`
 	Reason               string    `json:"reason"`
 	SourceReconcilerPass string    `json:"source_reconciler_pass"`
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -165,6 +166,9 @@ func scanCultivar(row rowScanner) (Cultivar, error) {
 	if err := json.Unmarshal(profile, &item.Profile); err != nil {
 		return Cultivar{}, fmt.Errorf("registry: decode cultivar profile: %w", err)
 	}
+	if strings.TrimSpace(item.Profile.DispatchCapability) == "" {
+		item.Profile.DispatchCapability = legacyDispatchCapability(item.Name, item.Version, item.Rootstock)
+	}
 	if err := json.Unmarshal(xylem, &item.Xylem); err != nil {
 		return Cultivar{}, fmt.Errorf("registry: decode cultivar xylem: %w", err)
 	}
@@ -230,6 +234,7 @@ func sameCultivar(current Cultivar, in DefineCultivarInput) bool {
 		current.Tropism == in.Tropism &&
 		current.Profile.Briefing == in.Profile.Briefing &&
 		stringSlicesEqual(current.Profile.ScopesTemplate, in.Profile.ScopesTemplate) &&
+		current.Profile.DispatchCapability == in.Profile.DispatchCapability &&
 		xylemEqual(current.Xylem, in.Xylem) &&
 		current.Phloem == in.Phloem &&
 		current.Description == in.Description

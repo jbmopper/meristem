@@ -141,8 +141,8 @@ func TestSpawnChildEndpointBlocksOverChildrenBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
-	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("parent not blocked by child budget exhaustion: state=%s review=%s", updated.State, updated.HumanReviewStatus)
+	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("parent lifecycle/review after child budget exhaustion: state=%s review=%s", updated.State, updated.HumanReviewStatus)
 	}
 	if updated.StateReason == nil || !strings.Contains(*updated.StateReason, "max_children_per_item") {
 		t.Fatalf("parent state reason should name exhausted budget, got %v", updated.StateReason)
@@ -259,8 +259,8 @@ func TestTransitionEndpointBlocksOverConcurrentRunningBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get second item: %v", err)
 	}
-	if updatedSecond.State != domain.WorkItemBlocked || updatedSecond.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("second item not blocked by running budget exhaustion: state=%s review=%s", updatedSecond.State, updatedSecond.HumanReviewStatus)
+	if updatedSecond.State != domain.WorkItemBlocked || updatedSecond.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("second item lifecycle/review after running budget exhaustion: state=%s review=%s", updatedSecond.State, updatedSecond.HumanReviewStatus)
 	}
 	if updatedSecond.StateReason == nil || !strings.Contains(*updatedSecond.StateReason, "max_concurrent_running_items_per_token") {
 		t.Fatalf("second item state reason should name exhausted budget, got %v", updatedSecond.StateReason)
@@ -454,8 +454,8 @@ func TestAppendEventEndpointBlocksOverEventRateBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get item: %v", err)
 	}
-	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("item not blocked by event-rate exhaustion: state=%s review=%s", updated.State, updated.HumanReviewStatus)
+	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("item lifecycle/review after event-rate exhaustion: state=%s review=%s", updated.State, updated.HumanReviewStatus)
 	}
 	if updated.StateReason == nil || !strings.Contains(*updated.StateReason, "max_events_per_item_per_hour_by_class") {
 		t.Fatalf("item state reason should name exhausted budget, got %v", updated.StateReason)

@@ -48,7 +48,7 @@ func TestAssignmentReleaseReclaimRebuildHonesty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Yield(ctx, item.ID, actorA.Token); err != nil {
+	if _, err := svc.Yield(ctx, item.ID, first.AssignmentEventID, actorA.Token); err != nil {
 		t.Fatal(err)
 	}
 	second, err := svc.Claim(ctx, item.ID, actorB.Token)

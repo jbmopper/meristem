@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -41,8 +43,13 @@ func newMCPRouteTestServer(authenticator auth.Authenticator) *Server {
 		mux:           http.NewServeMux(),
 		policy:        safety.DefaultPolicy(),
 	}
+	allowMCPWriteDeadlines(s)
 	s.routes()
 	return s
+}
+
+func allowMCPWriteDeadlines(s *Server) {
+	s.mcpSetWriteDeadline = func(http.ResponseWriter, time.Time) error { return nil }
 }
 
 func providerActor(t *testing.T, profile access.ProviderAuthorityProfile) domain.Token {
@@ -56,6 +63,7 @@ func providerActor(t *testing.T, profile access.ProviderAuthorityProfile) domain
 
 func TestHandleMCPPostDispatchesAuthenticatedActor(t *testing.T) {
 	s := New(nil, nil)
+	allowMCPWriteDeadlines(s)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
@@ -81,6 +89,7 @@ func TestHandleMCPPostDispatchesAuthenticatedActor(t *testing.T) {
 
 func TestHandleMCPPostRejectsMissingStreamableAccept(t *testing.T) {
 	s := New(nil, nil)
+	allowMCPWriteDeadlines(s)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
@@ -100,6 +109,7 @@ func TestHandleMCPPostRejectsMissingStreamableAccept(t *testing.T) {
 
 func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
 	s := New(nil, nil)
+	allowMCPWriteDeadlines(s)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
@@ -123,6 +133,7 @@ func TestHandleMCPPostExposesReadOnlyToolSurface(t *testing.T) {
 
 func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
 	s := New(nil, nil)
+	allowMCPWriteDeadlines(s)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
 	for _, tc := range []struct {
@@ -134,6 +145,9 @@ func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
 		{name: "sealed read", actor: providerActor(t, access.ProviderOwnerTrackerReadV1), wantStatus: http.StatusOK},
 		{name: "sealed write", actor: providerActor(t, access.ProviderOwnerTrackerWriteV1), wantStatus: http.StatusOK, wantWrite: true},
 		{name: "ordinary scoped static bearer", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeFeedRead, access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusOK},
+		{name: "local agent", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{access.ScopeMCPLocalAgentProfileV1, access.ScopeFeedRead, access.ScopeWorkItemsReadAll, access.ScopeWorkItemsWriteAll}}, wantStatus: http.StatusOK, wantWrite: true},
+		{name: "local marker on human", actor: domain.Token{ID: uuid.New(), Source: domain.SourceHuman, Scopes: []string{access.ScopeMCPLocalAgentProfileV1, access.ScopeFeedRead}}, wantStatus: http.StatusForbidden},
+		{name: "unknown local profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{"mcp.profile:future_profile", access.ScopeFeedRead}}, wantStatus: http.StatusForbidden},
 		{name: "unknown profile", actor: domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{"provider.profile:future_profile", access.ScopeWorkItemsReadAll}}, wantStatus: http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,7 +160,7 @@ func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
 				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.wantStatus, rec.Body.String())
 			}
 			if tc.wantStatus != http.StatusOK {
-				if !strings.Contains(rec.Body.String(), "provider_authority_denied") {
+				if !strings.Contains(rec.Body.String(), "mcp_profile_denied") {
 					t.Fatalf("missing fail-closed error: %s", rec.Body.String())
 				}
 				return
@@ -159,8 +173,109 @@ func TestHandleMCPPostMapsExactProviderProfileToToolSurface(t *testing.T) {
 	}
 }
 
+func TestHandleMCPPostToolNameModeIsRequestLocal(t *testing.T) {
+	s := New(nil, nil)
+	allowMCPWriteDeadlines(s)
+	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceAgent, Scopes: []string{
+		access.ScopeMCPLocalAgentProfileV1, access.ScopeWorkItemsReadAll,
+	}}
+
+	for _, tc := range []struct {
+		name   string
+		header []string
+		status int
+		want   string
+	}{
+		{name: "absent is canonical", status: http.StatusOK, want: `"work_items.get"`},
+		{name: "canonical", header: []string{"canonical"}, status: http.StatusOK, want: `"work_items.get"`},
+		{name: "cursor", header: []string{"cursor"}, status: http.StatusOK, want: `"work_items_get"`},
+		{name: "unknown", header: []string{"future"}, status: http.StatusBadRequest, want: "invalid_mcp_tool_names"},
+		{name: "repeated", header: []string{"canonical", "cursor"}, status: http.StatusBadRequest, want: "invalid_mcp_tool_names"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			for _, value := range tc.header {
+				req.Header.Add(mcp.HeaderToolNames, value)
+			}
+			req = req.WithContext(auth.WithToken(req.Context(), actor))
+			rec := httptest.NewRecorder()
+			s.handleMCP(rec, req)
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("status=%d body=%s, want status=%d containing %q", rec.Code, rec.Body.String(), tc.status, tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleMCPPostEstablishesMaximumFeedWriteDeadline(t *testing.T) {
+	s := New(nil, nil)
+	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	var got []time.Time
+	s.mcpSetWriteDeadline = func(_ http.ResponseWriter, deadline time.Time) error {
+		got = append(got, deadline)
+		return nil
+	}
+	before := time.Now()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(auth.WithToken(req.Context(), providerActor(t, access.ProviderOwnerTrackerReadV1)))
+	rec := httptest.NewRecorder()
+	s.handleMCP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	wantFloor := before.Add(s.policy.MaxFeedWait + 4*time.Second)
+	wantCeiling := before.Add(s.policy.MaxFeedWait + 6*time.Second)
+	if len(got) != 2 {
+		t.Fatalf("SetWriteDeadline calls=%v, want bounded set then clear", got)
+	}
+	if got[0].Before(wantFloor) || got[0].After(wantCeiling) {
+		t.Fatalf("write deadline=%s, want approximately MaxFeedWait+5s in [%s,%s]", got[0], wantFloor, wantCeiling)
+	}
+	if !got[1].IsZero() {
+		t.Fatalf("cleared write deadline=%s, want zero time", got[1])
+	}
+}
+
+func TestHandleMCPPostClearDeadlineFailureDoesNotRewriteResponse(t *testing.T) {
+	s := New(nil, nil)
+	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	s.mcpSetWriteDeadline = func(_ http.ResponseWriter, deadline time.Time) error {
+		if deadline.IsZero() {
+			return errors.New("clear unsupported")
+		}
+		return nil
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(auth.WithToken(req.Context(), providerActor(t, access.ProviderOwnerTrackerReadV1)))
+	rec := httptest.NewRecorder()
+	s.handleMCP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "serverInfo") {
+		t.Fatalf("clear failure rewrote completed response: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleMCPPostRejectsUnavailableWriteDeadlineBeforeDispatch(t *testing.T) {
+	s := New(nil, nil)
+	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	s.mcpSetWriteDeadline = func(http.ResponseWriter, time.Time) error { return errors.New("unsupported") }
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req = req.WithContext(auth.WithToken(req.Context(), providerActor(t, access.ProviderOwnerTrackerReadV1)))
+	rec := httptest.NewRecorder()
+	s.handleMCP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "mcp_write_deadline_unavailable") ||
+		strings.Contains(rec.Body.String(), "serverInfo") {
+		t.Fatalf("deadline failure reached dispatch: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleMCPGetReturns405UntilSSEExists(t *testing.T) {
 	s := New(nil, nil)
+	allowMCPWriteDeadlines(s)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
