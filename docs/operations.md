@@ -135,7 +135,10 @@ The adapter receives only activation and assignment IDs from Meristem, starts a
 turn only when the dedicated task is idle, declines unattended authority
 requests, and writes no local delivery journal. The listener wrapper leaves
 interactive Codex on HTTP but replaces that entry inside this network-disabled
-app-server process with the guarded local stdio command. Current Codex asks the
+app-server process with the guarded local stdio command. Codex does not inherit
+arbitrary parent variables into stdio MCP subprocesses, so the wrapper places
+only the absolute token-file path (never the bearer) in that server's explicit
+environment map. Current Codex asks the
 app-server host to approve each MCP call as an empty form elicitation. The
 adapter accepts only an exact, operator-configured server/tool pair on the
 bound task; message or schema drift fails closed. Shell/file approvals, other
