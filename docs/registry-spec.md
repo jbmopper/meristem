@@ -59,6 +59,7 @@ payload:
   profile:                                    -- structural: worker launch shape
     briefing:   "briefings/convergence-scribe.md"   -- R9 artifact path
     scopes_template: ["work_items.tree:{root}", "work_items.read", "work_items.write", "feed.read_assigned"]
+    dispatch_capability: "convergence.propose_checks" -- semantic listener demand; distinct from cultivar
   xylem:                                      -- structural: budget envelope
     max_attempts: 3
     max_wall_seconds: 1800
@@ -118,8 +119,10 @@ and refusal is structured:
    string as launch metadata. Missing rootstock refuses with
    `unknown_cultivar` naming `registry.list` before any child is spawned.
 2. **Dispatch entries** (R3 remainder, `b6526f08`): the reconciler names the
-   handling cultivar in dispatch payloads; unknown name is impossible by
-   construction because the rule data references the registry.
+   exact handling cultivar and its profile's semantic `dispatch_capability`
+   as separate dispatch fields; unknown name is impossible by construction
+   because the rule data references the registry. Historical profiles without
+   the field receive a deterministic exact-version compatibility mapping.
 3. **Work item metadata / launch wrappers**: `"cultivar": "name@version"`
    strings in event payloads stay launch metadata (never schema identity, per
    the Cerberus contract rule); tools that *act* on them validate first.

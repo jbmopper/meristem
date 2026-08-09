@@ -60,7 +60,7 @@ func TestClaimLedgerAtomicLifecycleAndProjectorReplay(t *testing.T) {
 	if !errors.As(err, &held) || held.HolderTokenID != actorA.ID || held.AssignmentEventID != first.AssignmentEventID || !held.ExpiresAt.Equal(first.ExpiresAt) {
 		t.Fatalf("different-holder conflict = %#v (%v)", held, err)
 	}
-	if _, err := svc.Yield(ctx, item.ID, root); !errors.Is(err, ErrClaimUnavailable) {
+	if _, err := svc.Yield(ctx, item.ID, first.AssignmentEventID, root); !errors.Is(err, ErrClaimUnavailable) {
 		t.Fatalf("root yield error = %v, want ErrClaimUnavailable", err)
 	}
 
@@ -85,10 +85,13 @@ func TestClaimLedgerAtomicLifecycleAndProjectorReplay(t *testing.T) {
 	// The assigned projector accepts exact re-application.
 	applyAssignmentProjector(t, ctx, pool, assignedProjector{}, assignedEvent, false)
 
-	if _, err := svc.Yield(ctx, item.ID, actorB); !errors.Is(err, ErrAssignmentNotHeld) {
+	if _, err := svc.Yield(ctx, item.ID, first.AssignmentEventID, actorB); !errors.Is(err, ErrAssignmentNotHeld) {
 		t.Fatalf("non-holder yield error = %v, want ErrAssignmentNotHeld", err)
 	}
-	if _, err := svc.Yield(ctx, item.ID, actorA); err != nil {
+	if _, err := svc.Yield(ctx, item.ID, uuid.New(), actorA); !errors.Is(err, ErrStaleAssignmentGeneration) {
+		t.Fatalf("wrong-generation yield error = %v, want ErrStaleAssignmentGeneration", err)
+	}
+	if _, err := svc.Yield(ctx, item.ID, first.AssignmentEventID, actorA); err != nil {
 		t.Fatalf("holder yield: %v", err)
 	}
 	if _, err := svc.GetAssignment(ctx, item.ID); !errors.Is(err, ErrAssignmentNotFound) {
@@ -171,10 +174,11 @@ func TestClaimYieldChurnConsumesLifecycleEventBudget(t *testing.T) {
 		t.Fatalf("create budgeted item: %v", err)
 	}
 	for epoch := 0; epoch < 2; epoch++ {
-		if _, err := svc.Claim(ctx, item.ID, actor); err != nil {
+		claimed, err := svc.Claim(ctx, item.ID, actor)
+		if err != nil {
 			t.Fatalf("claim epoch %d: %v", epoch+1, err)
 		}
-		if _, err := svc.Yield(ctx, item.ID, actor); err != nil {
+		if _, err := svc.Yield(ctx, item.ID, claimed.AssignmentEventID, actor); err != nil {
 			t.Fatalf("yield epoch %d: %v", epoch+1, err)
 		}
 	}

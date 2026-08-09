@@ -315,6 +315,7 @@ func normalizeTropismInput(in DefineTropismInput) (DefineTropismInput, map[strin
 }
 
 func normalizeCultivarInput(in DefineCultivarInput) (DefineCultivarInput, map[string]any, error) {
+	declaredDispatchCapability := strings.TrimSpace(in.Profile.DispatchCapability)
 	name, err := normalizeName(in.Name)
 	if err != nil {
 		return DefineCultivarInput{}, nil, err
@@ -348,6 +349,15 @@ func normalizeCultivarInput(in DefineCultivarInput) (DefineCultivarInput, map[st
 	if len(cleanScopes) == 0 {
 		return DefineCultivarInput{}, nil, fmt.Errorf("%w: profile.scopes_template is required", ErrInvalidPayload)
 	}
+	in.Profile.DispatchCapability = declaredDispatchCapability
+	if in.Profile.DispatchCapability == "" {
+		// Compatibility for definitions written before capability routing was
+		// part of the cultivar profile. The four immutable rootstocks receive
+		// stable semantic names; an older/custom cultivar receives a namespaced
+		// exact-version capability so the mapping is total without guessing a
+		// broader role. New callers should always declare the field explicitly.
+		in.Profile.DispatchCapability = legacyDispatchCapability(name, in.Version, in.Rootstock)
+	}
 	if in.Xylem.MaxAttempts < 1 {
 		return DefineCultivarInput{}, nil, fmt.Errorf("%w: xylem.max_attempts must be >= 1", ErrInvalidPayload)
 	}
@@ -376,17 +386,44 @@ func normalizeCultivarInput(in DefineCultivarInput) (DefineCultivarInput, map[st
 	in.Tropism.Name = tropismName
 	in.Profile.ScopesTemplate = cleanScopes
 	in.Description = strings.TrimSpace(in.Description)
+	profilePayload := map[string]any{
+		"briefing":        in.Profile.Briefing,
+		"scopes_template": in.Profile.ScopesTemplate,
+	}
+	if declaredDispatchCapability != "" {
+		profilePayload["dispatch_capability"] = in.Profile.DispatchCapability
+	}
 	payload := map[string]any{
 		"name":        in.Name,
 		"version":     in.Version,
 		"rootstock":   in.Rootstock,
 		"tropism":     map[string]any{"name": in.Tropism.Name, "version": in.Tropism.Version},
-		"profile":     in.Profile,
+		"profile":     profilePayload,
 		"xylem":       in.Xylem,
 		"phloem":      in.Phloem,
 		"description": in.Description,
 	}
 	return in, payload, nil
+}
+
+// legacyDispatchCapability is the deterministic compatibility mapping for
+// cultivar.defined payloads that predate profile.dispatch_capability. It is
+// deliberately exact-version for unknown cultivars: compatibility never
+// silently grants a listener a broader semantic capability.
+func legacyDispatchCapability(name string, version int, rootstock bool) string {
+	if rootstock && version == 1 {
+		switch name {
+		case "checklist-worker":
+			return "work_items.execute_checks"
+		case "convergence-scribe":
+			return "convergence.propose_checks"
+		case "human-attention":
+			return "human.attention"
+		case "reviewer":
+			return "review.exact_artifact"
+		}
+	}
+	return fmt.Sprintf("cultivar.%s.v%d", name, version)
 }
 
 func normalizeXylemEventRateBudgets(in map[string]int) (map[string]int, error) {

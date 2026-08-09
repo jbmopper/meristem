@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/domain"
@@ -37,6 +38,11 @@ const (
 	// assigned/addressed lane of one other token without inheriting that
 	// token's write authority. The ordinary tree scope still bounds content.
 	scopeFeedListenForPrefix = "feed.listen_for:"
+	// Listener administration (registration, credential binding, retirement,
+	// wide policy replacement) is its own dedicated non-root human surface —
+	// deliberately not implied by any work-item or tracker scope, and never
+	// granted to sealed provider profiles.
+	ScopeListenersAdmin      = "listeners.admin"
 	ScopeInboxCapture        = "inbox.capture"
 	ScopePolicyProfileSwitch = "policy_profile.switch"
 	ScopeRegistryWrite       = "registry.write"
@@ -131,6 +137,17 @@ func canAdminOAuthClient(actor domain.Token, scope string) bool {
 	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil && actor.Source == domain.SourceHuman && hasScope(actor, scope)
 }
 
+// CanAdminListeners is the single authority reducer for listener
+// administration (registration, credential binding, retirement, wide policy
+// replacement). Like OAuth-client administration it is intentionally strict:
+// an explicitly scoped, non-root human credential — the legacy unscoped-token
+// compatibility path does not apply, root stays mint/revoke-only, and agents
+// never administer addresses. Every transport AND the listeners service
+// itself must call this reducer; no caller-supplied boolean substitutes.
+func CanAdminListeners(actor domain.Token) bool {
+	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil && actor.Source == domain.SourceHuman && hasScope(actor, ScopeListenersAdmin)
+}
+
 // Service evaluates access decisions that need projection reads.
 type Service struct {
 	pool *pgxpool.Pool
@@ -172,6 +189,11 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		}
 		return hasScope(actor, ScopeRegistryWrite)
 	}
+	if canonicalTool == "listeners.create" || canonicalTool == "listeners.bind_credential" || canonicalTool == "listeners.retire" {
+		// Evaluated before the root/legacy shortcut: listener administration
+		// is CanAdminListeners exactly, for advertisement and execution alike.
+		return CanAdminListeners(actor)
+	}
 	if canonicalTool == "approvals.decide" {
 		if actor.Source != domain.SourceHuman || actor.IsRoot {
 			return false
@@ -196,7 +218,7 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
 	case "registry.list", "registry.get", "projections.list", "projections.get":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
-	case "work_items.list", "work_items.get":
+	case "work_items.list", "work_items.get", "work_items.get_assignment", "work_items.held_assignments":
 		return canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor))
 	case "approvals.get", "approvals.list_for_work_item":
 		return canReadWorkItems(scopes) && (scopes[ScopeWorkItemsReadAll] || scopes[ScopeWorkItemsWriteAll] || hasWorkItemTreeScope(actor))
@@ -205,6 +227,23 @@ func ToolVisible(actor domain.Token, canonicalTool string) bool {
 	case "work_items.spawn_child", "work_items.append_event", "work_items.update_metadata", "work_items.transition":
 		return scopes[ScopeWorkItemsWriteAll] || scopes[ScopeWorkItemsTrackerWriteAll] ||
 			((scopes[ScopeWorkItemsWrite] || scopes[ScopeWorkItemsTrackerWrite]) && hasWorkItemTreeScope(actor))
+	case "work_items.claim", "work_items.yield", "listeners.claim",
+		"listeners.ensure_activation", "listener_activations.begin", "listener_activations.record_receipt":
+		// Assignment mutation is deliberately NOT a tracker-write capability:
+		// sealed provider tracker profiles must not gain lease authority as a
+		// side effect of this case list growing. The listener-bound claim
+		// shares the vocabulary — the service additionally requires the
+		// caller to be the listener's bound principal.
+		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
+	case "listeners.set_policy":
+		// Wide replacement needs the admin reducer; the service additionally
+		// permits the listener's own principal to NARROW its policy, so the
+		// tool is visible to ordinary write-scoped principals too. The
+		// widen/narrow decision is the service's, never the transport's.
+		return CanAdminListeners(actor) || scopes[ScopeWorkItemsWriteAll] ||
+			(scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
+	case "listeners.list", "listeners.get", "listeners.resolve":
+		return CanAdminListeners(actor) || (canReadWorkItems(scopes) && (hasPortfolioWorkItemAccess(scopes) || hasWorkItemTreeScope(actor)))
 	case "convergence.propose_checks", "registry.activate_cultivar", "approvals.request", "connectors.http_request":
 		return scopes[ScopeWorkItemsWriteAll] || (scopes[ScopeWorkItemsWrite] && hasWorkItemTreeScope(actor))
 	default:
@@ -313,17 +352,37 @@ func (s *Service) CanCreateWorkItem(_ context.Context, actor domain.Token) error
 }
 
 func (s *Service) CanWriteWorkItem(ctx context.Context, actor domain.Token, id uuid.UUID) error {
+	return s.canWriteWorkItemVia(ctx, s.pool, actor, id)
+}
+
+// Queryer is the read surface tx-fenced reducers accept: both *pgxpool.Pool
+// and pgx.Tx satisfy it.
+type Queryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// CanWriteWorkItemIn is CanWriteWorkItem with the tree-membership read
+// executed through the CALLER'S queryer — typically an open transaction. A
+// reducer running inside a transaction must never fall back to the pool: the
+// authority decision would escape the transaction's snapshot, and with a
+// saturated pool the nested acquire deadlocks against the connection the
+// transaction itself holds (the cultivarXylemForRefInTx hazard).
+func (s *Service) CanWriteWorkItemIn(ctx context.Context, q Queryer, actor domain.Token, id uuid.UUID) error {
+	return s.canWriteWorkItemVia(ctx, q, actor, id)
+}
+
+func (s *Service) canWriteWorkItemVia(ctx context.Context, q Queryer, actor domain.Token, id uuid.UUID) error {
 	if actor.IsRoot || legacyUnscoped(actor) || hasScope(actor, ScopeWorkItemsWriteAll) || hasScope(actor, ScopeWorkItemsTrackerWriteAll) {
 		return nil
 	}
 	if !canWriteWorkItems(scopeSet(actor.Scopes)) {
 		return ErrDenied
 	}
-	ok, err := s.workItemInAnyTree(ctx, actor, id)
+	visible, err := s.workItemsInAnyTreeVia(ctx, q, actor, []uuid.UUID{id})
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !visible[id] {
 		return ErrDenied
 	}
 	return nil
@@ -416,12 +475,19 @@ func (s *Service) workItemsInAnyTree(ctx context.Context, actor domain.Token, id
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("access: work_item tree policy requires database")
 	}
+	return s.workItemsInAnyTreeVia(ctx, s.pool, actor, ids)
+}
+
+func (s *Service) workItemsInAnyTreeVia(ctx context.Context, q Queryer, actor domain.Token, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	if s == nil || q == nil {
+		return nil, fmt.Errorf("access: work_item tree policy requires database")
+	}
 	roots := workItemTreeRoots(actor)
 	visible := make(map[uuid.UUID]bool, len(ids))
 	if len(roots) == 0 || len(ids) == 0 {
 		return visible, nil
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		WITH RECURSIVE subtree(id) AS (
 			SELECT unnest($1::uuid[])
 			UNION

@@ -1,7 +1,12 @@
 {
   "mcpServers": {
     "meristem": {
-      "command": "/absolute/path/to/meristem/scripts/cursor-mcp-command.sh"
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:MERISTEM_CURSOR_TOKEN}",
+        "X-Meristem-Tool-Names": "cursor"
+      }
     }
   }
 }

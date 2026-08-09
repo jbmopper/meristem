@@ -48,6 +48,8 @@ var projectionTables = []string{
 	"work_items",
 	"work_item_assignment_state",
 	"work_item_relations",
+	"listener_registrations",
+	"listener_activations",
 	"messages",
 	"message_parts",
 	"idempotency_keys",

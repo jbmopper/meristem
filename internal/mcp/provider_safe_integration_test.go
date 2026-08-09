@@ -338,14 +338,26 @@ func TestProviderTrackerMutationsRenderProviderSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := rootResult.Token
+	trackerAuthority, err := access.ReduceProviderAuthority(access.ProviderOwnerTrackerWriteV1, uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackerResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "provider-tracker-mut", Source: domain.SourceAgent, Scopes: trackerAuthority.Scopes, Actor: &root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := trackerResult.Token
 
 	s := New(Deps{
+		Access:      access.NewService(pool),
 		Idempotency: idempotency.NewMiddleware(pool, writer),
 		WorkItems:   workitems.NewService(pool, writer),
 	}, ServerInfo{Name: "provider-safe-test", Version: "test"}, nil)
 	profile := ProviderTrackerHTTPProfile()
 
-	create := callHTTPTool(t, s, root, profile, "work_items.create", map[string]any{
+	create := callHTTPTool(t, s, tracker, profile, "work_items.create", map[string]any{
 		"title":                        "Mutation canary parent",
 		"body":                         "ordinary tracker body",
 		"human_review_status":          "blocked",
@@ -361,7 +373,7 @@ func TestProviderTrackerMutationsRenderProviderSafe(t *testing.T) {
 	}
 	parentID := createdWorkItemID(t, create.Text)
 
-	spawn := callHTTPTool(t, s, root, profile, "work_items.spawn_child", map[string]any{
+	spawn := callHTTPTool(t, s, tracker, profile, "work_items.spawn_child", map[string]any{
 		"parent_id":                    parentID.String(),
 		"title":                        "Mutation canary child",
 		"body":                         "ordinary child body",
@@ -377,7 +389,7 @@ func TestProviderTrackerMutationsRenderProviderSafe(t *testing.T) {
 		t.Errorf("spawn_child did not echo parent_id: %s", spawn.Text)
 	}
 
-	update := callHTTPTool(t, s, root, profile, "work_items.update_metadata", map[string]any{
+	update := callHTTPTool(t, s, tracker, profile, "work_items.update_metadata", map[string]any{
 		"id":                           parentID.String(),
 		"human_review_status":          "blocked",
 		"suggested_convergence_checks": []string{"event:mut-parent", "event:mut-extra"},
@@ -388,7 +400,7 @@ func TestProviderTrackerMutationsRenderProviderSafe(t *testing.T) {
 	}
 	assertProviderSafeMutationText(t, "work_items.update_metadata", update.Text)
 
-	transition := callHTTPTool(t, s, root, profile, "work_items.transition", map[string]any{
+	transition := callHTTPTool(t, s, tracker, profile, "work_items.transition", map[string]any{
 		"id":              parentID.String(),
 		"to":              "blocked",
 		"reason":          "PRIVATE-STATE-REASON-MUTATION",
@@ -406,7 +418,7 @@ func TestProviderTrackerMutationsRenderProviderSafe(t *testing.T) {
 	// it is the one provider tool with a documented no-reduction justification, so
 	// its response must carry only the id echo and the boolean, never a work-item
 	// DTO or contract marker.
-	appended := callHTTPTool(t, s, root, profile, "work_items.append_event", map[string]any{
+	appended := callHTTPTool(t, s, tracker, profile, "work_items.append_event", map[string]any{
 		"id":              parentID.String(),
 		"kind":            "provider.note",
 		"payload":         map[string]any{"note": "ordinary tracker note"},

@@ -236,8 +236,8 @@ func TestSubactorGrantEndpointEscalatesWriteGrantWithoutApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get updated work item: %v", err)
 	}
-	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("work item not blocked by escalation: state=%s review=%s", updated.State, updated.HumanReviewStatus)
+	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("work item lifecycle/review after escalation: state=%s review=%s", updated.State, updated.HumanReviewStatus)
 	}
 }
 
@@ -348,8 +348,8 @@ func TestSubactorGrantEndpointEscalatesOverDepthBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get updated grandchild: %v", err)
 	}
-	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("work item not blocked by depth escalation: state=%s review=%s", updated.State, updated.HumanReviewStatus)
+	if updated.State != domain.WorkItemBlocked || updated.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("work item lifecycle/review after depth escalation: state=%s review=%s", updated.State, updated.HumanReviewStatus)
 	}
 }
 

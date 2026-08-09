@@ -16,6 +16,7 @@ Currently shipped:
 - `meristem safety check` — validate deterministic resource limits (request bodies, feed long-poll cap, patience budgets); `api`, `worker`, `mcp`, and non–dry-run `seed v1` refuse to start if invalid.
 - `meristem api` — HTTP server with health/readiness plus v0 inbox, signals, feed, work-item routes, and provider-safe Streamable HTTP MCP at `/mcp`; sealed tracker profiles add coordination-only writes.
 - `meristem worker` — always-on deterministic reconciler daemon; `worker --once` remains the one-tick verification path.
+- `meristem listener` — restart-derived IDLE/FOCUSED supervisor over filter-bound feeds and assignment leases; an optional one-shot adapter uses the event-backed activation ledger instead of local delivery journals.
 - `meristem tokens {create, list, revoke}` plus `POST /v1/tokens/revoke-all` — bearer token lifecycle and root-only panic revocation.
 - `meristem mcp` — JSON-RPC over stdio MCP server with parity to the canonical REST surface; provider HTTP writes remain limited to the sealed tracker profile.
 - `meristem seed v1` — seed the v1 substrate backlog into the running v0 system (requires a `system`-source token).
@@ -161,40 +162,52 @@ MERISTEM_IDEMPOTENCY_KEY=$(uuidgen) \
 ## Assistant access
 
 Use [`scripts/provision-assistant-access.sh`](scripts/provision-assistant-access.sh)
-to mint per-assistant agent tokens, store them under `.meristem/*.token` with
-mode 0600, and generate secret-free MCP config snippets. Local assistants should
-run from per-agent worktrees, not the primary checkout; see
-[`docs/agent-worktrees.md`](docs/agent-worktrees.md).
+to generate secret-free Streamable HTTP MCP entries and token-file launch
+helpers for Codex, Claude Code, and Cursor. The explicit HTTP generation path
+writes only beneath `.meristem/generated/` and neither reads credentials nor
+changes live client configuration. The no-flag invocation remains the existing
+stdio development/rollback provisioner until installed-client smoke completes.
+
+```bash
+scripts/provision-assistant-access.sh --generate-http --print-remote
+```
+
+After the reviewed server build is running on `127.0.0.1:8080`, an explicit
+owner operation may stage profile-bearing credentials:
 
 ```bash
 MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
-  scripts/provision-assistant-access.sh --print-remote
+  scripts/provision-assistant-access.sh --mint-http \
+  --business-scopes feed.read,work_items.read_all,work_items.write_all,work_items.create
 ```
+
+This writes `.meristem/<client>.http-next.token` mode 0600. It never trusts,
+reuses, or overwrites an existing token file, which may be a legacy-unscoped
+credential. The owner stops or disconnects one client, preserves its exact
+stdio `meristem` entry under `.meristem/generated/rollback/`, atomically
+replaces that same active name with the generated HTTP entry and swaps the
+staged token into the canonical file, then restarts/reconnects and smokes
+attribution plus idempotency. Never register a parallel `meristem-http` entry;
+the temporary gap is safe and two credentialed writers are not.
+
+Codex and Cursor sample their token at process start and require a full restart.
+Claude's `headersHelper` rereads its token on reconnect. The generated fallback
+Claude launcher is only for installed builds that fail the helper smoke. No
+launcher starts Meristem or exports a database URL.
+
+Local assistants should still edit code from per-agent worktrees rather than
+the primary checkout; HTTP MCP no longer requires those worktrees merely to
+reach the coordination server. See [`docs/agent-worktrees.md`](docs/agent-worktrees.md).
 
 When spinning up a worker manually, paste the streamlined MCP instructions from
 [`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md) after filling in
-the assigned work item, scope, and allowed areas.
-
-Before pointing a local MCP client at a generated wrapper, prepare the matching
-worktree:
+the assigned work item, scope, and allowed areas. For a distinct session
+principal, mint a unique HTTP-profile token:
 
 ```bash
-scripts/prepare-agent-worktree.sh --target codex
-scripts/prepare-agent-worktree.sh --target claude-code-gui
+scripts/provision-assistant-access.sh --session-http codex-$(date +%Y%m%d-%H%M) \
+  --business-scopes feed.read,work_items.read_all,work_items.write_all,work_items.create
 ```
-
-For MCP-native workers, generate a filled handoff packet from live meristem
-state and start from the bootstrap protocol in
-[`docs/mcp-worker-bootstrap.md`](docs/mcp-worker-bootstrap.md):
-
-```bash
-MERISTEM_DATABASE_URL='postgres://meristem:meristem@localhost:5432/meristem?sslmode=disable' \
-  MERISTEM_TOKEN=$(cat .meristem/worker.token) \
-  go run ./cmd/meristem mcp
-```
-
-This repository does not ship a dedicated worker launcher anymore. Use the
-generic MCP text path above.
 
 ### Panic revoke
 

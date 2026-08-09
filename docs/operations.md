@@ -81,6 +81,48 @@ Optional services (each runs the same safety validation before opening the datab
 - **MCP:** `MERISTEM_TOKEN=... go run ./cmd/meristem mcp`
 - **Manual worker tick:** `MERISTEM_TOKEN=... go run ./cmd/meristem worker --once`
 
+### Codex listener service
+
+After the listener release commit is independently reviewed, merged to `v1`,
+and published through the shared-build guard, run the generic listener beside
+the API and worker. The listener bearer belongs in one absolute mode-0600 file;
+the awakened Codex task keeps its separate MCP credential file.
+
+```bash
+BIN=.meristem/generated/meristem-bin
+export MERISTEM_TOKEN_FILE=/absolute/path/to/listener-principal.token
+export CODEX_MERISTEM_TOKEN_FILE=/absolute/path/to/assigned-task-mcp.token
+
+"$BIN" listener \
+  --name codex-review \
+  --api http://127.0.0.1:8080 \
+  --activation-adapter "$PWD/scripts/codex-thread-nudge.py" \
+  --activation-arg=activate \
+  --activation-arg=--codex-bin \
+  --activation-arg=/absolute/path/to/codex-app-server-wrapper \
+  --activation-arg=--thread-id \
+  --activation-arg=<dedicated-codex-task-uuid> \
+  --activation-arg=--repo-root \
+  --activation-arg=/absolute/path/to/isolated/codex/worktree \
+  --activation-binding-generation=<task-binding-generation> \
+  --activation-consumer-generation=<service-generation>
+```
+
+The binding generation changes when the local Codex-task binding changes. The
+consumer generation changes when the supervised listener instance is replaced.
+The adapter receives only activation and assignment IDs from Meristem, starts a
+turn only when the dedicated task is idle, declines unattended authority
+requests, and writes no local delivery journal. Meristem owns the filter-bound
+feed cursors, assignment lease, activation lease, receipts, retry budget, and
+restart derivation.
+
+Cut over one listener at a time: stop the legacy
+`meristem-codex-sse-bridge.sh` service, start exactly one generic listener
+consumer, then run the restart/ambiguous-admission smoke before deleting any
+legacy state files. Do not run old and new delivery consumers concurrently.
+For launchd, point the service at the same guarded `$BIN` used by API/MCP and
+keep the existing Postgres readiness wrapper.
+
 ## Rebuild the shared build artifact
 
 `.meristem/generated/meristem-bin` is the single build artifact that backs **both**

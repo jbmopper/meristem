@@ -30,6 +30,7 @@ import time
 scenario, record_path, reconcile_client_id, request_method = sys.argv[1:5]
 methods = []
 responses = []
+prompts = []
 turn_start_count = 0
 pending_admission = None
 
@@ -49,6 +50,7 @@ def record():
         json.dump({
             "methods": methods,
             "responses": responses,
+            "prompts": prompts,
             "sensitive_env": sensitive,
             "turn_start_count": turn_start_count,
         }, handle)
@@ -98,6 +100,13 @@ for raw in sys.stdin:
         continue
     elif method == "thread/resume":
         thread_id = message["params"]["threadId"]
+        if scenario == "resume_rejected":
+            record()
+            send({
+                "id": message["id"],
+                "error": {"code": -32000, "message": "RAW-SECRET-SENTINEL"},
+            })
+            continue
         turns = []
         status = {"type": "idle"}
         if scenario in ("active", "active_failure", "active_interrupted", "server_request"):
@@ -152,6 +161,9 @@ for raw in sys.stdin:
             })
     elif method in ("turn/start", "turn/steer"):
         turn_start_count += 1
+        for item in message.get("params", {}).get("input", []):
+            if isinstance(item, dict) and item.get("type") == "text":
+                prompts.append(item.get("text"))
         thread_id = message["params"]["threadId"]
         turn_id = "active-turn" if method == "turn/steer" else "started-turn"
         if scenario in (
@@ -193,6 +205,11 @@ for raw in sys.stdin:
             status = "interrupted"
         else:
             status = "completed"
+        # Persist the metadata before sending the response/completion. The
+        # client may close the app-server immediately after consuming an
+        # already-buffered completion; recording afterward would make this
+        # fixture itself race the close path.
+        record()
         # Exercise response correlation and buffering: an unrelated completion,
         # then the matching completion, both arrive before the response.
         send({
@@ -213,7 +230,6 @@ for raw in sys.stdin:
             send({"id": message["id"], "result": {"turnId": turn_id}})
         else:
             send({"id": message["id"], "result": {"turn": {"id": turn_id}}})
-        record()
     else:
         record()
 '''
@@ -317,6 +333,117 @@ class NudgeTests(unittest.TestCase):
 
     def marker_value(self):
         return json.loads(self.marker.read_text(encoding="utf-8"))
+
+    def record_value(self):
+        for _ in range(50):
+            try:
+                return json.loads(self.record.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(0.01)
+        return json.loads(self.record.read_text(encoding="utf-8"))
+
+    def activation_args(self, mode="dispatch"):
+        return types.SimpleNamespace(
+            activation_id="019fc9ec-2d6b-7861-af0e-c1a8b540d5b7",
+            assignment_event_id="019fc9ec-2d6b-7861-af0e-c1a8b540d5b8",
+            mode=mode,
+            codex_bin=sys.executable,
+            thread_id=self.thread_id,
+            repo_root=str(self.root),
+            request_timeout=2.0,
+            completion_timeout=2.0,
+        )
+
+    def test_activation_dispatch_is_metadata_only_and_journal_free(self):
+        args = self.activation_args()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = NUDGE.activate(
+                args, self.command("idle"), environment=self.environment
+            )
+        self.assertEqual(result, NUDGE.EXIT_OK)
+        receipts = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(
+            [receipt["outcome"] for receipt in receipts],
+            ["accepted", "completed"],
+        )
+        self.assertFalse(self.marker.exists())
+        record = self.record_value()
+        self.assertEqual(record["methods"].count("turn/start"), 1)
+        self.assertNotIn("turn/steer", record["methods"])
+        self.assertEqual(record["sensitive_env"], [])
+        self.assertEqual(len(record["prompts"]), 1)
+        prompt = record["prompts"][0]
+        self.assertIn(args.activation_id, prompt)
+        self.assertIn(args.assignment_event_id, prompt)
+        self.assertNotIn(self.batch.read_text(encoding="utf-8"), prompt)
+        self.assertNotIn("event_count", prompt)
+
+    def test_activation_reconcile_never_resubmits(self):
+        args = self.activation_args("reconcile")
+        client_id = NUDGE.activation_client_message_id(args.activation_id)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = NUDGE.activate(
+                args,
+                self.command("reconcile", client_id),
+                environment=self.environment,
+            )
+        self.assertEqual(result, NUDGE.EXIT_OK)
+        self.assertEqual(
+            [json.loads(line)["outcome"] for line in stdout.getvalue().splitlines()],
+            ["completed"],
+        )
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.record.exists())
+
+    def test_activation_reconcile_absence_stays_ambiguous(self):
+        args = self.activation_args("reconcile")
+        with self.assertRaises(NUDGE.CompletionTimeout):
+            NUDGE.activate(args, self.command("idle"), environment=self.environment)
+        self.assertFalse(self.marker.exists())
+
+    def test_activation_active_task_is_not_steered(self):
+        args = self.activation_args()
+        with self.assertRaises(NUDGE.TargetBusy):
+            NUDGE.activate(args, self.command("active"), environment=self.environment)
+        self.assertFalse(self.marker.exists())
+
+    def test_activation_resume_rejection_before_admission_is_busy(self):
+        args = self.activation_args()
+        with self.assertRaises(NUDGE.TargetBusy):
+            NUDGE.activate(
+                args, self.command("resume_rejected"), environment=self.environment
+            )
+        record = self.record_value()
+        self.assertNotIn("turn/start", record["methods"])
+        self.assertFalse(self.marker.exists())
+
+    def test_activation_busy_has_distinct_structural_exit(self):
+        args = self.activation_args()
+        argv = [
+            "activate",
+            "--codex-bin",
+            sys.executable,
+            "--thread-id",
+            self.thread_id,
+            "--repo-root",
+            str(self.root),
+            "--activation-id",
+            args.activation_id,
+            "--assignment-event-id",
+            args.assignment_event_id,
+            "--mode",
+            "dispatch",
+            "--diagnostic",
+        ]
+        stdout = io.StringIO()
+        with mock.patch.object(NUDGE, "activate", side_effect=NUDGE.TargetBusy()), \
+             mock.patch.object(NUDGE.signal, "signal"), \
+             contextlib.redirect_stdout(stdout):
+            result = NUDGE.main(argv)
+        self.assertEqual(result, NUDGE.EXIT_BUSY)
+        self.assertEqual(json.loads(stdout.getvalue())["failure_class"], "TargetBusy")
 
     def test_idle_start_buffers_early_completion_and_sanitizes(self):
         stdout = io.StringIO()
