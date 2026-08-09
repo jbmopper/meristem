@@ -275,6 +275,11 @@ def sanitized_environment(source=None):
         "CODEX_SANDBOX",
         "CODEX_SANDBOX_NETWORK_DISABLED",
         "CODEX_SHELL",
+        # Desktop-backed app-server tasks require a host-thread context even
+        # when thread/resume targets a different (idle) task. Without this,
+        # app-server rejects resume and the adapter misclassifies the target
+        # as permanently busy.
+        "CODEX_THREAD_ID",
         # A path is safe to pass; the wrapper reads the credential after the
         # app-server starts. Keep MERISTEM_TOKEN_FILE excluded so the bridge's
         # feed-only bearer can never become the awakened task's MCP identity.

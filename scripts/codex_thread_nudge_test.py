@@ -302,6 +302,7 @@ class NudgeTests(unittest.TestCase):
         self.environment = {
             "HOME": str(self.root),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CODEX_THREAD_ID": self.thread_id,
             "CODEX_MERISTEM_TOKEN_FILE": "/scoped/listener/token",
             "MERISTEM_TOKEN": "secret",
             "MERISTEM_TOKEN_FILE": "/secret/token",
@@ -792,6 +793,7 @@ class NudgeTests(unittest.TestCase):
         self.assertEqual(
             sanitized["CODEX_MERISTEM_TOKEN_FILE"], "/scoped/listener/token"
         )
+        self.assertEqual(sanitized["CODEX_THREAD_ID"], self.thread_id)
         self.assertNotIn("MERISTEM_TOKEN", sanitized)
         self.assertNotIn("MERISTEM_TOKEN_FILE", sanitized)
         self.assertNotIn("OPENAI_API_KEY", sanitized)

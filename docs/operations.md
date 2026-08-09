@@ -92,6 +92,7 @@ the awakened Codex task keeps its separate MCP credential file.
 BIN=.meristem/generated/meristem-bin
 export MERISTEM_TOKEN_FILE=/absolute/path/to/listener-principal.token
 export CODEX_MERISTEM_TOKEN_FILE=/absolute/path/to/assigned-task-mcp.token
+export CODEX_THREAD_ID=<dedicated-codex-task-uuid>
 
 "$BIN" listener \
   --name codex-review \
@@ -110,6 +111,10 @@ export CODEX_MERISTEM_TOKEN_FILE=/absolute/path/to/assigned-task-mcp.token
 
 The binding generation changes when the local Codex-task binding changes. The
 consumer generation changes when the supervised listener instance is replaced.
+`CODEX_THREAD_ID` must name the same dedicated task passed to the adapter;
+Codex Desktop uses it to supply the app-server host-thread context required by
+`thread/resume`. Omitting it makes an otherwise idle Desktop task appear as a
+rejected resume and prevents activation.
 The adapter receives only activation and assignment IDs from Meristem, starts a
 turn only when the dedicated task is idle, declines unattended authority
 requests, and writes no local delivery journal. Meristem owns the filter-bound
