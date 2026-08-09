@@ -1026,6 +1026,81 @@ func TestScanDispatchRequestsEligibleItems(t *testing.T) {
 	}
 }
 
+func TestScanDispatchSkipsUnresolvableExplicitCultivarWithoutBlockingOtherDemand(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "dispatch-skip-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	system, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "dispatch-skip-system", Source: domain.SourceSystem, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create system: %v", err)
+	}
+	seedChecklistWorkerCultivar(t, ctx, pool, writer, system.Token)
+
+	// Simulate a historical event written before cultivar validation existed.
+	// It remains authoritative, but its stale launch reference must not stop the
+	// global dispatch pass.
+	invalidID := uuid.New()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin historical append: %v", err)
+	}
+	if _, _, err := writer.Append(ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: invalidID,
+		Kind: domain.EventWorkItemCreated, Source: domain.SourceSystem,
+		ActorTokenID: &system.Token.ID,
+		Payload: map[string]any{
+			"title": "historical missing cultivar", "state": domain.WorkItemTriaged,
+			"cultivar":                     "missing-worker@1",
+			"suggested_convergence_checks": []string{"cmd:go test ./..."},
+			"human_review_status":          domain.HumanReviewWavedThrough,
+		},
+	}); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("append historical item: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit historical item: %v", err)
+	}
+	valid, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "valid demand after stale cultivar", State: domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough, Actor: system.Token,
+	})
+	if err != nil {
+		t.Fatalf("create valid item: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &system.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	result, err := w.scanDispatch(ctx)
+	if err != nil {
+		t.Fatalf("scan dispatch: %v", err)
+	}
+	if result.DispatchCandidatesScanned != 2 || result.DispatchesSkippedMissingCultivar != 1 || result.DispatchesRequested != 1 {
+		t.Fatalf("dispatch result = %+v, want scanned=2 missing=1 requested=1", result)
+	}
+	if got := countEventsForSubject(t, ctx, pool, invalidID, domain.EventDispatchRequested); got != 0 {
+		t.Fatalf("invalid historical item dispatch events = %d, want 0", got)
+	}
+	if got := countEventsForSubject(t, ctx, pool, valid.ID, domain.EventDispatchRequested); got != 1 {
+		t.Fatalf("valid item dispatch events = %d, want 1", got)
+	}
+}
+
 // TestScanDispatchRoutesOrdinaryDemandToSemanticListener is the production-
 // path regression for f65efff8: the worker, not the test, creates the durable
 // demand. The cultivar remains launch metadata while its profile supplies the

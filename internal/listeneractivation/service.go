@@ -85,6 +85,7 @@ type Activation struct {
 	ConsumerGeneration string
 	LeaseExpiresAt     *time.Time
 	DispatchCount      int
+	BusyDispatchCount  int
 	ReconcileCount     int
 	NextRetryAt        *time.Time
 	LastReason         string
@@ -240,7 +241,7 @@ func (s *Service) Begin(ctx context.Context, in BeginInput) (BeginResult, error)
 		return BeginResult{Activation: current, Action: ActionWait}, nil
 	}
 	if current.State == StateCompleted ||
-		(current.State == StateFailed && current.DispatchCount >= MaxDispatches && current.LastReason != ReasonAdapterTargetBusy) ||
+		(current.State == StateFailed && dispatchBudgetUsed(current) >= MaxDispatches) ||
 		(current.State == StateAmbiguous && current.ReconcileCount >= MaxReconciliations) {
 		if err := tx.Commit(ctx); err != nil {
 			return BeginResult{}, err
@@ -363,7 +364,7 @@ func (s *Service) RecordReceipt(ctx context.Context, in ReceiptInput) (Activatio
 		return Activation{}, err
 	}
 	var next *time.Time
-	if in.Outcome == StateFailed && (current.DispatchCount < MaxDispatches || in.Reason == ReasonAdapterTargetBusy) {
+	if in.Outcome == StateFailed && (dispatchBudgetUsed(current) < MaxDispatches || in.Reason == ReasonAdapterTargetBusy) {
 		v := now.Add(s.retryDelay)
 		next = &v
 	}
@@ -379,6 +380,14 @@ func (s *Service) RecordReceipt(ctx context.Context, in ReceiptInput) (Activatio
 		return Activation{}, err
 	}
 	return out, nil
+}
+
+func dispatchBudgetUsed(current Activation) int {
+	used := current.DispatchCount - current.BusyDispatchCount
+	if used < 0 {
+		return 0
+	}
+	return used
 }
 
 func (s *Service) appendOutcomeInTx(ctx context.Context, tx pgx.Tx, current Activation, outcome State, actor domain.Token, reason string, now time.Time, next *time.Time) (Activation, error) {
@@ -513,6 +522,7 @@ func scanActivation(ctx context.Context, q queryer, id uuid.UUID, forUpdate bool
 		SELECT id, listener_id, work_item_id, assignment_event_id, demand_event_id,
 		       attempt, adapter_kind, binding_generation, state, dispatch_mode,
 		       consumer_generation, lease_expires_at, dispatch_count,
+		       busy_dispatch_count,
 		       reconcile_count, next_retry_at, last_reason,
 		       last_outcome_event_id, state_event_id, state_event_seq,
 		       created_at, updated_at
@@ -527,7 +537,7 @@ func scanActivation(ctx context.Context, q queryer, id uuid.UUID, forUpdate bool
 		&out.ID, &out.ListenerID, &out.WorkItemID, &out.AssignmentEventID,
 		&out.DemandEventID, &out.Attempt, &out.AdapterKind,
 		&out.BindingGeneration, &out.State, &mode, &consumer, &lease,
-		&out.DispatchCount, &out.ReconcileCount, &retry, &out.LastReason,
+		&out.DispatchCount, &out.BusyDispatchCount, &out.ReconcileCount, &retry, &out.LastReason,
 		&out.LastOutcomeEventID, &out.StateEventID, &out.StateEventSeq,
 		&out.CreatedAt, &out.UpdatedAt,
 	); err != nil {

@@ -48,6 +48,7 @@ func (w *Worker) scanDispatch(ctx context.Context) (dispatchPassResult, error) {
 	routes := make(map[string]dispatchRoute)
 	for _, candidate := range candidates {
 		ref := strings.TrimSpace(candidate.Cultivar)
+		explicit := ref != ""
 		if ref == "" {
 			ref = defaultDispatchCultivarName
 		}
@@ -56,7 +57,10 @@ func (w *Worker) scanDispatch(ctx context.Context) (dispatchPassResult, error) {
 			route, err = w.resolveDispatchRoute(ctx, ref)
 			if err != nil {
 				result.DispatchesSkippedMissingCultivar++
-				return result, err
+				if !explicit {
+					return result, err
+				}
+				continue
 			}
 			routes[ref] = route
 		}

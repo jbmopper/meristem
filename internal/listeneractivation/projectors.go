@@ -134,13 +134,15 @@ func (p outcomeProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Eve
 			event.ID, event.Seq, event.OccurredAt)
 		return err
 	}
+	busyDispatch := event.Kind == domain.EventListenerActivationFailed && payload.Reason == ReasonAdapterTargetBusy
 	_, err = tx.Exec(ctx, `
 		UPDATE listener_activations SET state=$2, dispatch_mode=NULL,
 		  consumer_generation=NULL, lease_expires_at=NULL, next_retry_at=$3,
-		  last_reason=$4, last_outcome_event_id=$5,
-		  state_event_id=$5, state_event_seq=$6, updated_at=$7
+		  busy_dispatch_count=busy_dispatch_count+CASE WHEN $4 THEN 1 ELSE 0 END,
+		  last_reason=$5, last_outcome_event_id=$6,
+		  state_event_id=$6, state_event_seq=$7, updated_at=$8
 		WHERE id=$1
-	`, event.SubjectID, next, payload.NextRetryAt, payload.Reason,
+	`, event.SubjectID, next, payload.NextRetryAt, busyDispatch, payload.Reason,
 		event.ID, event.Seq, event.OccurredAt)
 	return err
 }

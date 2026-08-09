@@ -126,9 +126,31 @@ func TestListenerActivationMigrationDownUpRoundTrip(t *testing.T) {
 		t.Fatalf("migrate up: %v", err)
 	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
-		t.Fatalf("migrate 0039 down: %v", err)
+		t.Fatalf("migrate 0040 down: %v", err)
 	}
 	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.listener_activations') IS NOT NULL`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("listener_activations missing after migration 0040 down")
+	}
+	var busyColumnExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema='public' AND table_name='listener_activations'
+			  AND column_name='busy_dispatch_count'
+		)
+	`).Scan(&busyColumnExists); err != nil {
+		t.Fatal(err)
+	}
+	if busyColumnExists {
+		t.Fatal("busy_dispatch_count still exists after migration 0040 down")
+	}
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate 0039 down: %v", err)
+	}
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.listener_activations') IS NOT NULL`).Scan(&exists); err != nil {
 		t.Fatal(err)
 	}
@@ -136,13 +158,25 @@ func TestListenerActivationMigrationDownUpRoundTrip(t *testing.T) {
 		t.Fatal("listener_activations still exists after migration 0039 down")
 	}
 	if err := storage.Migrate(ctx, pool, nil); err != nil {
-		t.Fatalf("migrate 0039 back up: %v", err)
+		t.Fatalf("migrate 0039 and 0040 back up: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.listener_activations') IS NOT NULL`).Scan(&exists); err != nil {
 		t.Fatal(err)
 	}
 	if !exists {
 		t.Fatal("listener_activations missing after migration 0039 reapplied")
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema='public' AND table_name='listener_activations'
+			  AND column_name='busy_dispatch_count'
+		)
+	`).Scan(&busyColumnExists); err != nil {
+		t.Fatal(err)
+	}
+	if !busyColumnExists {
+		t.Fatal("busy_dispatch_count missing after migration 0040 reapplied")
 	}
 }
 
@@ -254,6 +288,33 @@ func TestBusyTargetDoesNotExhaustDispatchBudgetAndRemainsAssignmentBound(t *test
 		if busy.State != StateFailed || busy.LastReason != ReasonAdapterTargetBusy || busy.NextRetryAt == nil {
 			t.Fatalf("busy state %d = %+v", attempt, busy)
 		}
+		if busy.DispatchCount != attempt || busy.BusyDispatchCount != attempt || dispatchBudgetUsed(busy) != 0 {
+			t.Fatalf("busy counters %d = dispatches %d busy %d budget %d", attempt, busy.DispatchCount, busy.BusyDispatchCount, dispatchBudgetUsed(busy))
+		}
+	}
+
+	begin, err := svc.Begin(f.ctx, BeginInput{
+		ActivationID: a.ID, ConsumerGeneration: "busy-consumer", Actor: f.principal.Token,
+	})
+	if err != nil || begin.Action != ActionDispatch {
+		t.Fatalf("ordinary begin after busy backpressure = %+v err=%v, want dispatch", begin, err)
+	}
+	ordinary, err := svc.RecordReceipt(f.ctx, ReceiptInput{
+		ActivationID: a.ID, ObservedStateEventID: begin.Activation.StateEventID,
+		ConsumerGeneration: "busy-consumer", Outcome: StateFailed,
+		Reason: "adapter_retryable_failure", Actor: f.principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("record ordinary failure after busy backpressure: %v", err)
+	}
+	if ordinary.NextRetryAt == nil || dispatchBudgetUsed(ordinary) != 1 {
+		t.Fatalf("ordinary failure after busy backpressure = %+v, want first budgeted failure with retry", ordinary)
+	}
+	begin, err = svc.Begin(f.ctx, BeginInput{
+		ActivationID: a.ID, ConsumerGeneration: "busy-consumer", Actor: f.principal.Token,
+	})
+	if err != nil || begin.Action != ActionDispatch {
+		t.Fatalf("begin after first ordinary failure = %+v err=%v, want retry dispatch", begin, err)
 	}
 
 	if _, err := workitems.NewService(f.pool, f.writer).Yield(
