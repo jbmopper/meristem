@@ -85,13 +85,15 @@ Optional services (each runs the same safety validation before opening the datab
 
 After the listener release commit is independently reviewed, merged to `v1`,
 and published through the shared-build guard, run the generic listener beside
-the API and worker. The listener bearer belongs in one absolute mode-0600 file;
-the awakened Codex task keeps its separate MCP credential file.
+the API and worker. The listener bearer belongs in one absolute mode-0600 file.
+The supervisor and awakened task currently use the same listener-bound
+principal because held-assignment lookup is holder-specific; the environment
+variables remain explicit so a future token exchange can separate them.
 
 ```bash
 BIN=.meristem/generated/meristem-bin
 export MERISTEM_TOKEN_FILE=/absolute/path/to/listener-principal.token
-export CODEX_MERISTEM_TOKEN_FILE=/absolute/path/to/assigned-task-mcp.token
+export CODEX_MERISTEM_TOKEN_FILE=/absolute/path/to/listener-principal.token
 export CODEX_THREAD_ID=<dedicated-codex-task-uuid>
 
 "$BIN" listener \
@@ -100,11 +102,25 @@ export CODEX_THREAD_ID=<dedicated-codex-task-uuid>
   --activation-adapter "$PWD/scripts/codex-thread-nudge.py" \
   --activation-arg=activate \
   --activation-arg=--codex-bin \
-  --activation-arg=/absolute/path/to/codex-app-server-wrapper \
+  --activation-arg="$PWD/scripts/codex-listener-app-server.sh" \
   --activation-arg=--thread-id \
   --activation-arg=<dedicated-codex-task-uuid> \
   --activation-arg=--repo-root \
   --activation-arg=/absolute/path/to/isolated/codex/worktree \
+  --activation-arg=--approved-mcp-server-name \
+  --activation-arg=meristem_listener \
+  --activation-arg=--approved-mcp-tool \
+  --activation-arg=work_items.held_assignments \
+  --activation-arg=--approved-mcp-tool \
+  --activation-arg=work_items.get \
+  --activation-arg=--approved-mcp-tool \
+  --activation-arg=work_items.get_assignment \
+  --activation-arg=--approved-mcp-tool \
+  --activation-arg=feed.read \
+  --activation-arg=--approved-mcp-tool \
+  --activation-arg=work_items.append_event \
+  --activation-arg=--approved-mcp-tool \
+  --activation-arg=work_items.transition \
   --activation-binding-generation=<task-binding-generation> \
   --activation-consumer-generation=<service-generation>
 ```
@@ -117,7 +133,15 @@ Codex Desktop uses it to supply the app-server host-thread context required by
 rejected resume and prevents activation.
 The adapter receives only activation and assignment IDs from Meristem, starts a
 turn only when the dedicated task is idle, declines unattended authority
-requests, and writes no local delivery journal. Meristem owns the filter-bound
+requests, and writes no local delivery journal. The listener wrapper leaves
+interactive Codex on HTTP but replaces that entry inside this network-disabled
+app-server process with the guarded local stdio command. Current Codex asks the
+app-server host to approve each MCP call as an empty form elicitation. The
+adapter accepts only an exact, operator-configured server/tool pair on the
+bound task; message or schema drift fails closed. Shell/file approvals, other
+servers, unlisted tools, non-empty forms, URL elicitations, and unknown requests
+remain denied. The scoped listener bearer remains the domain authority
+boundary. Meristem owns the filter-bound
 feed cursors, assignment lease, activation lease, receipts, retry budget, and
 restart derivation.
 

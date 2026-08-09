@@ -88,8 +88,13 @@ for raw in sys.stdin:
             if scenario == "server_request_eof":
                 record()
                 break
+            if scenario == "trusted_mcp_approval":
+                # Persist the accepted response before completion lets the
+                # client close the fake app-server process.
+                record()
             send_completion(pending_admission)
-            record()
+            if scenario != "trusted_mcp_approval":
+                record()
             pending_admission = None
         else:
             record()
@@ -170,6 +175,7 @@ for raw in sys.stdin:
             "server_request_before",
             "server_request_after",
             "server_request_eof",
+            "trusted_mcp_approval",
         ):
             pending_admission = {
                 "method": method,
@@ -182,10 +188,20 @@ for raw in sys.stdin:
             # Deliberately collide ids in the two JSON-RPC directions and put
             # raw-looking data in params. The client must neither confuse the
             # response nor reflect the params into output/diagnostics.
+            request_params = {"secret": "RAW-SERVER-REQUEST-SECRET-SENTINEL"}
+            if scenario == "trusted_mcp_approval":
+                request_params = {
+                    "serverName": "meristem_listener",
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "mode": "form",
+                    "message": "Allow the meristem_listener MCP server to run tool \"work_items.held_assignments\"?",
+                    "requestedSchema": {"type": "object", "properties": {}},
+                }
             send({
                 "id": message["id"],
                 "method": request_method,
-                "params": {"secret": "RAW-SERVER-REQUEST-SECRET-SENTINEL"},
+                "params": request_params,
             })
             continue
         if scenario == "request_error":
@@ -353,6 +369,8 @@ class NudgeTests(unittest.TestCase):
             repo_root=str(self.root),
             request_timeout=2.0,
             completion_timeout=2.0,
+            approved_mcp_server_name=None,
+            approved_mcp_tool=[],
         )
 
     def test_activation_dispatch_is_metadata_only_and_journal_free(self):
@@ -419,6 +437,73 @@ class NudgeTests(unittest.TestCase):
         record = self.record_value()
         self.assertNotIn("turn/start", record["methods"])
         self.assertFalse(self.marker.exists())
+
+    def test_activation_approves_one_exact_bound_mcp_tool(self):
+        args = self.activation_args()
+        args.approved_mcp_server_name = "meristem_listener"
+        args.approved_mcp_tool = ["work_items.held_assignments"]
+        result = NUDGE.activate(
+            args,
+            self.command(
+                "trusted_mcp_approval",
+                request_method="mcpServer/elicitation/request",
+            ),
+            environment=self.environment,
+        )
+        self.assertEqual(result, NUDGE.EXIT_OK)
+        record = self.record_value()
+        self.assertEqual(
+            record["responses"],
+            [{"id": 3, "result": {"action": "accept", "content": {}}}],
+        )
+
+    def test_mcp_approval_wrong_tool_still_declines(self):
+        client = NUDGE.AppServerClient.__new__(NUDGE.AppServerClient)
+        client.approved_mcp_server_name = "meristem_listener"
+        client.approved_mcp_tools = frozenset({"work_items.get"})
+        client.approved_thread_id = self.thread_id
+        client.last_server_request_method = None
+        client._send = mock.Mock()
+        client._respond_to_server_request({
+            "id": 7,
+            "method": "mcpServer/elicitation/request",
+            "params": {
+                "serverName": "meristem_listener",
+                "threadId": self.thread_id,
+                "turnId": "turn-1",
+                "mode": "form",
+                "message": "Allow the meristem_listener MCP server to run tool \"work_items.transition\"?",
+                "requestedSchema": {"type": "object", "properties": {}},
+            },
+        })
+        client._send.assert_called_once_with({
+            "id": 7,
+            "result": {"action": "decline", "content": None},
+        })
+
+    def test_mcp_approval_shape_drift_still_declines(self):
+        client = NUDGE.AppServerClient.__new__(NUDGE.AppServerClient)
+        client.approved_mcp_server_name = "meristem_listener"
+        client.approved_mcp_tools = frozenset({"work_items.get"})
+        client.approved_thread_id = self.thread_id
+        client.last_server_request_method = None
+        client._send = mock.Mock()
+        client._respond_to_server_request({
+            "id": 8,
+            "method": "mcpServer/elicitation/request",
+            "params": {
+                "serverName": "meristem_listener",
+                "threadId": self.thread_id,
+                "turnId": "turn-1",
+                "mode": "form",
+                "message": "Please allow work_items.get",
+                "requestedSchema": {"type": "object", "properties": {}},
+            },
+        })
+        client._send.assert_called_once_with({
+            "id": 8,
+            "result": {"action": "decline", "content": None},
+        })
 
     def test_activation_busy_has_distinct_structural_exit(self):
         args = self.activation_args()
