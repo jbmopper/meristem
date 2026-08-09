@@ -12,6 +12,7 @@ import (
 const (
 	HeaderProtocolVersion = "MCP-Protocol-Version"
 	HeaderSessionID       = "Mcp-Session-Id"
+	HeaderToolNames       = "X-Meristem-Tool-Names"
 
 	contentTypeJSON = "application/json; charset=utf-8"
 )
@@ -51,6 +52,9 @@ type HTTPOptions struct {
 	// When set it takes precedence over AllowedTools and may reject a call based
 	// on its arguments before the normal MCP dispatcher can run a handler.
 	Profile *HTTPToolProfile
+	// ToolNameMode changes only tools/list representation for this request.
+	// Dispatch continues to accept canonical and cursor-compatible spellings.
+	ToolNameMode ToolNameMode
 	// Transport enables 2026-07-28 per-request era classification from the
 	// request headers. Nil keeps the pre-2026 legacy-only behavior.
 	Transport *HTTPTransportContext
@@ -86,11 +90,9 @@ func (s *Server) HandleHTTPMessage(ctx context.Context, raw []byte, actor domain
 }
 
 func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, actor domain.Token, opts HTTPOptions) HTTPResponse {
-	// The API's provider route always supplies a non-nil allowlist or an
-	// explicit profile. Treat either as both a tool filter and a response-data
-	// boundary so a future tool cannot accidentally return the ordinary raw
-	// event/work-item DTO through /mcp.
-	if opts.AllowedTools != nil || opts.Profile != nil {
+	// Provider-safe rendering is independent from tool restriction. The local
+	// profile is explicit but retains ordinary stdio-equivalent DTOs.
+	if opts.AllowedTools != nil || opts.Profile.providerSafe() {
 		ctx = withProviderSafeContext(ctx)
 	}
 	// The response era must be knowable on every path, including requests too
@@ -279,7 +281,7 @@ func (s *Server) handleModernHTTP(ctx context.Context, msg rpcMessage, meta *mod
 		if refusal, blocked := s.buildToolCallRefusal(); blocked {
 			return s.modernHTTPResult(msg, refusal, nil, false)
 		}
-		if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
+		if rerr := s.checkHTTPToolAllowedForActor(actor, msg.Params, opts); rerr != nil {
 			return s.modernHTTPResult(msg, nil, rerr, false)
 		}
 		result, rerr := s.gatedToolsCall(ctx, actor, msg.Params)
@@ -320,7 +322,7 @@ func (s *Server) handleLegacyHTTP(ctx context.Context, msg rpcMessage, actor dom
 
 	if msg.isNotification() {
 		if msg.Method == "tools/call" {
-			if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
+			if rerr := s.checkHTTPToolAllowedForActor(actor, msg.Params, opts); rerr != nil {
 				s.logger.Warn("mcp http notification rejected",
 					"method", msg.Method,
 					"error", rerr.Message)
@@ -340,7 +342,7 @@ func (s *Server) handleLegacyHTTP(ctx context.Context, msg rpcMessage, actor dom
 		return s.httpRPCResult(msg, result, rerr)
 	}
 	if msg.Method == "tools/call" {
-		if rerr := s.checkHTTPToolAllowed(msg.Params, opts); rerr != nil {
+		if rerr := s.checkHTTPToolAllowedForActor(actor, msg.Params, opts); rerr != nil {
 			return s.httpRPCResult(msg, nil, rerr)
 		}
 	}
@@ -365,18 +367,54 @@ func (s *Server) httpRPCResult(msg rpcMessage, result any, rerr *rpcError) HTTPR
 }
 
 func (s *Server) handleListToolsFiltered(actor domain.Token, opts HTTPOptions) (any, *rpcError) {
-	result, rerr := s.handleListTools(actor)
-	allowed, restricted := opts.allowedTools()
-	if rerr != nil || !restricted {
+	actorProfile, marked, err := mcpProfileForActor(actor)
+	if err != nil {
+		return nil, rpcErrorf(errCodeInvalidRequest, "invalid MCP actor profile")
+	}
+	if opts.Profile != nil {
+		if err := validateHTTPActorProfile(actor, opts.Profile); err != nil {
+			return nil, rpcErrorf(errCodeInvalidRequest, "invalid or mismatched MCP actor profile")
+		}
+	}
+	result, rerr := s.handleListToolsWithMode(actor, opts.ToolNameMode)
+	if rerr != nil {
 		return result, rerr
 	}
+	allowed, restricted := opts.allowedTools()
+	if marked {
+		actorAllowed, actorRestricted := (HTTPOptions{Profile: actorProfile}).allowedTools()
+		allowed, restricted = intersectHTTPToolRestrictions(allowed, restricted, actorAllowed, actorRestricted)
+	}
+	if !restricted {
+		return result, nil
+	}
+	return s.filterHTTPToolList(result, allowed)
+}
+
+func intersectHTTPToolRestrictions(a map[string]bool, aRestricted bool, b map[string]bool, bRestricted bool) (map[string]bool, bool) {
+	if !aRestricted {
+		return b, bRestricted
+	}
+	if !bRestricted {
+		return a, true
+	}
+	intersection := make(map[string]bool)
+	for name, allowed := range a {
+		if allowed && b[name] {
+			intersection[name] = true
+		}
+	}
+	return intersection, true
+}
+
+func (s *Server) filterHTTPToolList(result any, allowed map[string]bool) (any, *rpcError) {
 	body, ok := result.(map[string]any)
 	if !ok {
-		return result, nil
+		return nil, rpcErrorf(errCodeInternal, "tools/list internal result shape mismatch")
 	}
 	descs, ok := body["tools"].([]toolDescriptor)
 	if !ok {
-		return result, nil
+		return nil, rpcErrorf(errCodeInternal, "tools/list internal tools shape mismatch")
 	}
 	filtered := make([]httpToolDescriptor, 0, len(descs))
 	for _, desc := range descs {
@@ -389,6 +427,24 @@ func (s *Server) handleListToolsFiltered(actor domain.Token, opts HTTPOptions) (
 		}
 	}
 	return map[string]any{"tools": filtered}, nil
+}
+
+func (s *Server) checkHTTPToolAllowedForActor(actor domain.Token, raw json.RawMessage, opts HTTPOptions) *rpcError {
+	actorProfile, marked, err := mcpProfileForActor(actor)
+	if err != nil {
+		return rpcErrorf(errCodeInvalidRequest, "invalid MCP actor profile")
+	}
+	if opts.Profile != nil {
+		if err := validateHTTPActorProfile(actor, opts.Profile); err != nil {
+			return rpcErrorf(errCodeInvalidRequest, "invalid or mismatched MCP actor profile")
+		}
+	}
+	if marked {
+		if rerr := s.checkHTTPToolAllowed(raw, HTTPOptions{Profile: actorProfile}); rerr != nil {
+			return rerr
+		}
+	}
+	return s.checkHTTPToolAllowed(raw, opts)
 }
 
 func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, opts HTTPOptions) *rpcError {

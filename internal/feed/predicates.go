@@ -247,8 +247,7 @@ func normalizePredicate(p Predicate) (Predicate, error) {
 // matching nothing.
 func knownEventKind(kind string) bool {
 	return slices.Contains(IncludedKinds, kind) ||
-		kind == domain.EventWorkItemAssigned ||
-		kind == domain.EventWorkItemAssignmentReleased
+		assignedLaneControlKind(kind)
 }
 
 // FingerprintHash is the compact channel-identity form of the canonical
@@ -318,7 +317,16 @@ func (f ReadFilter) queryKinds() []string {
 		// feed and persisted projections. The actor-addressed runtime lane
 		// is the narrow exception that wakes an idle claimant on assign or
 		// release without reclassifying either event kind.
-		kinds = append(kinds, domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased)
+		kinds = append(kinds,
+			domain.EventWorkItemAssigned,
+			domain.EventWorkItemAssignmentReleased,
+			domain.EventListenerActivationRequested,
+			domain.EventListenerActivationDispatching,
+			domain.EventListenerActivationAccepted,
+			domain.EventListenerActivationCompleted,
+			domain.EventListenerActivationFailed,
+			domain.EventListenerActivationAmbiguous,
+		)
 	}
 	return kinds
 }
@@ -390,7 +398,7 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 				}
 				anchors := WorkItemAnchors(item)
 				addressed := (addresses[i].present && addresses[i].tokenID == predicate.TokenID) || terminalAddresses[item.EventID]
-				if assignmentControlKind(item.Kind) {
+				if assignedLaneControlKind(item.Kind) {
 					// Control events target their payload assignee exactly. Never
 					// reinterpret a stale A control event as activity for the item's
 					// later/current holder B.
@@ -502,7 +510,7 @@ func (s *Service) matchingItems(ctx context.Context, filter ReadFilter, items []
 func (s *Service) terminalAddressedEvents(ctx context.Context, tokenID uuid.UUID, items []Item, candidates []bool, addresses []explicitAddress) (map[uuid.UUID]bool, error) {
 	eventIDs := make([]uuid.UUID, 0, len(items))
 	for i, item := range items {
-		if !candidates[i] || addresses[i].invalid || assignmentControlKind(item.Kind) ||
+		if !candidates[i] || addresses[i].invalid || assignedLaneControlKind(item.Kind) ||
 			(addresses[i].present && addresses[i].tokenID == tokenID) {
 			continue
 		}
@@ -573,7 +581,7 @@ func (s *Service) anchorsInSubtree(ctx context.Context, root uuid.UUID, ids []uu
 
 func (s *Service) assignedWorkItems(ctx context.Context, tokenID uuid.UUID, items []Item, candidates []bool, addresses []explicitAddress) (map[uuid.UUID]bool, error) {
 	ids := candidateAnchorIDs(items, candidates, func(i int, item Item) bool {
-		return assignmentControlKind(item.Kind) || addresses[i].invalid || (addresses[i].present && addresses[i].tokenID == tokenID)
+		return assignedLaneControlKind(item.Kind) || addresses[i].invalid || (addresses[i].present && addresses[i].tokenID == tokenID)
 	})
 	assigned := make(map[uuid.UUID]bool, len(ids))
 	if len(ids) == 0 {
@@ -622,8 +630,20 @@ func candidateAnchorIDs(items []Item, candidates []bool, skip func(int, Item) bo
 	return ids
 }
 
-func assignmentControlKind(kind string) bool {
-	return kind == domain.EventWorkItemAssigned || kind == domain.EventWorkItemAssignmentReleased
+func assignedLaneControlKind(kind string) bool {
+	switch kind {
+	case domain.EventWorkItemAssigned,
+		domain.EventWorkItemAssignmentReleased,
+		domain.EventListenerActivationRequested,
+		domain.EventListenerActivationDispatching,
+		domain.EventListenerActivationAccepted,
+		domain.EventListenerActivationCompleted,
+		domain.EventListenerActivationFailed,
+		domain.EventListenerActivationAmbiguous:
+		return true
+	default:
+		return false
+	}
 }
 
 // ExplicitAddresseeTokenID returns only the canonical structured identity
@@ -662,7 +682,7 @@ func parseExplicitAddressee(item Item) explicitAddress {
 		identities = append(identities, id)
 		return true
 	}
-	if assignmentControlKind(item.Kind) {
+	if assignedLaneControlKind(item.Kind) {
 		// Control events are addressed by their schema's exact assignee field;
 		// a generic addressee field must not forge or override that epoch.
 		if _, ok := envelope["addressee_token_id"]; ok {
@@ -730,7 +750,13 @@ func WorkItemAnchors(item Item) []uuid.UUID {
 		domain.EventApprovalExpired,
 		domain.EventHTTPConnectorActionRequested,
 		domain.EventHTTPConnectorActionApproved,
-		domain.EventHTTPConnectorActionSent:
+		domain.EventHTTPConnectorActionSent,
+		domain.EventListenerActivationRequested,
+		domain.EventListenerActivationDispatching,
+		domain.EventListenerActivationAccepted,
+		domain.EventListenerActivationCompleted,
+		domain.EventListenerActivationFailed,
+		domain.EventListenerActivationAmbiguous:
 		return payloadWorkItemIDs(item)
 	case domain.EventTropismDefined,
 		domain.EventCultivarDefined,

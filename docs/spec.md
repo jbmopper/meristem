@@ -101,14 +101,20 @@ profile boundary. Sealed read profiles expose only provider-safe work-item/feed
 projections; sealed tracker-write profiles additionally expose narrowly
 validated, idempotent work-item coordination mutations. They never expose
 approval, connector, inbox, registry/policy, private payload, or execution
-authority. Missing markers retain the transport's ordinary local-token policy;
-unknown or inexact markers fail closed.
+authority. An exact `mcp.profile:local_agent_v1` marker on an active, non-root
+agent token selects the ordinary scope-derived MCP surface and ordinary DTOs on
+both stdio and HTTP; the marker grants no authority beyond the token's other
+scopes. Unmarked stdio tokens retain their compatibility behavior, while
+unmarked HTTP tokens retain the provider-safe read fallback. Unknown, repeated,
+ambiguous, or inexact markers fail closed.
 
 `docs/network-layer-spec.md` gives the detailed registry, origin-validation,
 queue, patience, staging, and acceptance contract. In particular, Stage 1 is
 peer REST plus queue fallback; provider MCP ingress is Stage 2. Remote-reference
-caching, object re-homing implementation, application relay, and HTTP MCP
-writes are explicit follow-up work, not implicit parts of Stage 1.
+caching, object re-homing implementation, and application relay are explicit
+follow-up work, not implicit parts of Stage 1. Local-agent HTTP MCP mutations
+use the same canonical services and durable MCP argument-idempotency contract
+as stdio; this does not make them part of peer networking.
 
 ### Deterministic and Probabilistic Subsystems
 
@@ -267,6 +273,57 @@ The owner can be unreachable for a long time and the system still terminates: no
 
 The worker is a long-lived process that polls `job_queue` on a short interval, leases jobs with `FOR UPDATE SKIP LOCKED`, holds the lease for the duration of the run, and returns the lease on exit or expiry. Crash mid-anything is safe; the next poller picks the lease back up. Postgres is both the backing store for state and the queue. No Redis. No NATS.
 
+### Listener Control Plane
+
+A listener is a durable client endpoint, not an agent persona. Its stable
+registration names a currently bound principal token, provider/adapter kind,
+capabilities, one complete base policy, and a maximum concurrency. Producers
+address the registration rather than a bearer UUID; credential rotation keeps
+the listener address stable. `listener.registered`,
+`listener.credential_bound`, `listener.policy_set`, and `listener.retired` are
+authoritative events, synchronously projected into `listener_registrations`.
+The demanded capability is distinct from launch metadata: each cultivar
+profile declares one `dispatch_capability`, and `dispatch.requested` records
+both that semantic capability and the exact versioned cultivar. Historical
+profiles without the field use a deterministic, fail-closed compatibility
+mapping; unknown cultivars map only to their own exact version rather than a
+broader role.
+
+The `meristem listener` supervisor derives all effective state after every
+start. With no held assignment it is IDLE under the latest policy: mint a
+filter-bound feed cursor at head, snapshot current eligible demand, then watch
+for later demand. A successful atomic claim narrows it to FOCUSED on one exact
+`work_item.assigned` generation. It ignores unrelated demand until terminal
+handback, yield, or worker-owned lease expiry, then discards that generation's
+focus cursor and restores the latest base policy. Feed delivery is a wake
+signal; eligibility, current policy, current credential binding, human-review
+gate, author exclusion, capacity, and the assignment winner are revalidated in
+the claim transaction.
+
+External task activation has its own event-backed ledger. One deterministic
+activation ID is derived from `(assignment_event_id, binding_generation,
+attempt)`. The lifecycle is `requested -> dispatching -> accepted -> completed`
+with bounded `failed` retry and `ambiguous` reconcile paths. Every external
+contact is preceded by a finite `dispatching` lease. Expired dispatching or
+accepted state becomes ambiguous and may only reconcile by deterministic
+external client-message ID; it is never blindly resubmitted. After finite
+dispatch/reconcile attempts the activation is terminal and assignment patience
+drives reassignment, fallback, or human escalation.
+Expected target backpressure before admission (for example, a bound app task
+still running another turn) is recorded as `adapter_target_busy`; it may retry
+beyond the ordinary adapter-failure count but never beyond the finite
+assignment lease/patience. It must not steer the unrelated active turn.
+
+The core adapter boundary contains IDs and structural allowlisted receipts
+only. Event/work-item bodies, bearer values, and database URLs never enter an
+adapter wake. A vendor adapter may resolve one local task binding, inspect
+history for its deterministic client-message ID, start only an idle dedicated
+task, decline every unattended approval/elicitation/permission request, and
+report `accepted | completed | failed | ambiguous`. It may not own feed
+filters, durable cursors, routing, authorization, retry judgment, or a local
+delivery journal. REST is canonical; MCP mirrors activation ensure, begin, and
+receipt operations through the same services.
+
 ## Auth and Token Model
 
 - A single root token, held only by the owner, used only to mint and revoke other tokens.
@@ -309,6 +366,11 @@ The worker is a long-lived process that polls `job_queue` on a short interval, l
   or ceiling mismatches fail at binding, authorization, token exchange,
   refresh, and access. The shared MCP dispatcher enforces the marker's sealed
   tool and provider-safe data profile over both HTTP and stdio.
+- Local-agent HTTP actors carry exactly one `mcp.profile:local_agent_v1`
+  marker. Only the root-controlled token creation path may issue it; delegated
+  issuance rejects it. The marker selects transport behavior but grants no
+  tool authority: advertisement and dispatch remain a deterministic reduction
+  over the actor's ordinary scopes, including object-level tree checks.
 - Token revocation is instant; the next request fails. A panic-revoke endpoint reachable from the iPhone invalidates every non-root token.
 - Tokens are recorded on every event. Audit answers "who, via what client, when, with what authority."
 
@@ -500,9 +562,11 @@ v1 is the agreed-upon substrate; "What meristem Builds For Itself" below is the 
 - 🚧 MCP server with REST parity ✅ for read/triage paths, feed projections,
   registry/projection reads, substrate `work_item` mutations, and approval
   request/decision tools plus approval-gated HTTP connector requests over
-  stdio; provider HTTP MCP has provider-safe reads plus a sealed tracker-only
-  mutation profile with durable replay and no execution/external-write tools.
-  Artifact attachment remains open.
+  stdio and explicitly marked local-agent HTTP clients; local HTTP calls retain
+  scope-derived tool filtering, ordinary DTOs, request attribution, and durable
+  argument-level replay. Provider HTTP MCP remains separately sealed to
+  provider-safe reads plus its tracker-only mutation profile, with no
+  execution/external-write tools. Artifact attachment remains open.
 - ◻︎ Nightly Postgres dumps to object storage; documented and rehearsed restore.
 - 🚧 Single-VM deploy with TLS, disk encryption, and object overflow.
 

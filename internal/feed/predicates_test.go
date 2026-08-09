@@ -178,7 +178,15 @@ func TestQueryKindsPushdownRetainsWakeKindsForAssignedLane(t *testing.T) {
 	// Under the assigned lane kind pushdown is disabled: every base kind can
 	// carry an explicit addressee, so the full set plus controls must scan.
 	for _, required := range append(slices.Clone(IncludedKinds),
-		domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased) {
+		domain.EventWorkItemAssigned,
+		domain.EventWorkItemAssignmentReleased,
+		domain.EventListenerActivationRequested,
+		domain.EventListenerActivationDispatching,
+		domain.EventListenerActivationAccepted,
+		domain.EventListenerActivationCompleted,
+		domain.EventListenerActivationFailed,
+		domain.EventListenerActivationAmbiguous,
+	) {
 		if !slices.Contains(kinds, required) {
 			t.Errorf("assigned lane pushdown dropped scannable kind %s: %v", required, kinds)
 		}
@@ -211,7 +219,16 @@ func TestReadFilterAssignmentControlKindsAreRuntimeOnly(t *testing.T) {
 	tokenID := uuid.New()
 	runtime := ReadFilter{Predicates: []Predicate{{Kind: PredicateAssignedOrAddressed, TokenID: tokenID}}}
 	kinds := runtime.queryKinds()
-	for _, kind := range []string{domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased} {
+	for _, kind := range []string{
+		domain.EventWorkItemAssigned,
+		domain.EventWorkItemAssignmentReleased,
+		domain.EventListenerActivationRequested,
+		domain.EventListenerActivationDispatching,
+		domain.EventListenerActivationAccepted,
+		domain.EventListenerActivationCompleted,
+		domain.EventListenerActivationFailed,
+		domain.EventListenerActivationAmbiguous,
+	} {
 		if !slices.Contains(kinds, kind) {
 			t.Errorf("runtime kinds omit %s", kind)
 		}
@@ -222,7 +239,16 @@ func TestReadFilterAssignmentControlKindsAreRuntimeOnly(t *testing.T) {
 
 	projection := ProjectionFilter{Kinds: []string{domain.EventWorkItemCreated}}
 	projected := ReadFilter{Projection: &projection, Predicates: runtime.Predicates}
-	for _, kind := range []string{domain.EventWorkItemAssigned, domain.EventWorkItemAssignmentReleased} {
+	for _, kind := range []string{
+		domain.EventWorkItemAssigned,
+		domain.EventWorkItemAssignmentReleased,
+		domain.EventListenerActivationRequested,
+		domain.EventListenerActivationDispatching,
+		domain.EventListenerActivationAccepted,
+		domain.EventListenerActivationCompleted,
+		domain.EventListenerActivationFailed,
+		domain.EventListenerActivationAmbiguous,
+	} {
 		if slices.Contains(projected.queryKinds(), kind) {
 			t.Errorf("persisted projection admitted runtime control kind %s", kind)
 		}
@@ -248,6 +274,8 @@ func TestExplicitAddresseeTokenIDUsesOnlyCanonicalStructuredLocations(t *testing
 		{name: "assignment generic address spoof", kind: domain.EventWorkItemAssigned, body: map[string]any{"addressee_token_id": tokenID}},
 		{name: "assignment conflicting generic address", kind: domain.EventWorkItemAssigned, body: map[string]any{"assignee_token_id": tokenID, "addressee_token_id": tokenID}},
 		{name: "release control", kind: domain.EventWorkItemAssignmentReleased, body: map[string]any{"assignee_token_id": tokenID}, want: tokenID},
+		{name: "activation control", kind: domain.EventListenerActivationRequested, body: map[string]any{"assignee_token_id": tokenID, "work_item_id": uuid.New()}, want: tokenID},
+		{name: "activation generic address spoof", kind: domain.EventListenerActivationCompleted, body: map[string]any{"addressee_token_id": tokenID, "work_item_id": uuid.New()}},
 		{name: "conflicting generic identities", kind: domain.EventWorkItemEventAppended, body: map[string]any{"addressee_token_id": tokenID, "inner": map[string]any{"addressee_token_id": otherID}}},
 		{name: "malformed", kind: domain.EventWorkItemEventAppended, body: json.RawMessage(`{"inner":`)},
 	}

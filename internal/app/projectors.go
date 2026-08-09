@@ -13,6 +13,8 @@ import (
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/inbox"
 	"github.com/jbmopper/meristem/internal/jobqueue"
+	"github.com/jbmopper/meristem/internal/listeneractivation"
+	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/nodes"
 	"github.com/jbmopper/meristem/internal/oauth"
 	"github.com/jbmopper/meristem/internal/policyprofile"
@@ -35,6 +37,8 @@ func NewProjectionRegistry() *projections.Registry {
 	idempotency.RegisterProjectors(reg)
 	inbox.RegisterProjectors(reg)
 	workitems.RegisterProjectors(reg)
+	listeners.RegisterProjectors(reg)
+	listeneractivation.RegisterProjectors(reg)
 	jobqueue.RegisterProjectors(reg)
 	httpconnector.RegisterProjectors(reg)
 	signals.RegisterProjectors(reg)

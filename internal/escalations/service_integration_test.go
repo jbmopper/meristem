@@ -91,8 +91,8 @@ func TestRequestCreatesHumanVisibleEscalation(t *testing.T) {
 	if blockedParent.State != domain.WorkItemBlocked {
 		t.Fatalf("parent state = %s, want blocked", blockedParent.State)
 	}
-	if blockedParent.HumanReviewStatus != domain.HumanReviewBlocked {
-		t.Fatalf("parent human_review_status = %s, want blocked", blockedParent.HumanReviewStatus)
+	if blockedParent.HumanReviewStatus != domain.HumanReviewWavedThrough {
+		t.Fatalf("parent human_review_status = %s, want waved_through", blockedParent.HumanReviewStatus)
 	}
 	humanItem, err := workSvc.Get(ctx, result.HumanWorkItemID)
 	if err != nil {
@@ -108,6 +108,34 @@ func TestRequestCreatesHumanVisibleEscalation(t *testing.T) {
 	assertRelation(t, ctx, pool, parent.ID, result.HumanWorkItemID)
 	assertEscalationEvent(t, ctx, pool, result.EscalationID, parent.ID, result.HumanWorkItemID)
 	assertSingleEscalationProjection(t, ctx, pool, result.EscalationID, result.HumanWorkItemID)
+
+	approvedParent, err := workSvc.Create(ctx, workitems.CreateInput{
+		Title:             "Approved direction needs attention",
+		State:             domain.WorkItemRunning,
+		HumanReviewStatus: domain.HumanReviewApproved,
+		Actor:             agent.Token,
+	})
+	if err != nil {
+		t.Fatalf("create approved parent: %v", err)
+	}
+	if _, err := NewService(pool, writer).Request(ctx, RequestInput{
+		WorkItemID: approvedParent.ID,
+		Reason:     "approved work stalled",
+		Summary:    "Surface the stall without revoking approval.",
+		Actor:      agent.Token,
+	}); err != nil {
+		t.Fatalf("request escalation for approved parent: %v", err)
+	}
+	preservedApproved, err := workSvc.Get(ctx, approvedParent.ID)
+	if err != nil {
+		t.Fatalf("get approved parent: %v", err)
+	}
+	if preservedApproved.State != domain.WorkItemBlocked {
+		t.Fatalf("approved parent state = %s, want blocked", preservedApproved.State)
+	}
+	if preservedApproved.HumanReviewStatus != domain.HumanReviewApproved {
+		t.Fatalf("approved parent human_review_status = %s, want approved", preservedApproved.HumanReviewStatus)
+	}
 }
 
 func TestConcurrentDistinctRequestsSerializeParentTransition(t *testing.T) {

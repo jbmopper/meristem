@@ -138,7 +138,7 @@ func validateQueueVia(queueVia []string) error {
 func List(ctx context.Context, pool *pgxpool.Pool) ([]domain.Node, error) {
 	rows, err := pool.Query(ctx, `
 		-- Reads select relay_via, not queue_via, for the whole expand window:
-		-- a drifted pre-0037 binary updates only relay_via, and reading the new
+		-- a drifted pre-0041 binary updates only relay_via, and reading the new
 		-- column would silently serve its stale value. Reads flip to queue_via
 		-- in the contract release, once no old writer can still be running.
 		SELECT node_id, base_url, direct_url, relay_via, status, created_at, updated_at, registry_revision

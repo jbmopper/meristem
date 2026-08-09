@@ -78,7 +78,7 @@ func applyRegistered(ctx context.Context, tx pgx.Tx, event domain.Event, strictO
 		return fmt.Errorf("node.registered: %w", err)
 	}
 	// relay_via is written alongside queue_via for the expand window (migration
-	// 0037): a stale binary still reads the legacy column. Both are folded from
+	// 0041): a stale binary still reads the legacy column. Both are folded from
 	// the same payload value, so the projection stays a pure fold either way.
 	_, err = tx.Exec(ctx, `
 		INSERT INTO nodes (node_id, base_url, direct_url, queue_via, relay_via, status, created_at, updated_at, registry_revision)
@@ -153,7 +153,7 @@ func applyRouteUpdated(ctx context.Context, tx pgx.Tx, event domain.Event, stric
 		return fmt.Errorf("node.route_updated: %w", err)
 	}
 	// relay_via mirrors queue_via for the expand window; see the registered
-	// projector above and migration 0037.
+	// projector above and migration 0041.
 	_, err = tx.Exec(ctx, `
 		UPDATE nodes SET
 			direct_url = $2,

@@ -8,11 +8,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/events"
 	"github.com/jbmopper/meristem/internal/idempotency"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/worker"
@@ -32,11 +35,15 @@ func TestProviderTrackerHTTPMutationIdempotencyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root token: %v", err)
 	}
-	actorAResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-tracker-a", Source: domain.SourceAgent, Actor: &rootResult.Token})
+	authority, err := access.ReduceProviderAuthority(access.ProviderOwnerTrackerWriteV1, uuid.Nil)
+	if err != nil {
+		t.Fatalf("reduce tracker authority: %v", err)
+	}
+	actorAResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-tracker-a", Source: domain.SourceAgent, Scopes: authority.Scopes, Actor: &rootResult.Token})
 	if err != nil {
 		t.Fatalf("create actor A: %v", err)
 	}
-	actorBResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-tracker-b", Source: domain.SourceAgent, Actor: &rootResult.Token})
+	actorBResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "http-tracker-b", Source: domain.SourceAgent, Scopes: authority.Scopes, Actor: &rootResult.Token})
 	if err != nil {
 		t.Fatalf("create actor B: %v", err)
 	}
@@ -47,6 +54,7 @@ func TestProviderTrackerHTTPMutationIdempotencyIntegration(t *testing.T) {
 		t.Fatalf("create worker actor: %v", err)
 	}
 	s := New(Deps{
+		Access:      access.NewService(pool),
 		Idempotency: idempotency.NewMiddleware(pool, writer),
 		WorkItems:   workitems.NewService(pool, writer),
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
@@ -131,8 +139,9 @@ func TestProviderTrackerRejectsLegacyRawIdempotencyReplay(t *testing.T) {
 	}
 
 	writer := app.NewEventWriter()
-	actor := createMCPTestActor(t, ctx, pool, writer, "provider-legacy-cache")
+	actor := createMCPProviderTrackerTestActor(t, ctx, pool, writer, "provider-legacy-cache")
 	s := New(Deps{
+		Access:      access.NewService(pool),
 		Idempotency: idempotency.NewMiddleware(pool, writer),
 		WorkItems:   workitems.NewService(pool, writer),
 	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
@@ -144,15 +153,25 @@ func TestProviderTrackerRejectsLegacyRawIdempotencyReplay(t *testing.T) {
 		"idempotency_key":              "legacy-provider-cache-key",
 	}
 
-	// An unrestricted call uses the pre-discriminator request hash and stores the
-	// ordinary work-item DTO, faithfully modeling a legacy provider cache row
-	// without bypassing the event-backed idempotency writer in the test.
-	legacy := callHTTPTool(t, s, actor, nil, "work_items.create", args)
-	if legacy.IsError || legacy.TransportError != "" {
-		t.Fatalf("seed legacy cache row: %+v", legacy)
+	// Invoke the pre-profile handler boundary directly so the durable middleware
+	// stores the old ordinary DTO for this exact actor/tool/key. The HTTP route
+	// now derives the sealed profile from the same actor and must refuse replaying
+	// that incompatible cached response.
+	params, err := json.Marshal(map[string]any{"name": "work_items.create", "arguments": args})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(legacy.Text, "created_by") || strings.Contains(legacy.Text, ProviderSafeWorkItemsContract) {
-		t.Fatalf("seed response was not an ordinary legacy DTO: %s", legacy.Text)
+	legacyResult, legacyErr := s.handleCallTool(ctx, actor, params)
+	if legacyErr != nil {
+		t.Fatalf("seed legacy cache row: %+v", legacyErr)
+	}
+	legacyJSON, err := json.Marshal(legacyResult)
+	if err != nil {
+		t.Fatalf("encode legacy result: %v", err)
+	}
+	legacyText := string(legacyJSON)
+	if !strings.Contains(legacyText, "created_by") || strings.Contains(legacyText, ProviderSafeWorkItemsContract) {
+		t.Fatalf("seed response was not an ordinary legacy DTO: %s", legacyText)
 	}
 
 	retry := callHTTPTool(t, s, actor, ProviderTrackerHTTPProfile(), "work_items.create", args)
@@ -178,7 +197,7 @@ func TestProviderTrackerHTTPHiddenCallsHaveNoDurableEffectsIntegration(t *testin
 	}
 
 	writer := app.NewEventWriter()
-	actor := createMCPTestActor(t, ctx, pool, writer, "http-tracker-hidden")
+	actor := createMCPProviderTrackerTestActor(t, ctx, pool, writer, "http-tracker-hidden")
 	s := New(Deps{
 		Idempotency: idempotency.NewMiddleware(pool, writer),
 		WorkItems:   workitems.NewService(pool, writer),
@@ -209,6 +228,24 @@ func TestProviderTrackerHTTPHiddenCallsHaveNoDurableEffectsIntegration(t *testin
 	}
 }
 
+func createMCPProviderTrackerTestActor(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, name string) domain.Token {
+	t.Helper()
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: name + "-root", IsRoot: true, Source: domain.SourceHuman})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	authority, err := access.ReduceProviderAuthority(access.ProviderOwnerTrackerWriteV1, uuid.Nil)
+	if err != nil {
+		t.Fatalf("reduce tracker authority: %v", err)
+	}
+	result, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: name, Source: domain.SourceAgent, Scopes: authority.Scopes, Actor: &root.Token})
+	if err != nil {
+		t.Fatalf("create tracker token: %v", err)
+	}
+	return result.Token
+}
+
 type httpToolCallResult struct {
 	IsError        bool
 	Text           string
@@ -217,9 +254,19 @@ type httpToolCallResult struct {
 
 func callHTTPTool(t *testing.T, s *Server, actor domain.Token, profile *HTTPToolProfile, name string, args map[string]any) httpToolCallResult {
 	t.Helper()
-	params, err := json.Marshal(map[string]any{"name": name, "arguments": args})
+	result, err := doHTTPToolCall(s, actor, profile, name, args)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return result
+}
+
+// doHTTPToolCall is safe to call from a worker goroutine because it reports
+// all decode/setup failures to its caller instead of invoking testing.FailNow.
+func doHTTPToolCall(s *Server, actor domain.Token, profile *HTTPToolProfile, name string, args map[string]any) (httpToolCallResult, error) {
+	params, err := json.Marshal(map[string]any{"name": name, "arguments": args})
+	if err != nil {
+		return httpToolCallResult{}, fmt.Errorf("encode HTTP MCP params: %w", err)
 	}
 	raw := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":%s}`, params))
 	resp := s.HandleHTTPMessageWithOptions(context.Background(), raw, actor, HTTPOptions{Profile: profile})
@@ -228,10 +275,10 @@ func callHTTPTool(t *testing.T, s *Server, actor domain.Token, profile *HTTPTool
 		Result json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(resp.Body, &envelope); err != nil {
-		t.Fatalf("decode HTTP MCP response: %v body=%s", err, resp.Body)
+		return httpToolCallResult{}, fmt.Errorf("decode HTTP MCP response: %w body=%s", err, resp.Body)
 	}
 	if envelope.Error != nil {
-		return httpToolCallResult{TransportError: envelope.Error.Message}
+		return httpToolCallResult{TransportError: envelope.Error.Message}, nil
 	}
 	var toolResult struct {
 		IsError bool `json:"isError"`
@@ -240,13 +287,13 @@ func callHTTPTool(t *testing.T, s *Server, actor domain.Token, profile *HTTPTool
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(envelope.Result, &toolResult); err != nil {
-		t.Fatalf("decode HTTP MCP tool result: %v result=%s", err, envelope.Result)
+		return httpToolCallResult{}, fmt.Errorf("decode HTTP MCP tool result: %w result=%s", err, envelope.Result)
 	}
 	text := ""
 	if len(toolResult.Content) > 0 {
 		text = toolResult.Content[0].Text
 	}
-	return httpToolCallResult{IsError: toolResult.IsError, Text: text}
+	return httpToolCallResult{IsError: toolResult.IsError, Text: text}, nil
 }
 
 func cloneHTTPArgs(in map[string]any) map[string]any {

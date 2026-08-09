@@ -20,6 +20,7 @@ import (
 func mcpEarlyErrorPost(t *testing.T, body string, modernHeader bool) *httptest.ResponseRecorder {
 	t.Helper()
 	s := New(nil, nil)
+	allowMCPWriteDeadlines(s)
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))

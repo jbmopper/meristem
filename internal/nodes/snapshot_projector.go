@@ -67,7 +67,7 @@ func (snapshotObservedProjector) Apply(ctx context.Context, tx pgx.Tx, event dom
 		if err != nil {
 			return fmt.Errorf("registry_snapshot.observed: queue_via: %w", err)
 		}
-		// relay_via mirrors queue_via for the expand window (migration 0037).
+		// relay_via mirrors queue_via for the expand window (migration 0041).
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO nodes (
 				node_id, base_url, direct_url, queue_via, relay_via, status,

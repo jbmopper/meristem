@@ -1123,7 +1123,9 @@ func truncate(s string, n int) string {
 //
 //  1. MERISTEM_TOKEN env var (explicit always wins; CI and ephemeral shells
 //     should never have a file silently take precedence).
-//  2. The first existing token file in priorityTokens, searched in the
+//  2. MERISTEM_TOKEN_FILE, when set, names one absolute, regular, mode-0600
+//     file. An invalid explicit file fails closed rather than falling back.
+//  3. The first existing token file in priorityTokens, searched in the
 //     nearest .meristem directory found by walking up from cwd. The walk is
 //     bounded by filesystem-root convergence so it terminates on every OS.
 //
@@ -1134,6 +1136,30 @@ func truncate(s string, n int) string {
 func resolveFeedToken() (token, source string, err error) {
 	if t := strings.TrimSpace(os.Getenv("MERISTEM_TOKEN")); t != "" {
 		return t, "MERISTEM_TOKEN", nil
+	}
+	if path := strings.TrimSpace(os.Getenv("MERISTEM_TOKEN_FILE")); path != "" {
+		if !filepath.IsAbs(path) {
+			return "", "", errors.New("feed: MERISTEM_TOKEN_FILE must be absolute")
+		}
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return "", "", fmt.Errorf("feed: inspect MERISTEM_TOKEN_FILE: %w", statErr)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			return "", "", errors.New("feed: MERISTEM_TOKEN_FILE must be a regular mode-0600 file")
+		}
+		if info.Size() < 1 || info.Size() > 4096 {
+			return "", "", errors.New("feed: MERISTEM_TOKEN_FILE has an invalid size")
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return "", "", fmt.Errorf("feed: read MERISTEM_TOKEN_FILE: %w", readErr)
+		}
+		t := strings.TrimSpace(string(data))
+		if t == "" {
+			return "", "", errors.New("feed: MERISTEM_TOKEN_FILE is empty")
+		}
+		return t, path, nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

@@ -138,7 +138,7 @@ func TestNodeProjectorsIntegration(t *testing.T) {
 }
 
 // TestQueueViaExpandMirrorsLegacyColumn pins the drift contract of migration
-// 0037. queue_via is added alongside relay_via rather than renaming it, because
+// 0041. queue_via is added alongside relay_via rather than renaming it, because
 // a stale meristem binary on the same database still selects the legacy column
 // (docs/network-operations.md, binary drift) and a rename would break it on
 // every node read. The projectors must therefore keep relay_via current on
@@ -225,7 +225,7 @@ func TestQueueViaExpandMirrorsLegacyColumn(t *testing.T) {
 	assertMirrored([]string{})
 
 	// The other direction, and the one the previous revision got wrong: a
-	// drifted pre-0037 binary writes ONLY relay_via, because queue_via did not
+	// drifted pre-0041 binary writes ONLY relay_via, because queue_via did not
 	// exist when it was built. The current reader must see that write. Reading
 	// queue_via here would serve the backfilled value forever and route through
 	// a queue host the operator had already moved off of.

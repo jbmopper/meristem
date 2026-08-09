@@ -1113,6 +1113,156 @@ func writeGrantError(w http.ResponseWriter, err error) {
 	writeAPIError(w, http.StatusInternalServerError, "subactor_grant_failed", "could not issue subactor grant")
 }
 
+func toAssignmentResponse(a domain.WorkItemAssignment) map[string]any {
+	out := map[string]any{
+		"work_item_id":        a.WorkItemID,
+		"holder_token_id":     a.HolderTokenID,
+		"mode":                a.Mode,
+		"assignment_event_id": a.AssignmentEventID,
+		"claimed_at":          a.ClaimedAt,
+		"expires_at":          a.ExpiresAt,
+		"updated_at":          a.UpdatedAt,
+	}
+	if a.ListenerID != nil {
+		out["listener_id"] = a.ListenerID
+		out["demand_event_id"] = a.DemandEventID
+		out["policy_event_id"] = a.PolicyEventID
+	}
+	return out
+}
+
+// handleListHeldAssignments is the restart-derivation read (listener control
+// plane, slice 3): the authenticated principal's OWN active assignments only
+// — there is no cross-principal listing on this surface, so it needs no
+// object-level check beyond ordinary assignment-read visibility.
+func (s *Server) handleListHeldAssignments(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !access.ToolVisible(actor, "work_items.get_assignment") {
+		writeAPIError(w, http.StatusForbidden, "insufficient_scope", "token cannot read assignments")
+		return
+	}
+	assignments, err := s.workItems.ListAssignmentsForHolder(r.Context(), actor.ID)
+	if err != nil {
+		writeAssignmentError(w, r, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(assignments))
+	for _, a := range assignments {
+		out = append(out, toAssignmentResponse(a))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignments": out})
+}
+
+func (s *Server) handleClaimWorkItem(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	assignment, err := s.workItems.Claim(r.Context(), id, actor)
+	if err != nil {
+		writeAssignmentError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignment": toAssignmentResponse(assignment)})
+}
+
+func (s *Server) handleGetWorkItemAssignment(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	if !s.canReadWorkItem(w, r, actor, id) {
+		return
+	}
+	assignment, err := s.workItems.GetAssignment(r.Context(), id)
+	if err != nil {
+		writeAssignmentError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignment": toAssignmentResponse(assignment)})
+}
+
+func (s *Server) handleYieldWorkItem(w http.ResponseWriter, r *http.Request) {
+	actor, ok := authenticatedToken(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		AssignmentEventID string `json:"assignment_event_id"`
+	}
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	assignmentEventID, err := uuid.Parse(req.AssignmentEventID)
+	if err != nil {
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusBadRequest, "invalid_assignment_event_id", "yield must name the exact assignment_event_id it releases")
+		return
+	}
+	assignment, err := s.workItems.Yield(r.Context(), id, assignmentEventID, actor)
+	if err != nil {
+		writeAssignmentError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignment": toAssignmentResponse(assignment)})
+}
+
+// writeAssignmentError maps assignment-service refusals. Every branch here is
+// a pure refusal — Claim's conflict paths roll back without appending, and
+// Yield's holder checks precede any write — so the caller's idempotency key
+// stays usable. The one recorded case, xylem exhaustion after an incumbent
+// expiry release, reaches writeWorkItemError below and is deliberately NOT
+// marked pure there.
+func writeAssignmentError(w http.ResponseWriter, r *http.Request, err error) {
+	var held *workitems.ClaimHeldError
+	if errors.As(err, &held) {
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": map[string]any{
+				"code":                "claim_held",
+				"message":             err.Error(),
+				"holder_token_id":     held.HolderTokenID,
+				"assignment_event_id": held.AssignmentEventID,
+				"expires_at":          held.ExpiresAt,
+			},
+		})
+		return
+	}
+	switch {
+	case errors.Is(err, workitems.ErrClaimUnavailable):
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusConflict, "claim_unavailable", err.Error())
+	case errors.Is(err, workitems.ErrAssignmentNotFound):
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusNotFound, "assignment_not_found", "no active assignment")
+	case errors.Is(err, workitems.ErrAssignmentNotHeld):
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusConflict, "assignment_not_held", err.Error())
+	case errors.Is(err, workitems.ErrStaleAssignmentGeneration):
+		idempotency.MarkRefusalUnconsumed(r.Context())
+		writeAPIError(w, http.StatusConflict, "stale_assignment_generation", err.Error())
+	case errors.Is(err, workitems.ErrAssignmentStateMissing):
+		writeAPIError(w, http.StatusInternalServerError, "assignment_state_missing", err.Error())
+	default:
+		writeWorkItemError(w, r, err)
+	}
+}
+
 func writeWorkItemError(w http.ResponseWriter, r *http.Request, err error) {
 	// Pure refusals — the service rejected before appending anything — must
 	// not consume the caller's idempotency key: mark them so the middleware

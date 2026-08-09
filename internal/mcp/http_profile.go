@@ -11,14 +11,15 @@ import (
 	"github.com/jbmopper/meristem/internal/domain"
 )
 
-// HTTPToolProfile is a fail-closed provider-facing tool policy. The allowed
-// set controls both tools/list and tools/call; validateCall can further narrow
-// mutation arguments before any handler, event append, queue write, or outbox
-// write is reachable.
+// HTTPToolProfile separates tool admission from response reduction. Provider
+// profiles enable both; the explicit local-agent profile enables neither and
+// therefore retains ordinary scope-derived tools and DTOs.
 type HTTPToolProfile struct {
-	name         string
-	allowedTools map[string]bool
-	validateCall func(tool string, arguments json.RawMessage) error
+	name                  string
+	restrictTools         bool
+	allowedTools          map[string]bool
+	providerSafeResponses bool
+	validateCall          func(tool string, arguments json.RawMessage) error
 }
 
 // ProviderSafeReadHTTPProfile exposes only tracker-shaped reads. feed.read is
@@ -27,7 +28,9 @@ type HTTPToolProfile struct {
 // deterministic-error surfaces remain excluded.
 func ProviderSafeReadHTTPProfile() *HTTPToolProfile {
 	return &HTTPToolProfile{
-		name: "provider-safe-read",
+		name:                  "provider-safe-read",
+		restrictTools:         true,
+		providerSafeResponses: true,
 		allowedTools: toolSet(
 			"feed.read",
 			"backlog.readiness",
@@ -37,17 +40,29 @@ func ProviderSafeReadHTTPProfile() *HTTPToolProfile {
 	}
 }
 
-// providerMCPProfileForActor maps an exact sealed provider authority marker to
-// the corresponding MCP tool/data boundary. HTTP already selects this profile
-// at its route boundary; doing the same inside the shared dispatcher makes the
-// marker transport-independent, so a provider-scoped static credential cannot
-// silently regain the broader stdio surface.
+// LocalAgentHTTPProfile identifies the ordinary local-agent presentation
+// boundary. It grants no authority: access.ToolVisible and object-level
+// reducers continue to enforce the token's explicit business scopes.
+func LocalAgentHTTPProfile() *HTTPToolProfile {
+	return &HTTPToolProfile{name: "local-agent-v1"}
+}
+
+// mcpProfileForActor maps exact provider and local markers to their shared MCP
+// tool/data boundary. Doing this inside the dispatcher makes both marker kinds
+// transport-independent, so a marked credential cannot regain a different
+// stdio surface.
 //
 // A marker-bearing credential must be one non-root agent identity with exactly
 // the scopes produced by access.ReduceProviderAuthority. Malformed or
 // hand-expanded markers fail closed instead of falling back to ordinary token
 // scope filtering.
-func providerMCPProfileForActor(actor domain.Token) (*HTTPToolProfile, bool, error) {
+func mcpProfileForActor(actor domain.Token) (*HTTPToolProfile, bool, error) {
+	if marked, err := access.LocalAgentMCPProfileFromActor(actor); marked {
+		if err != nil {
+			return nil, true, err
+		}
+		return LocalAgentHTTPProfile(), true, nil
+	}
 	if !access.HasProviderAuthorityMarker(actor.Scopes) {
 		return nil, false, nil
 	}
@@ -66,6 +81,22 @@ func providerMCPProfileForActor(actor domain.Token) (*HTTPToolProfile, bool, err
 	default:
 		return nil, true, access.ErrInvalidProviderAuthority
 	}
+}
+
+// HTTPProfileForActor is the API route's first profile gate. The shared MCP
+// dispatcher calls mcpProfileForActor independently before tools/list and
+// tools/call, then requires this route-selected profile to match exactly.
+func HTTPProfileForActor(actor domain.Token) (*HTTPToolProfile, error) {
+	profile, marked, err := mcpProfileForActor(actor)
+	if err != nil {
+		return nil, err
+	}
+	if marked {
+		return profile, nil
+	}
+	// Unmarked static credentials retain the historical provider-safe HTTP
+	// fallback. Unmarked stdio credentials remain compatibility-unrestricted.
+	return ProviderSafeReadHTTPProfile(), nil
 }
 
 // ProviderTrackerHTTPProfile adds the narrow tracker mutation surface to the
@@ -113,7 +144,7 @@ func toolSet(names ...string) map[string]bool {
 // denies every tool instead of failing open.
 func (o HTTPOptions) allowedTools() (map[string]bool, bool) {
 	if o.Profile != nil {
-		return o.Profile.allowedTools, true
+		return o.Profile.allowedTools, o.Profile.restrictTools
 	}
 	if o.AllowedTools != nil {
 		return o.AllowedTools, true
@@ -122,6 +153,34 @@ func (o HTTPOptions) allowedTools() (map[string]bool, bool) {
 }
 
 func (p HTTPToolProfile) Name() string { return p.name }
+
+func (p *HTTPToolProfile) providerSafe() bool {
+	return p != nil && p.providerSafeResponses
+}
+
+func sameHTTPProfile(a, b *HTTPToolProfile) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.name == "" || a.name != b.name || a.restrictTools != b.restrictTools ||
+		a.providerSafeResponses != b.providerSafeResponses || len(a.allowedTools) != len(b.allowedTools) {
+		return false
+	}
+	for name, allowed := range a.allowedTools {
+		if b.allowedTools[name] != allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func validateHTTPActorProfile(actor domain.Token, route *HTTPToolProfile) error {
+	want, err := HTTPProfileForActor(actor)
+	if err != nil || !sameHTTPProfile(want, route) {
+		return fmt.Errorf("MCP actor profile does not match the HTTP route profile")
+	}
+	return nil
+}
 
 // validate applies the profile's optional per-call narrowing. Profiles whose
 // allowed set is entirely read-shaped (provider-safe-read) define no

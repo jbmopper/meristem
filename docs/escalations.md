@@ -15,8 +15,8 @@ human-visible `work_item`.
 4. Append `escalation.requested`.
 5. Append `work_item.created` for a child item titled `Human attention: ...`.
 6. Append `work_item.relation_added` from the origin to the human item.
-7. Append `work_item.metadata_updated` setting the origin
-   `human_review_status` to `blocked`.
+7. Preserve the origin's `human_review_status`; escalation is not a new human
+   decision and therefore cannot revoke `waved_through` or `approved`.
 8. Append `work_item.transitioned` to move the origin to `blocked` unless it is
    already blocked.
 
@@ -52,6 +52,9 @@ The generated child item is ordinary work item state:
 
 This makes escalations visible through existing work-item and feed paths without
 adding an approval table or notification transport in this slice.
+
+The child is the new question awaiting a human decision. The origin retains
+the owner's prior decision even while lifecycle progress is blocked.
 
 ## What This Is Not
 

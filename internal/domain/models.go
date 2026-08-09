@@ -169,6 +169,23 @@ const (
 	EventOAuthGrantRefreshed            = "oauth_grant.refreshed"
 	EventOAuthGrantRevoked              = "oauth_grant.revoked"
 	EventOAuthRefreshReuseDetected      = "oauth_grant.refresh_reuse_detected"
+
+	// Listener control plane (docs/listener-control-plane.md). A listener
+	// registration is a durable, stable routing address for a client endpoint
+	// capable of accepting temporary assignments — never a persona and never
+	// an authority grant. Credential rotation rebinds the SAME listener id;
+	// policy_set is a full replacement whose normalized shape participates in
+	// deterministic event identity.
+	EventListenerRegistered            = "listener.registered"
+	EventListenerCredentialBound       = "listener.credential_bound"
+	EventListenerPolicySet             = "listener.policy_set"
+	EventListenerRetired               = "listener.retired"
+	EventListenerActivationRequested   = "listener.activation_requested"
+	EventListenerActivationDispatching = "listener.activation_dispatching"
+	EventListenerActivationAccepted    = "listener.activation_accepted"
+	EventListenerActivationCompleted   = "listener.activation_completed"
+	EventListenerActivationFailed      = "listener.activation_failed"
+	EventListenerActivationAmbiguous   = "listener.activation_ambiguous"
 )
 
 // AllEventKinds enumerates every event kind the system knows how to append.
@@ -239,6 +256,16 @@ var AllEventKinds = []string{
 	EventOAuthGrantRefreshed,
 	EventOAuthGrantRevoked,
 	EventOAuthRefreshReuseDetected,
+	EventListenerRegistered,
+	EventListenerCredentialBound,
+	EventListenerPolicySet,
+	EventListenerRetired,
+	EventListenerActivationRequested,
+	EventListenerActivationDispatching,
+	EventListenerActivationAccepted,
+	EventListenerActivationCompleted,
+	EventListenerActivationFailed,
+	EventListenerActivationAmbiguous,
 }
 
 const (
@@ -256,6 +283,8 @@ const (
 	SubjectTropism             = "tropism"
 	SubjectCultivar            = "cultivar"
 	SubjectProjection          = "projection"
+	SubjectListener            = "listener"
+	SubjectListenerActivation  = "listener_activation"
 	// SubjectConvergence is the subject kind for a convergence verdict. The
 	// subject_id is the work_item being reduced; the attempt lives in the event
 	// payload, so (work_item_id, attempt, payload) remains the deterministic
@@ -488,6 +517,12 @@ type WorkItemAssignment struct {
 	ClaimedAt         time.Time
 	ExpiresAt         time.Time
 	UpdatedAt         time.Time
+	// Listener binding (nil for ordinary claims): WHICH listener claimed,
+	// under WHICH policy revision, for WHICH durable demand event. Restart
+	// derivation is generation-bound to the listener, not just the token.
+	ListenerID    *uuid.UUID
+	DemandEventID *uuid.UUID
+	PolicyEventID *uuid.UUID
 }
 
 // Message is the v0 text-only inbox projection.

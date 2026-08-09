@@ -183,7 +183,7 @@ func (w *Worker) scanConvergence(ctx context.Context) (convergencePassResult, er
 			result.ConvergenceRetries++
 
 		case convergence.OutcomeEscalate:
-			err := w.escalateConvergence(ctx, service, c.ID, c.SuggestedConvergenceChecks, decision.Attempt, decision.Escalation, decision.Verdict.Reason, actor)
+			err := w.escalateConvergence(ctx, service, c.ID, decision.Attempt, decision.Escalation, decision.Verdict.Reason, actor)
 			if err != nil {
 				if !shouldIgnoreConvergenceTransitionError(err) {
 					return result, err
@@ -674,30 +674,18 @@ func (w *Worker) emitConvergenceVerdict(ctx context.Context, workItemID uuid.UUI
 }
 
 // escalateConvergence applies the convergence budget escalation rule.
-func (w *Worker) escalateConvergence(ctx context.Context, service *workitems.Service, workItemID uuid.UUID, checks []string, attempt int, escalation convergence.Escalation, verdictReason string, actor domain.Token) error {
+func (w *Worker) escalateConvergence(ctx context.Context, service *workitems.Service, workItemID uuid.UUID, attempt int, escalation convergence.Escalation, verdictReason string, actor domain.Token) error {
 	reason := escalationReason(attempt, verdictReason)
 	switch escalation {
 	case convergence.EscalateFail:
 		_, err := service.Transition(ctx, workItemID, domain.WorkItemFailed, reason, actor)
 		return err
 	case convergence.EscalateHandToHuman, convergence.EscalateRequestApproval:
-		if err := w.setBlockedForConvergence(ctx, service, workItemID, checks, actor); err != nil {
-			return err
-		}
 		_, err := service.Transition(ctx, workItemID, domain.WorkItemBlocked, reason, actor)
 		return err
 	default:
 		return fmt.Errorf("unsupported escalation rule %q for %s", escalation, workItemID)
 	}
-}
-
-func (w *Worker) setBlockedForConvergence(ctx context.Context, service *workitems.Service, workItemID uuid.UUID, checks []string, actor domain.Token) error {
-	_, err := service.UpdateMetadata(ctx, workItemID, workitems.UpdateMetadataInput{
-		SuggestedConvergenceChecks: checks,
-		HumanReviewStatus:          domain.HumanReviewBlocked,
-		Actor:                      actor,
-	})
-	return err
 }
 
 func escalationReason(attempt int, verdictReason string) string {

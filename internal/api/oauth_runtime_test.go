@@ -97,6 +97,7 @@ func TestDisabledOAuthRoutesCloseButStaticMCPStillWorks(t *testing.T) {
 		oauthRuntime:  oauthRuntimeConfig{mode: oauthRuntimeDisabled},
 	}
 	s.mcpServer = mcp.New(mcp.Deps{}, mcp.ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	allowMCPWriteDeadlines(s)
 	s.routes()
 
 	publicRoutes := []struct {

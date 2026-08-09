@@ -27,6 +27,12 @@ type assignedPayload struct {
 	// may begin before waiting on row locks, while the lease begins after them.
 	ClaimedAt time.Time `json:"claimed_at"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// Listener binding (absent for ordinary claims): the listener-bound claim
+	// operation records which listener, policy revision, and durable demand
+	// event authorized this generation. All three travel together.
+	ListenerID    *uuid.UUID `json:"listener_id,omitempty"`
+	DemandEventID *uuid.UUID `json:"demand_event_id,omitempty"`
+	PolicyEventID *uuid.UUID `json:"policy_event_id,omitempty"`
 }
 
 type assignmentReleasedPayload struct {
@@ -82,6 +88,9 @@ func (assignedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Even
 		    last_release_reason = NULL,
 		    terminal_state = NULL,
 		    terminal_addressee_token_id = NULL,
+		    listener_id = $8,
+		    demand_event_id = $9,
+		    policy_event_id = $10,
 		    state_event_id = $4,
 		    state_event_seq = $7,
 		    updated_at = $5
@@ -95,7 +104,8 @@ func (assignedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.Even
 		      state_event_id = $4
 		      OR (holder_token_id IS NULL AND state_event_seq < $7)
 		  )
-	`, event.SubjectID, payload.AssigneeTokenID, payload.Mode, event.ID, payload.ClaimedAt, payload.ExpiresAt, event.Seq)
+	`, event.SubjectID, payload.AssigneeTokenID, payload.Mode, event.ID, payload.ClaimedAt, payload.ExpiresAt, event.Seq,
+		payload.ListenerID, payload.DemandEventID, payload.PolicyEventID)
 	if err != nil {
 		return err
 	}
@@ -147,6 +157,9 @@ func (assignmentReleasedProjector) Apply(ctx context.Context, tx pgx.Tx, event d
 		    last_release_reason = $8,
 		    terminal_state = NULLIF($9, ''),
 		    terminal_addressee_token_id = NULL,
+		    listener_id = NULL,
+		    demand_event_id = NULL,
+		    policy_event_id = NULL,
 		    state_event_id = $5,
 		    state_event_seq = $6,
 		    updated_at = $7
@@ -215,6 +228,9 @@ func applyTerminalAssignmentTransition(ctx context.Context, tx pgx.Tx, event dom
 		    expires_at = NULL,
 		    last_release_reason = $4,
 		    terminal_state = $5,
+		    listener_id = NULL,
+		    demand_event_id = NULL,
+		    policy_event_id = NULL,
 		    state_event_id = $2,
 		    state_event_seq = $3,
 		    updated_at = $6
@@ -307,6 +323,22 @@ func decodeAssignedPayload(raw any) (assignedPayload, error) {
 	}
 	if payload.AssigneeTokenID == uuid.Nil || !payload.Mode.Valid() || payload.LeaseSeconds <= 0 {
 		return assignedPayload{}, fmt.Errorf("work_item.assigned: assignee_token_id, valid mode, and positive lease_seconds are required")
+	}
+	// Listener binding travels whole or not at all: a partially attributed
+	// claim would make restart derivation ambiguous. A field that is PRESENT
+	// but zero is malformed outright — never coerced to "absent".
+	bound := 0
+	for _, field := range []*uuid.UUID{payload.ListenerID, payload.DemandEventID, payload.PolicyEventID} {
+		if field == nil {
+			continue
+		}
+		if *field == uuid.Nil {
+			return assignedPayload{}, fmt.Errorf("work_item.assigned: listener binding fields must be non-zero when present")
+		}
+		bound++
+	}
+	if bound != 0 && bound != 3 {
+		return assignedPayload{}, fmt.Errorf("work_item.assigned: listener_id, demand_event_id, and policy_event_id must be present together")
 	}
 	return payload, nil
 }
