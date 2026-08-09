@@ -11,11 +11,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/convergence"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/safety"
 	"github.com/jbmopper/meristem/internal/storage"
@@ -1010,17 +1012,124 @@ func TestScanDispatchRequestsEligibleItems(t *testing.T) {
 		t.Fatalf("dispatch events = %d, want 2", got)
 	}
 	defaultPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleDefault.ID)
-	if defaultPayload.WorkItemID != eligibleDefault.ID || defaultPayload.Cultivar != "checklist-worker@1" || defaultPayload.State != string(domain.WorkItemTriaged) {
+	if defaultPayload.WorkItemID != eligibleDefault.ID || defaultPayload.Cultivar != "checklist-worker@1" || defaultPayload.Capability != "work_items.execute_checks" || defaultPayload.State != string(domain.WorkItemTriaged) {
 		t.Fatalf("default dispatch payload = %+v", defaultPayload)
 	}
 	explicitPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleExplicit.ID)
-	if explicitPayload.WorkItemID != eligibleExplicit.ID || explicitPayload.Cultivar != "convergence-scribe@1" || explicitPayload.State != string(domain.WorkItemPlanned) {
+	if explicitPayload.WorkItemID != eligibleExplicit.ID || explicitPayload.Cultivar != "convergence-scribe@1" || explicitPayload.Capability != "convergence.propose_checks" || explicitPayload.State != string(domain.WorkItemPlanned) {
 		t.Fatalf("explicit dispatch payload = %+v", explicitPayload)
 	}
 	for _, skipped := range []uuid.UUID{checkless.ID, blocked.ID, running.ID} {
 		if got := countEventsForSubject(t, ctx, pool, skipped, domain.EventDispatchRequested); got != 0 {
 			t.Fatalf("dispatch events for skipped %s = %d, want 0", skipped, got)
 		}
+	}
+}
+
+// TestScanDispatchRoutesOrdinaryDemandToSemanticListener is the production-
+// path regression for f65efff8: the worker, not the test, creates the durable
+// demand. The cultivar remains launch metadata while its profile supplies the
+// semantic capability consumed by listener routing.
+func TestScanDispatchRoutesOrdinaryDemandToSemanticListener(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	system, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-system", Source: domain.SourceSystem, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create system: %v", err)
+	}
+	admin, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-admin", Source: domain.SourceHuman,
+		Scopes: []string{access.ScopeListenersAdmin}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create listener admin: %v", err)
+	}
+	principal, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "semantic-route-listener", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeWorkItemsReadAll, access.ScopeWorkItemsWriteAll}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create listener principal: %v", err)
+	}
+
+	seedChecklistWorkerCultivar(t, ctx, pool, writer, system.Token)
+	listenerSvc := listeners.NewService(pool, writer)
+	reg, err := listenerSvc.Register(ctx, listeners.RegisterInput{
+		Name: "semantic-route", PrincipalTokenID: principal.Token.ID, Provider: "test",
+		Capabilities: []string{"work_items.execute_checks"}, Actor: admin.Token,
+	})
+	if err != nil {
+		t.Fatalf("register listener: %v", err)
+	}
+	reg, err = listenerSvc.SetPolicy(ctx, reg.ID, listeners.SetPolicyInput{
+		Policy: listeners.Policy{
+			Capabilities: []string{"work_items.execute_checks"}, MaxConcurrentAssignments: 1,
+		},
+		Actor: admin.Token,
+	})
+	if err != nil {
+		t.Fatalf("set listener policy: %v", err)
+	}
+
+	item, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title: "ordinary semantic route", State: domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough, Actor: principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("create ordinary item: %v", err)
+	}
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &system.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	result, err := w.scanDispatch(ctx)
+	if err != nil {
+		t.Fatalf("scan dispatch: %v", err)
+	}
+	if result.DispatchesRequested != 1 {
+		t.Fatalf("dispatch result = %+v, want one worker-produced demand", result)
+	}
+	payload := dispatchPayloadForSubject(t, ctx, pool, item.ID)
+	if payload.Cultivar != "checklist-worker@1" || payload.Capability != "work_items.execute_checks" {
+		t.Fatalf("dispatch route = cultivar %q capability %q", payload.Cultivar, payload.Capability)
+	}
+
+	var demandEventID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM events
+		WHERE subject_kind=$1 AND subject_id=$2 AND kind=$3
+		ORDER BY seq DESC LIMIT 1
+	`, domain.SubjectWorkItem, item.ID, domain.EventDispatchRequested).Scan(&demandEventID); err != nil {
+		t.Fatalf("read worker-produced demand event: %v", err)
+	}
+	routed, err := listenerSvc.ResolveForDemand(ctx, demandEventID)
+	if err != nil {
+		t.Fatalf("route worker-produced demand: %v", err)
+	}
+	if routed.ID != reg.ID {
+		t.Fatalf("routed listener = %s, want %s", routed.ID, reg.ID)
+	}
+	candidates, err := listenerSvc.ListDemandCandidates(ctx, reg.ID, principal.Token)
+	if err != nil {
+		t.Fatalf("list worker-produced candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].DemandEventID != demandEventID || candidates[0].Envelope.Capability != "work_items.execute_checks" {
+		t.Fatalf("listener candidates = %+v, want exact worker-produced semantic demand", candidates)
 	}
 }
 
@@ -1118,7 +1227,7 @@ func TestScanOnceSpawnsReviewChildForImplementationMarkedItem(t *testing.T) {
 		t.Fatalf("child body missing commit ref:\n%s", child.Body)
 	}
 	payload := dispatchPayloadForSubject(t, ctx, pool, childID)
-	if payload.WorkItemID != childID || payload.Cultivar != "reviewer@1" || payload.State != string(domain.WorkItemTriaged) {
+	if payload.WorkItemID != childID || payload.Cultivar != "reviewer@1" || payload.Capability != "review.exact_artifact" || payload.State != string(domain.WorkItemTriaged) {
 		t.Fatalf("review dispatch payload = %+v", payload)
 	}
 
@@ -2067,6 +2176,7 @@ type dispatchPayload struct {
 	State                string    `json:"state"`
 	StateEnteredAtUnix   int64     `json:"state_entered_at_unix"`
 	Cultivar             string    `json:"cultivar"`
+	Capability           string    `json:"capability"`
 	Reason               string    `json:"reason"`
 	SourceReconcilerPass string    `json:"source_reconciler_pass"`
 }

@@ -2,7 +2,7 @@ package worker
 
 // LCP2-R2-B2 (reconciler half): dispatch.requested is the durable demand
 // envelope listener resolution binds to, so the reconciler must record the
-// demanded capability and the ORIGINATING principal — the last non-system
+// demanded semantic capability, exact cultivar, and the ORIGINATING principal — the last non-system
 // principal that advanced the item, not the item's creator and not the
 // system author of the dispatch event itself.
 
@@ -94,8 +94,11 @@ func TestDispatchCarriesDemandRoutingMetadata(t *testing.T) {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatalf("decode dispatch payload: %v", err)
 	}
-	if payload.Capability == "" || payload.Capability != payload.Cultivar {
-		t.Fatalf("capability = %q, want the demanded cultivar %q", payload.Capability, payload.Cultivar)
+	if payload.Cultivar != "fast-worker@1" {
+		t.Fatalf("cultivar = %q, want fast-worker@1", payload.Cultivar)
+	}
+	if payload.Capability != "cultivar.fast-worker.v1" {
+		t.Fatalf("capability = %q, want deterministic custom-cultivar fallback cultivar.fast-worker.v1", payload.Capability)
 	}
 	if payload.OriginTokenID != author.Token.ID {
 		t.Fatalf("origin_token_id = %s, want latest non-system author %s (creator %s, system %s)",

@@ -148,7 +148,9 @@ one work item must host simultaneous independent capabilities.
 
 Dispatch payloads gain normalized routing metadata where required:
 
-- capability name;
+- semantic capability name, resolved from the exact cultivar profile's
+  `dispatch_capability` (never copied from the cultivar name);
+- exact versioned cultivar as separate launch metadata;
 - exact artifact identity for artifact-bound work;
 - implementation-author principal when self-review exclusion applies;
 - optional listener addressee chosen by the deterministic router;
@@ -158,6 +160,21 @@ Dispatch payloads gain normalized routing metadata where required:
 Raw clients request capability; they do not resolve listener credentials. The
 router selects an eligible listener registration and appends the addressed
 activation event.
+
+The shipped rootstock mapping is total and versioned:
+
+| Cultivar | Dispatch capability |
+| --- | --- |
+| `checklist-worker@1` | `work_items.execute_checks` |
+| `convergence-scribe@1` | `convergence.propose_checks` |
+| `reviewer@1` | `review.exact_artifact` |
+| `human-attention@1` | `human.attention` |
+
+Legacy/custom cultivar events that lack `profile.dispatch_capability` map to
+`cultivar.<name>.v<version>`. That exact-version fallback is deliberately
+narrow: it preserves replay and rolling-upgrade compatibility without
+pretending an old launch profile offered a broader semantic role. New
+cultivar definitions declare `profile.dispatch_capability` explicitly.
 
 An addressed activation is **exclusive to its addressee for that finite
 routing-patience epoch**, not advisory. While that epoch is open, a different
@@ -389,6 +406,9 @@ Every nonterminal state has a finite exit:
 
 - open demand not claimed: retry eligibility, then allowed fallback, then human;
 - claimed but activation not accepted: reconcile/retry, then expire/reassign;
+- bound app task busy before admission: record structural
+  `adapter_target_busy`, retry without consuming the ordinary adapter-failure
+  budget, and remain bounded by the assignment lease/patience;
 - activation accepted but task does not report completion: assignment lease
   expires, then reassign/fallback;
 - ambiguous external admission: reconcile only; never blind duplicate;

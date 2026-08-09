@@ -526,3 +526,44 @@ func TestSupervisorInvalidAdapterReceiptIsAmbiguousIntegration(t *testing.T) {
 		t.Fatalf("invalid adapter appended %d completed events", completed)
 	}
 }
+
+func TestSupervisorBusyAdapterIsRetryableBackpressureIntegration(t *testing.T) {
+	f := newSupervisorFixture(t, "sup-activation-busy")
+	item := f.spawnDemand(t, "activation-busy-demand")
+	if out := runOnceOutput(t, f.sup); !strings.Contains(out, item.ID.String()) {
+		t.Fatalf("claim pass = %q, want focused on %s", out, item.ID)
+	}
+	assignment, err := f.workSvc.GetAssignment(f.ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read assignment: %v", err)
+	}
+	held := heldAssignment{
+		WorkItemID: item.ID, AssignmentEventID: assignment.AssignmentEventID,
+		ExpiresAt: assignment.ExpiresAt, ListenerID: assignment.ListenerID,
+	}
+	adapterPath := filepath.Join(t.TempDir(), "busy-listener-adapter")
+	if err := os.WriteFile(adapterPath, []byte("#!/bin/sh\nexit 78\n"), 0o700); err != nil {
+		t.Fatalf("write busy adapter: %v", err)
+	}
+	f.sup.activationAdapter = adapterPath
+	f.sup.activationBindingGeneration = "binding-busy-v1"
+	f.sup.activationConsumerGeneration = "consumer-busy-v1"
+	reg, err := f.sup.getListener(f.ctx)
+	if err != nil {
+		t.Fatalf("read listener view: %v", err)
+	}
+	activation, action, err := f.sup.activationStep(f.ctx, reg, held)
+	if err != nil {
+		t.Fatalf("activation step: %v", err)
+	}
+	if err := f.sup.runActivationAdapter(f.ctx, activation, action); err != nil {
+		t.Fatalf("run busy adapter: %v", err)
+	}
+	got, err := listeneractivation.NewService(f.pool, f.writer).Get(f.ctx, activation.ID)
+	if err != nil {
+		t.Fatalf("read activation: %v", err)
+	}
+	if got.State != listeneractivation.StateFailed || got.LastReason != listeneractivation.ReasonAdapterTargetBusy || got.NextRetryAt == nil {
+		t.Fatalf("busy activation = %+v, want retryable target-busy failure", got)
+	}
+}

@@ -100,6 +100,13 @@ for raw in sys.stdin:
         continue
     elif method == "thread/resume":
         thread_id = message["params"]["threadId"]
+        if scenario == "resume_rejected":
+            record()
+            send({
+                "id": message["id"],
+                "error": {"code": -32000, "message": "RAW-SECRET-SENTINEL"},
+            })
+            continue
         turns = []
         status = {"type": "idle"}
         if scenario in ("active", "active_failure", "active_interrupted", "server_request"):
@@ -398,9 +405,45 @@ class NudgeTests(unittest.TestCase):
 
     def test_activation_active_task_is_not_steered(self):
         args = self.activation_args()
-        with self.assertRaises(NUDGE.TransportError):
+        with self.assertRaises(NUDGE.TargetBusy):
             NUDGE.activate(args, self.command("active"), environment=self.environment)
         self.assertFalse(self.marker.exists())
+
+    def test_activation_resume_rejection_before_admission_is_busy(self):
+        args = self.activation_args()
+        with self.assertRaises(NUDGE.TargetBusy):
+            NUDGE.activate(
+                args, self.command("resume_rejected"), environment=self.environment
+            )
+        record = self.record_value()
+        self.assertNotIn("turn/start", record["methods"])
+        self.assertFalse(self.marker.exists())
+
+    def test_activation_busy_has_distinct_structural_exit(self):
+        args = self.activation_args()
+        argv = [
+            "activate",
+            "--codex-bin",
+            sys.executable,
+            "--thread-id",
+            self.thread_id,
+            "--repo-root",
+            str(self.root),
+            "--activation-id",
+            args.activation_id,
+            "--assignment-event-id",
+            args.assignment_event_id,
+            "--mode",
+            "dispatch",
+            "--diagnostic",
+        ]
+        stdout = io.StringIO()
+        with mock.patch.object(NUDGE, "activate", side_effect=NUDGE.TargetBusy()), \
+             mock.patch.object(NUDGE.signal, "signal"), \
+             contextlib.redirect_stdout(stdout):
+            result = NUDGE.main(argv)
+        self.assertEqual(result, NUDGE.EXIT_BUSY)
+        self.assertEqual(json.loads(stdout.getvalue())["failure_class"], "TargetBusy")
 
     def test_idle_start_buffers_early_completion_and_sanitizes(self):
         stdout = io.StringIO()

@@ -282,6 +282,12 @@ address the registration rather than a bearer UUID; credential rotation keeps
 the listener address stable. `listener.registered`,
 `listener.credential_bound`, `listener.policy_set`, and `listener.retired` are
 authoritative events, synchronously projected into `listener_registrations`.
+The demanded capability is distinct from launch metadata: each cultivar
+profile declares one `dispatch_capability`, and `dispatch.requested` records
+both that semantic capability and the exact versioned cultivar. Historical
+profiles without the field use a deterministic, fail-closed compatibility
+mapping; unknown cultivars map only to their own exact version rather than a
+broader role.
 
 The `meristem listener` supervisor derives all effective state after every
 start. With no held assignment it is IDLE under the latest policy: mint a
@@ -303,6 +309,10 @@ accepted state becomes ambiguous and may only reconcile by deterministic
 external client-message ID; it is never blindly resubmitted. After finite
 dispatch/reconcile attempts the activation is terminal and assignment patience
 drives reassignment, fallback, or human escalation.
+Expected target backpressure before admission (for example, a bound app task
+still running another turn) is recorded as `adapter_target_busy`; it may retry
+beyond the ordinary adapter-failure count but never beyond the finite
+assignment lease/patience. It must not steer the unrelated active turn.
 
 The core adapter boundary contains IDs and structural allowlisted receipts
 only. Event/work-item bodies, bearer values, and database URLs never enter an

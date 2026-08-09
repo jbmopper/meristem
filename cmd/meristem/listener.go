@@ -59,6 +59,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/listeneractivation"
 )
 
 func listenerUsage(out io.Writer) {
@@ -170,6 +171,8 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 func defaultListenerCursorDir(home string, listenerID uuid.UUID) string {
 	return filepath.Join(home, ".meristem", "listener", listenerID.String())
 }
+
+const activationAdapterExitBusy = 78
 
 type listenerSupervisor struct {
 	api                          string
@@ -637,6 +640,11 @@ func (s *listenerSupervisor) runActivationAdapter(ctx context.Context, activatio
 	if action == "reconcile" || accepted || protocolInvalid || scanner.Err() != nil {
 	} else if waitErr == nil {
 		reason = "adapter_protocol_invalid"
+	} else if exitErr, ok := waitErr.(*exec.ExitError); ok && exitErr.ExitCode() == activationAdapterExitBusy {
+		// The bound app task is healthy but active. No admission was attempted;
+		// durable activation remains retryable until assignment patience ends.
+		outcome = "failed"
+		reason = listeneractivation.ReasonAdapterTargetBusy
 	} else if exitErr, ok := waitErr.(*exec.ExitError); ok && (exitErr.ExitCode() == 64 || exitErr.ExitCode() == 75) {
 		// The adapter contract reserves these exits for validation or a
 		// transient failure before admission. Every other receipt-free exit

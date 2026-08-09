@@ -28,6 +28,12 @@ const (
 	AcceptedLease        = 30 * time.Minute
 	RetryDelay           = 20 * time.Second
 	maxBindingGeneration = 200
+
+	// ReasonAdapterTargetBusy is expected backpressure from a bound app task
+	// that is still executing another turn. It remains retryable until the
+	// assignment lease/patience ends and does not consume the adapter-failure
+	// budget; no admission has been attempted at this point.
+	ReasonAdapterTargetBusy = "adapter_target_busy"
 )
 
 var (
@@ -234,7 +240,7 @@ func (s *Service) Begin(ctx context.Context, in BeginInput) (BeginResult, error)
 		return BeginResult{Activation: current, Action: ActionWait}, nil
 	}
 	if current.State == StateCompleted ||
-		(current.State == StateFailed && current.DispatchCount >= MaxDispatches) ||
+		(current.State == StateFailed && current.DispatchCount >= MaxDispatches && current.LastReason != ReasonAdapterTargetBusy) ||
 		(current.State == StateAmbiguous && current.ReconcileCount >= MaxReconciliations) {
 		if err := tx.Commit(ctx); err != nil {
 			return BeginResult{}, err
@@ -307,6 +313,7 @@ var allowedReceiptReasons = map[string]bool{
 	"adapter_retryable_failure":   true,
 	"adapter_outcome_ambiguous":   true,
 	"adapter_protocol_invalid":    true,
+	ReasonAdapterTargetBusy:       true,
 }
 
 func (s *Service) RecordReceipt(ctx context.Context, in ReceiptInput) (Activation, error) {
@@ -356,7 +363,7 @@ func (s *Service) RecordReceipt(ctx context.Context, in ReceiptInput) (Activatio
 		return Activation{}, err
 	}
 	var next *time.Time
-	if in.Outcome == StateFailed && current.DispatchCount < MaxDispatches {
+	if in.Outcome == StateFailed && (current.DispatchCount < MaxDispatches || in.Reason == ReasonAdapterTargetBusy) {
 		v := now.Add(s.retryDelay)
 		next = &v
 	}
@@ -464,8 +471,8 @@ func requirePrincipal(ctx context.Context, tx pgx.Tx, listenerID uuid.UUID, acto
 }
 
 func requireCurrentAssignment(ctx context.Context, tx pgx.Tx, activation Activation, actor domain.Token) error {
-	var holder, listener, assignment uuid.UUID
-	var expires time.Time
+	var holder, listener, assignment pgtype.UUID
+	var expires pgtype.Timestamptz
 	err := tx.QueryRow(ctx, `
 		SELECT holder_token_id, listener_id, assignment_event_id, expires_at
 		FROM work_item_assignment_state WHERE work_item_id=$1 FOR UPDATE
@@ -476,11 +483,14 @@ func requireCurrentAssignment(ctx context.Context, tx pgx.Tx, activation Activat
 	if err != nil {
 		return err
 	}
+	if !holder.Valid || !listener.Valid || !assignment.Valid || !expires.Valid {
+		return ErrNoActiveAssignment
+	}
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return err
 	}
-	if holder != actor.ID || listener != activation.ListenerID || assignment != activation.AssignmentEventID || !expires.After(now) {
+	if uuid.UUID(holder.Bytes) != actor.ID || uuid.UUID(listener.Bytes) != activation.ListenerID || uuid.UUID(assignment.Bytes) != activation.AssignmentEventID || !expires.Time.After(now) {
 		return ErrNoActiveAssignment
 	}
 	return nil

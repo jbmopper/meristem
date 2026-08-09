@@ -230,6 +230,44 @@ func TestExpiredDispatchCanOnlyReconcile(t *testing.T) {
 	}
 }
 
+func TestBusyTargetDoesNotExhaustDispatchBudgetAndRemainsAssignmentBound(t *testing.T) {
+	f := newFixture(t, "activation_busy")
+	svc := NewService(f.pool, f.writer)
+	svc.retryDelay = -time.Second
+	a := f.ensure(t, svc)
+
+	for attempt := 1; attempt <= MaxDispatches+2; attempt++ {
+		begin, err := svc.Begin(f.ctx, BeginInput{
+			ActivationID: a.ID, ConsumerGeneration: "busy-consumer", Actor: f.principal.Token,
+		})
+		if err != nil || begin.Action != ActionDispatch {
+			t.Fatalf("busy begin %d = %+v err=%v, want dispatch beyond ordinary budget", attempt, begin, err)
+		}
+		busy, err := svc.RecordReceipt(f.ctx, ReceiptInput{
+			ActivationID: a.ID, ObservedStateEventID: begin.Activation.StateEventID,
+			ConsumerGeneration: "busy-consumer", Outcome: StateFailed,
+			Reason: ReasonAdapterTargetBusy, Actor: f.principal.Token,
+		})
+		if err != nil {
+			t.Fatalf("record busy %d: %v", attempt, err)
+		}
+		if busy.State != StateFailed || busy.LastReason != ReasonAdapterTargetBusy || busy.NextRetryAt == nil {
+			t.Fatalf("busy state %d = %+v", attempt, busy)
+		}
+	}
+
+	if _, err := workitems.NewService(f.pool, f.writer).Yield(
+		f.ctx, f.assignment.WorkItemID, f.assignment.AssignmentEventID, f.principal.Token,
+	); err != nil {
+		t.Fatalf("yield assignment: %v", err)
+	}
+	if _, err := svc.Begin(f.ctx, BeginInput{
+		ActivationID: a.ID, ConsumerGeneration: "busy-consumer", Actor: f.principal.Token,
+	}); !errors.Is(err, ErrNoActiveAssignment) {
+		t.Fatalf("begin after assignment release err=%v, want ErrNoActiveAssignment", err)
+	}
+}
+
 func TestActivationIDPinsAssignmentBindingAndAttempt(t *testing.T) {
 	assignment := uuid.New()
 	a := ActivationID(assignment, "binding-a", 1)

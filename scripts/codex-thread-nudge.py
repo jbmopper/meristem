@@ -38,6 +38,7 @@ EXIT_CONFIG = 64
 EXIT_TRANSIENT = 75
 EXIT_AMBIGUOUS = 76
 EXIT_TERMINAL_FAILURE = 77
+EXIT_BUSY = 78
 
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 TERMINAL_TURN_STATES = {"completed", "failed", "interrupted"}
@@ -80,6 +81,7 @@ DIAGNOSTIC_FAILURE_CLASSES = frozenset(
         "ConfigError",
         "ProtocolError",
         "RequestRejected",
+        "TargetBusy",
         "TransportError",
     }
 )
@@ -136,6 +138,12 @@ class TransportError(NudgeError):
         super().__init__()
         self.reason = reason
         self.exit_code = exit_code
+
+
+class TargetBusy(NudgeError):
+    """The bound task is active; no admission request was attempted."""
+
+    pass
 
 
 class ProtocolError(NudgeError):
@@ -803,9 +811,18 @@ def activate(args, command=None, environment=None):
         stage = "initialize"
         client.initialize(args.request_timeout)
         stage = "resume"
-        resume = client.request(
-            "thread/resume", {"threadId": args.thread_id}, args.request_timeout
-        )
+        try:
+            resume = client.request(
+                "thread/resume", {"threadId": args.thread_id}, args.request_timeout
+            )
+        except RequestRejected as error:
+            # The desktop app's app-server rejects resume while it owns an
+            # active turn. In dispatch mode this is expected backpressure,
+            # before any turn/start admission. Reconcile mode remains
+            # ambiguous because a prior admission may already exist.
+            if args.mode == "dispatch":
+                raise TargetBusy() from error
+            raise
         thread = _thread_from_resume(resume, args.thread_id)
         stage = "reconcile"
         reconciled_turn = find_client_turn(thread, message_id)
@@ -837,7 +854,7 @@ def activate(args, command=None, environment=None):
 
         admission = select_admission(thread)
         if admission["mode"] != "start":
-            raise TransportError("active-dedicated-thread")
+            raise TargetBusy()
         prompt = ACTIVATION_WAKE_PROMPT.format(
             activation_id=activation_id,
             assignment_event_id=assignment_event_id,
@@ -999,6 +1016,12 @@ def main(argv=None):
         if getattr(args, "diagnostic", False):
             _emit_diagnostic(error, "arguments")
         return EXIT_CONFIG
+    except TargetBusy as error:
+        if getattr(args, "diagnostic", False):
+            _emit_diagnostic(error, "unknown")
+        if getattr(args, "command", None) == "activate":
+            return EXIT_BUSY
+        return EXIT_TRANSIENT
     except (
         CompletionTimeout,
         RequestRejected,
