@@ -341,7 +341,8 @@ The Codex adapter may:
 - resume that task through the supported app-server lifecycle;
 - reconcile a deterministic client message ID against task history;
 - start a turn only when the dedicated task is idle;
-- deliver a metadata-only wake containing activation and assignment IDs;
+- deliver a metadata-only wake containing activation, work-item, assignment,
+  and separately bound task-actor IDs;
 - decline every unattended approval, elicitation, or permission request;
 - report accepted, completed, retryable, terminal-failure, or ambiguous.
 
@@ -371,7 +372,7 @@ address. Rebinding the adapter does not change listener policy or attribution.
 | Codex app-server protocol and negative approval handling | Retain in the one-shot Codex adapter initially |
 | Deterministic client message ID and history reconciliation | Retain; derive from durable activation ID |
 | Hard-coded thread ID | Keep only as adapter-local binding, outside routing semantics |
-| Separate feed-only and task MCP credentials | Retain least-privilege separation; assignment token exchange later narrows task authority further |
+| Separate listener-supervisor and task MCP credentials | Retain least-privilege separation; the first Codex profile stores an inert task marker and derives one exact tree scope only inside a live assignment-bound MCP process |
 
 The old bridge remains available until the new supervisor passes parity and
 restart tests. Cutover is one listener at a time. A listener has exactly one
@@ -384,9 +385,19 @@ The stable listener credential authenticates the principal and may read the
 control/demand surfaces needed to decide whether to claim. It does not
 automatically inherit every temporary role's write authority.
 
-Where existing narrow authority suffices, the first release may perform the
-assignment without exchange. Where additional authority is required, token
-exchange issues a credential that:
+The first Codex task profile provisions a distinct marker-only credential with
+no ordinary business authority. A reviewed MCP launcher authenticates its exact
+actor UUID and asks the activation service to validate the current activation,
+work item, assignment event, listener principal, and leases. Only inside that
+process does the deterministic reducer derive the exact tree-scoped read/write
+set and three-tool surface. The task actor remains the attributed actor; the
+listener principal and its bearer never cross the adapter wake boundary. Every
+tool listing and call repeats the live-generation validation, so yield, expiry,
+terminal activation, rebind, revocation, or token replacement fails closed.
+
+This is one local assignment-bound exchange profile, not the general delegated
+credential design. Where future roles require broader or remote exchange, the
+issued credential must still be:
 
 - is bound to listener ID, work-item tree, assignment event, audience, and
   role/lens;

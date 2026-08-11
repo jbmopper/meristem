@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/listeneractivation"
 )
@@ -16,10 +18,11 @@ func (s *Server) toolListenersEnsureActivation() Tool {
 		Name: "listeners.ensure_activation", Mutates: true,
 		Description: "Idempotently create the durable adapter activation for one exact listener-bound assignment generation.",
 		InputSchema: schemaObject([]string{"id", "assignment_event_id", "binding_generation"}, map[string]any{
-			"id":                  schemaString("Listener uuid."),
-			"assignment_event_id": schemaString("Exact work_item.assigned event uuid."),
-			"binding_generation":  schemaString("Opaque adapter-local binding generation; never a task id or bearer."),
-			"attempt":             map[string]any{"type": "integer", "description": "Adapter attempt number; defaults to 1."},
+			"id":                      schemaString("Listener uuid."),
+			"assignment_event_id":     schemaString("Exact work_item.assigned event uuid."),
+			"binding_generation":      schemaString("Opaque adapter-local binding generation; never a task id or bearer."),
+			"task_principal_token_id": schemaString("Optional separate task credential UUID folded into binding_generation."),
+			"attempt":                 map[string]any{"type": "integer", "description": "Adapter attempt number; defaults to 1."},
 		}),
 		Handler: func(ctx context.Context, actor domain.Token, raw json.RawMessage) (any, error) {
 			if s.deps.ListenerActivations == nil {
@@ -29,6 +32,7 @@ func (s *Server) toolListenersEnsureActivation() Tool {
 				ID                string `json:"id"`
 				AssignmentEventID string `json:"assignment_event_id"`
 				BindingGeneration string `json:"binding_generation"`
+				TaskPrincipalID   string `json:"task_principal_token_id"`
 				Attempt           int    `json:"attempt"`
 			}
 			if err := decodeArgs(raw, &args); err != nil {
@@ -42,9 +46,17 @@ func (s *Server) toolListenersEnsureActivation() Tool {
 			if err != nil {
 				return nil, err
 			}
+			taskPrincipalID := uuid.Nil
+			if args.TaskPrincipalID != "" {
+				taskPrincipalID, err = parseUUID(args.TaskPrincipalID, "task_principal_token_id")
+				if err != nil || taskPrincipalID == uuid.Nil || args.TaskPrincipalID != taskPrincipalID.String() {
+					return nil, fmt.Errorf("task_principal_token_id must be one canonical non-nil uuid")
+				}
+			}
 			a, err := s.deps.ListenerActivations.Ensure(ctx, listeneractivation.EnsureInput{
 				ListenerID: listenerID, AssignmentEventID: assignmentID,
-				BindingGeneration: args.BindingGeneration, Attempt: args.Attempt, Actor: actor,
+				BindingGeneration: args.BindingGeneration, TaskPrincipalID: taskPrincipalID,
+				Attempt: args.Attempt, Actor: actor,
 			})
 			if err != nil {
 				return nil, listenerActivationToolErr(err)

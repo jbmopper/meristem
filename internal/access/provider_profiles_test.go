@@ -60,6 +60,45 @@ func TestLocalAgentMCPProfileFromActor(t *testing.T) {
 	}
 }
 
+func TestListenerTaskCredentialAndDerivedProfileAreExact(t *testing.T) {
+	actorID := uuid.New()
+	root := uuid.New()
+	stored := domain.Token{
+		ID: actorID, Source: domain.SourceAgent,
+		Scopes: []string{ScopeMCPListenerTaskProfileV1},
+	}
+	if err := ValidateListenerTaskCredential(stored); err != nil {
+		t.Fatalf("inert stored task credential rejected: %v", err)
+	}
+	if marked, _, err := ListenerTaskMCPProfileFromActor(stored); !marked || err == nil {
+		t.Fatalf("marker-only task actor = marked %v err %v, want marked invalid ordinary profile", marked, err)
+	}
+	derivedScopes, err := ListenerTaskMCPScopes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := stored
+	derived.Scopes = derivedScopes
+	marked, gotRoot, err := ListenerTaskMCPProfileFromActor(derived)
+	if err != nil || !marked || gotRoot != root {
+		t.Fatalf("derived task profile = marked %v root %s err %v", marked, gotRoot, err)
+	}
+	if err := ValidateListenerTaskCredential(derived); err == nil {
+		t.Fatal("stored task credential with static business authority unexpectedly accepted")
+	}
+	for _, scopes := range [][]string{
+		{ScopeMCPListenerTaskProfileV1, ScopeWorkItemsReadAll},
+		{ScopeMCPListenerTaskProfileV1, ScopeMCPListenerTaskProfileV1},
+		{ScopeMCPListenerTaskProfileV1, ScopeWorkItemsRead, ScopeWorkItemsWrite, WorkItemTreeScope(root), WorkItemTreeScope(uuid.New())},
+	} {
+		candidate := stored
+		candidate.Scopes = scopes
+		if marked, _, err := ListenerTaskMCPProfileFromActor(candidate); !marked || err == nil {
+			t.Fatalf("malformed listener task scopes %v = marked %v err %v", scopes, marked, err)
+		}
+	}
+}
+
 func TestProviderAuthorityRejectsLocalMCPMarker(t *testing.T) {
 	authority, err := ReduceProviderAuthority(ProviderOwnerTrackerReadV1, uuid.Nil)
 	if err != nil {

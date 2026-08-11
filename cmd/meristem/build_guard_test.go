@@ -28,8 +28,10 @@ func TestCheckCommandBuildRefusesStatefulCommandButLeavesDiagnostics(t *testing.
 	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := checkCommandBuild("worker", provider, logger); err == nil {
-		t.Fatal("worker build check succeeded, want refusal")
+	for _, command := range []string{"worker", "listener"} {
+		if err := checkCommandBuild(command, provider, logger); err == nil {
+			t.Fatalf("%s build check succeeded, want refusal", command)
+		}
 	}
 	for _, command := range []string{"api", "mcp"} {
 		if err := checkCommandBuild(command, provider, logger); err != nil {
@@ -54,6 +56,21 @@ func TestCheckCommandBuildAllowsUnmanagedDevelopment(t *testing.T) {
 	}
 	if !bytes.Contains(logs.Bytes(), []byte("unmanaged build")) {
 		t.Fatalf("unmanaged runtime did not log its status: %s", logs.String())
+	}
+}
+
+func TestListenerRuntimeRechecksChangedBuild(t *testing.T) {
+	provider := buildguard.ProviderFunc(func() buildguard.Status {
+		return buildguard.Status{
+			State:            buildguard.StateMismatch,
+			CompiledCommit:   testBuildCommitA,
+			ExpectedCommit:   testBuildCommitB,
+			CompiledMetadata: buildguard.CompiledValid,
+			Reason:           "compiled commit does not match the reviewed v1 pin",
+		}
+	})
+	if err := (&listenerSupervisor{build: provider}).requireRuntimeBuild(); !errors.Is(err, buildguard.ErrBlocked) {
+		t.Fatalf("listener runtime build check = %v, want buildguard.ErrBlocked", err)
 	}
 }
 

@@ -53,10 +53,11 @@ type providerSafeRenderer func(result any) (any, error)
 // ProviderTrackerHTTPProfile (and ReadOnlyHTTPTools) must appear here; a
 // provider-safe-guarding table test enforces that.
 var providerSafeRenderers = map[string]providerSafeRenderer{
-	"feed.read":         renderProviderSafeFeed,
-	"backlog.readiness": renderProviderSafeReadiness,
-	"work_items.list":   renderProviderSafeWorkItemList,
-	"work_items.get":    renderProviderSafeWorkItem,
+	"feed.read":                 renderProviderSafeFeed,
+	"backlog.readiness":         renderProviderSafeReadiness,
+	"work_items.list":           renderProviderSafeWorkItemList,
+	"work_items.get":            renderProviderSafeWorkItem,
+	"work_items.get_assignment": renderProviderSafeAssignment,
 	// Tracker mutations echo the item as the caller just wrote it. Even so, the
 	// ordinary work-item DTO carries created_by and the free-form state_reason,
 	// which a provider must never receive, so create/spawn_child/update_metadata/
@@ -129,6 +130,20 @@ type providerSafeWorkItemResult struct {
 type providerSafeAppendEventResult struct {
 	workItemID uuid.UUID
 	appended   bool
+}
+
+type providerSafeAssignmentResult struct {
+	assignment domain.WorkItemAssignment
+}
+
+type providerSafeAssignmentDTO struct {
+	WorkItemID        uuid.UUID                     `json:"work_item_id"`
+	Mode              domain.WorkItemAssignmentMode `json:"mode"`
+	AssignmentEventID uuid.UUID                     `json:"assignment_event_id"`
+	ExpiresAt         time.Time                     `json:"expires_at"`
+	ListenerID        *uuid.UUID                    `json:"listener_id,omitempty"`
+	DemandEventID     *uuid.UUID                    `json:"demand_event_id,omitempty"`
+	PolicyEventID     *uuid.UUID                    `json:"policy_event_id,omitempty"`
 }
 
 type providerSafeReadinessResult struct {
@@ -236,6 +251,26 @@ func renderProviderSafeAppendEvent(result any) (any, error) {
 	return map[string]any{
 		"work_item_id": r.workItemID,
 		"appended":     r.appended,
+	}, nil
+}
+
+func renderProviderSafeAssignment(result any) (any, error) {
+	r, ok := result.(providerSafeAssignmentResult)
+	if !ok {
+		return nil, providerSafeRenderMismatch("work_items.get_assignment", result)
+	}
+	a := r.assignment
+	return map[string]any{
+		"contract": "listener_task_assignment.v1",
+		"assignment": providerSafeAssignmentDTO{
+			WorkItemID:        a.WorkItemID,
+			Mode:              a.Mode,
+			AssignmentEventID: a.AssignmentEventID,
+			ExpiresAt:         a.ExpiresAt.UTC(),
+			ListenerID:        a.ListenerID,
+			DemandEventID:     a.DemandEventID,
+			PolicyEventID:     a.PolicyEventID,
+		},
 	}, nil
 }
 

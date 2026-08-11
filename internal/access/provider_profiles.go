@@ -25,7 +25,11 @@ const (
 	// profile for a local agent. It classifies presentation only: every business
 	// tool remains governed by the token's other explicit scopes.
 	ScopeMCPLocalAgentProfileV1 = "mcp.profile:local_agent_v1"
-	localMCPProfileScopePrefix  = "mcp.profile:"
+	// ScopeMCPListenerTaskProfileV1 is a sealed, authority-free credential
+	// marker. It receives one assignment-bound tree scope only inside the
+	// guarded local MCP process after listener-activation validation.
+	ScopeMCPListenerTaskProfileV1 = "mcp.profile:listener_task_v1"
+	localMCPProfileScopePrefix    = "mcp.profile:"
 )
 
 var ErrInvalidProviderAuthority = errors.New("access: invalid provider authority profile")
@@ -72,6 +76,72 @@ func ReduceProviderAuthority(profile ProviderAuthorityProfile, treeRoot uuid.UUI
 
 func WorkItemTreeScope(root uuid.UUID) string {
 	return scopeWorkItemsTreePrefix + root.String()
+}
+
+// ValidateListenerTaskCredential accepts only the inert stored credential.
+// Business scopes are derived later from one live activation; provisioning a
+// broad static task token fails closed.
+func ValidateListenerTaskCredential(actor domain.Token) error {
+	if actor.ID == uuid.Nil || actor.IsRoot || actor.Source != domain.SourceAgent || actor.RevokedAt != nil ||
+		!sameScopeSet(actor.Scopes, []string{ScopeMCPListenerTaskProfileV1}) {
+		return ErrInvalidLocalMCPProfile
+	}
+	return nil
+}
+
+// ListenerTaskMCPScopes is the deterministic in-process exchange result for
+// one currently authorized activation. Attribution remains actor.ID; only the
+// exact assigned work-item tree becomes readable/writable.
+func ListenerTaskMCPScopes(root uuid.UUID) ([]string, error) {
+	if root == uuid.Nil {
+		return nil, ErrInvalidLocalMCPProfile
+	}
+	return []string{
+		ScopeMCPListenerTaskProfileV1,
+		ScopeWorkItemsRead,
+		ScopeWorkItemsWrite,
+		WorkItemTreeScope(root),
+	}, nil
+}
+
+// ListenerTaskMCPProfileFromActor recognizes only the derived, assignment-
+// bound actor shape. The stored marker-only token is intentionally invalid on
+// ordinary HTTP or stdio MCP paths.
+func ListenerTaskMCPProfileFromActor(actor domain.Token) (marked bool, root uuid.UUID, err error) {
+	for _, raw := range actor.Scopes {
+		if strings.TrimSpace(raw) == ScopeMCPListenerTaskProfileV1 {
+			marked = true
+		}
+	}
+	if !marked {
+		return false, uuid.Nil, nil
+	}
+	markerCount := 0
+	for _, raw := range actor.Scopes {
+		if strings.TrimSpace(raw) == ScopeMCPListenerTaskProfileV1 {
+			markerCount++
+		}
+	}
+	if markerCount != 1 {
+		return true, uuid.Nil, ErrInvalidLocalMCPProfile
+	}
+	for _, raw := range actor.Scopes {
+		scope := strings.TrimSpace(raw)
+		if !strings.HasPrefix(scope, scopeWorkItemsTreePrefix) {
+			continue
+		}
+		candidate, parseErr := uuid.Parse(strings.TrimPrefix(scope, scopeWorkItemsTreePrefix))
+		if parseErr != nil || candidate == uuid.Nil || root != uuid.Nil {
+			return true, uuid.Nil, ErrInvalidLocalMCPProfile
+		}
+		root = candidate
+	}
+	expected, expectedErr := ListenerTaskMCPScopes(root)
+	if expectedErr != nil || actor.ID == uuid.Nil || actor.IsRoot || actor.Source != domain.SourceAgent || actor.RevokedAt != nil ||
+		!sameScopeSet(actor.Scopes, expected) {
+		return true, uuid.Nil, ErrInvalidLocalMCPProfile
+	}
+	return true, root, nil
 }
 
 // ProviderAuthorityProfileFromScopes returns the single sealed profile marker.

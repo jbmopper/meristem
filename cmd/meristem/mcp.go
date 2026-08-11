@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/app"
@@ -39,6 +42,10 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string, build buildgua
 	secret := os.Getenv("MERISTEM_TOKEN")
 	if secret == "" {
 		return fmt.Errorf("mcp: MERISTEM_TOKEN is required (mint one with `meristem tokens create --source agent`)")
+	}
+	taskBinding, err := listenerTaskMCPBindingFromEnv()
+	if err != nil {
+		return err
 	}
 
 	pool, active, err := openProfileAwarePool(ctx, logger)
@@ -81,8 +88,12 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string, build buildgua
 	if os.Getenv("MERISTEM_MCP_TOOL_NAMES") == string(mcp.ToolNameModeCursor) {
 		server.SetToolNameMode(mcp.ToolNameModeCursor)
 	}
-	if err := server.Authenticate(ctx, secret); err != nil {
-		return fmt.Errorf("mcp: authenticate MERISTEM_TOKEN: %w", err)
+	if taskBinding == nil {
+		if err := server.Authenticate(ctx, secret); err != nil {
+			return fmt.Errorf("mcp: authenticate MERISTEM_TOKEN: %w", err)
+		}
+	} else if err := server.AuthenticateListenerTask(ctx, secret, *taskBinding); err != nil {
+		return fmt.Errorf("mcp: authenticate assignment-bound listener task: %w", err)
 	}
 
 	buildStatus := build.Status()
@@ -93,4 +104,52 @@ func runMCP(ctx context.Context, logger *slog.Logger, _ []string, build buildgua
 	)
 
 	return server.Run(ctx, os.Stdin, os.Stdout)
+}
+
+func listenerTaskMCPBindingFromEnv() (*mcp.ListenerTaskBinding, error) {
+	values := map[string]string{
+		"expected actor":   os.Getenv("MERISTEM_MCP_EXPECT_ACTOR_ID"),
+		"activation":       os.Getenv("MERISTEM_MCP_LISTENER_ACTIVATION_ID"),
+		"work item":        os.Getenv("MERISTEM_MCP_LISTENER_WORK_ITEM_ID"),
+		"assignment event": os.Getenv("MERISTEM_MCP_LISTENER_ASSIGNMENT_EVENT_ID"),
+	}
+	present := 0
+	for _, value := range values {
+		if value != "" {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil, nil
+	}
+	if present != len(values) {
+		return nil, fmt.Errorf("mcp: listener task binding variables must be all present or all absent")
+	}
+	parse := func(name, value string) (uuid.UUID, error) {
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || value != id.String() || value != strings.TrimSpace(value) {
+			return uuid.Nil, fmt.Errorf("mcp: %s must be one canonical non-nil uuid", name)
+		}
+		return id, nil
+	}
+	expected, err := parse("expected actor", values["expected actor"])
+	if err != nil {
+		return nil, err
+	}
+	activationID, err := parse("activation", values["activation"])
+	if err != nil {
+		return nil, err
+	}
+	workItemID, err := parse("work item", values["work item"])
+	if err != nil {
+		return nil, err
+	}
+	assignmentID, err := parse("assignment event", values["assignment event"])
+	if err != nil {
+		return nil, err
+	}
+	return &mcp.ListenerTaskBinding{
+		ActivationID: activationID, WorkItemID: workItemID,
+		AssignmentEventID: assignmentID, ExpectedActorID: expected,
+	}, nil
 }

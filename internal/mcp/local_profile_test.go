@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,44 @@ func TestLocalMCPProfileMarkerAloneGrantsNoBusinessTools(t *testing.T) {
 	body := result.(map[string]any)
 	if tools := body["tools"].([]toolDescriptor); len(tools) != 0 {
 		t.Fatalf("local profile marker granted business tools: %+v", tools)
+	}
+}
+
+func TestListenerTaskProfileIsExactAndMarkerAloneFailsClosed(t *testing.T) {
+	root := uuid.New()
+	actorID := uuid.New()
+	scopes, err := access.ListenerTaskMCPScopes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := domain.Token{ID: actorID, Source: domain.SourceAgent, Scopes: scopes}
+	profile, marked, err := mcpProfileForActor(actor)
+	if err != nil || !marked || profile.Name() != ListenerTaskHTTPProfile().Name() {
+		t.Fatalf("listener task profile=%#v marked=%v err=%v", profile, marked, err)
+	}
+	if got, want := profile.allowedTools, toolSet("work_items.get", "work_items.get_assignment", "work_items.append_event"); !maps.Equal(got, want) {
+		t.Fatalf("listener task tools=%v want=%v", got, want)
+	}
+	if !profile.providerSafe() {
+		t.Fatal("listener task profile must use the closed response reducer")
+	}
+	markerOnly := domain.Token{ID: actorID, Source: domain.SourceAgent, Scopes: []string{access.ScopeMCPListenerTaskProfileV1}}
+	if _, marked, err := mcpProfileForActor(markerOnly); !marked || err == nil {
+		t.Fatalf("marker-only task profile marked=%v err=%v, want fail closed", marked, err)
+	}
+}
+
+func TestListenerTaskServerInfoAttestsAuthenticatedActorOnly(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem", Version: "test"}, nil)
+	if _, ok := s.serverInfo("test")["description"]; ok {
+		t.Fatal("ordinary MCP server unexpectedly emitted listener task attestation")
+	}
+	actorID := uuid.New()
+	s.actor = domain.Token{ID: actorID, Source: domain.SourceAgent}
+	s.task = &ListenerTaskBinding{ExpectedActorID: actorID}
+	info := s.serverInfo("test")
+	if got, want := info["description"], listenerTaskAttestationPrefix+actorID.String(); got != want {
+		t.Fatalf("task attestation=%v want=%q", got, want)
 	}
 }
 

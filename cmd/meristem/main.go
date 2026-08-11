@@ -91,7 +91,7 @@ func main() {
 	case "feed":
 		err = runFeed(ctx, logger, args)
 	case "listener":
-		err = runListener(ctx, logger, args)
+		err = runListener(ctx, logger, args, processBuild)
 	case "safety":
 		err = runSafety(ctx, logger, args)
 	case "git":

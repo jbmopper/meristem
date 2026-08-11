@@ -81,7 +81,7 @@ func checkCommandBuild(command string, build buildguard.StatusProvider, logger *
 
 func commandUsesCoordinationState(command string) bool {
 	switch command {
-	case "api", "migrate", "tokens", "mcp", "seed", "node", "rebuild", "export", "worker", "spoke", "feed":
+	case "api", "migrate", "tokens", "mcp", "seed", "node", "rebuild", "export", "worker", "spoke", "feed", "listener":
 		return true
 	default:
 		return false

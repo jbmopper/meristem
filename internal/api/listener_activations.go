@@ -47,6 +47,7 @@ func (s *Server) handleEnsureListenerActivation(w http.ResponseWriter, r *http.R
 	var req struct {
 		AssignmentEventID string `json:"assignment_event_id"`
 		BindingGeneration string `json:"binding_generation"`
+		TaskPrincipalID   string `json:"task_principal_token_id"`
 		Attempt           int    `json:"attempt"`
 	}
 	if !decodeJSONRequest(w, r, &req) {
@@ -58,9 +59,19 @@ func (s *Server) handleEnsureListenerActivation(w http.ResponseWriter, r *http.R
 		writeAPIError(w, http.StatusBadRequest, "invalid_assignment_event_id", "assignment_event_id must be a uuid")
 		return
 	}
+	taskPrincipalID := uuid.Nil
+	if req.TaskPrincipalID != "" {
+		taskPrincipalID, err = uuid.Parse(req.TaskPrincipalID)
+		if err != nil || taskPrincipalID == uuid.Nil || req.TaskPrincipalID != taskPrincipalID.String() {
+			idempotency.MarkRefusalUnconsumed(r.Context())
+			writeAPIError(w, http.StatusBadRequest, "invalid_task_principal_token_id", "task_principal_token_id must be one canonical non-nil uuid")
+			return
+		}
+	}
 	a, err := s.listenerActivations.Ensure(r.Context(), listeneractivation.EnsureInput{
 		ListenerID: listenerID, AssignmentEventID: assignmentID,
-		BindingGeneration: req.BindingGeneration, Attempt: req.Attempt, Actor: actor,
+		BindingGeneration: req.BindingGeneration, TaskPrincipalID: taskPrincipalID,
+		Attempt: req.Attempt, Actor: actor,
 	})
 	if err != nil {
 		writeListenerActivationError(w, r, err)

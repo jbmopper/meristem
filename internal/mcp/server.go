@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/approvals"
 	"github.com/jbmopper/meristem/internal/auth"
@@ -90,6 +92,7 @@ type Server struct {
 
 	mu    sync.RWMutex
 	actor domain.Token
+	task  *ListenerTaskBinding
 
 	// Stdio era lock (2026-07-28 dual-era serving): the first meaningful
 	// request locks the process era; later requests are validated under it.
@@ -105,6 +108,17 @@ type Server struct {
 	toolNameMode ToolNameMode
 	tools        []Tool
 	toolsByName  map[string]Tool
+}
+
+const listenerTaskAttestationPrefix = "meristem-actor-id-v1:"
+
+// ListenerTaskBinding contains IDs only. The bearer and its fixed local path
+// never cross the generic listener wake boundary.
+type ListenerTaskBinding struct {
+	ActivationID      uuid.UUID
+	WorkItemID        uuid.UUID
+	AssignmentEventID uuid.UUID
+	ExpectedActorID   uuid.UUID
 }
 
 // New builds an unauthenticated server. Authenticate must be called before
@@ -191,6 +205,44 @@ func (s *Server) Authenticate(ctx context.Context, secret string) error {
 	return nil
 }
 
+// AuthenticateListenerTask performs the assignment-bound token exchange for a
+// dedicated listener task MCP process. The stored token is inert marker-only;
+// exact tree scopes exist only in this process while the activation stays live.
+func (s *Server) AuthenticateListenerTask(ctx context.Context, secret string, binding ListenerTaskBinding) error {
+	if s.deps.Auth == nil || s.deps.ListenerActivations == nil {
+		return errors.New("mcp: listener task services are not configured")
+	}
+	if binding.ActivationID == uuid.Nil || binding.WorkItemID == uuid.Nil || binding.AssignmentEventID == uuid.Nil || binding.ExpectedActorID == uuid.Nil {
+		return errors.New("mcp: complete listener task binding is required")
+	}
+	tok, err := s.deps.Auth.Authenticate(ctx, secret)
+	if err != nil {
+		return err
+	}
+	if tok.ID != binding.ExpectedActorID || access.ValidateListenerTaskCredential(tok) != nil {
+		return errors.New("mcp: listener task credential does not match the expected inert actor")
+	}
+	if err := s.deps.ListenerActivations.AuthorizeTask(ctx, listeneractivation.TaskAuthorizationInput{
+		ActivationID: binding.ActivationID, WorkItemID: binding.WorkItemID,
+		AssignmentEventID: binding.AssignmentEventID, TaskActorID: tok.ID,
+	}); err != nil {
+		return fmt.Errorf("mcp: listener task activation is not authorized: %w", err)
+	}
+	tok.Scopes, err = access.ListenerTaskMCPScopes(binding.WorkItemID)
+	if err != nil {
+		return err
+	}
+	if _, marked, err := mcpProfileForActor(tok); !marked || err != nil {
+		return errors.New("mcp: listener task derived profile is invalid")
+	}
+	s.mu.Lock()
+	s.actor = tok
+	bindingCopy := binding
+	s.task = &bindingCopy
+	s.mu.Unlock()
+	return nil
+}
+
 // actorToken returns a copy of the resolved bearer token. The empty Token
 // (zero ID) means Authenticate was never called; tool handlers refuse in
 // that case rather than appending events without attribution.
@@ -198,6 +250,30 @@ func (s *Server) actorToken() domain.Token {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.actor
+}
+
+func (s *Server) validateListenerTaskBinding(ctx context.Context) error {
+	s.mu.RLock()
+	binding := s.task
+	actor := s.actor
+	s.mu.RUnlock()
+	if binding == nil {
+		return nil
+	}
+	return s.deps.ListenerActivations.AuthorizeTask(ctx, listeneractivation.TaskAuthorizationInput{
+		ActivationID: binding.ActivationID, WorkItemID: binding.WorkItemID,
+		AssignmentEventID: binding.AssignmentEventID, TaskActorID: actor.ID,
+	})
+}
+
+func (s *Server) serverInfo(version string) map[string]any {
+	info := map[string]any{"name": s.info.Name, "version": version}
+	s.mu.RLock()
+	if s.task != nil && s.actor.ID != uuid.Nil {
+		info["description"] = listenerTaskAttestationPrefix + s.actor.ID.String()
+	}
+	s.mu.RUnlock()
+	return info
 }
 
 // Run reads JSON-RPC messages from in, dispatches them, and writes
@@ -444,6 +520,11 @@ func (s *Server) dispatchWithActor(ctx context.Context, msg rpcMessage, actor do
 // shared verbatim by the legacy and modern eras — the era boundary renders
 // envelopes, it never grows a second policy path.
 func (s *Server) gatedToolsList(actor domain.Token) (any, *rpcError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.validateListenerTaskBinding(ctx); err != nil {
+		return nil, rpcErrorf(errCodeInvalidRequest, "listener task activation is no longer authorized")
+	}
 	profile, marked, err := mcpProfileForActor(actor)
 	if err != nil {
 		return nil, rpcErrorf(errCodeInvalidRequest, "invalid MCP actor profile")
@@ -455,6 +536,9 @@ func (s *Server) gatedToolsList(actor domain.Token) (any, *rpcError) {
 }
 
 func (s *Server) gatedToolsCall(ctx context.Context, actor domain.Token, params json.RawMessage) (any, *rpcError) {
+	if err := s.validateListenerTaskBinding(ctx); err != nil {
+		return nil, rpcErrorf(errCodeInvalidRequest, "listener task activation is no longer authorized")
+	}
 	profile, marked, err := mcpProfileForActor(actor)
 	if err != nil {
 		return nil, rpcErrorf(errCodeInvalidRequest, "invalid MCP actor profile")
@@ -495,11 +579,8 @@ func (s *Server) handleInitialize(raw json.RawMessage) (any, *rpcError) {
 	instructions, buildBlock, serverVersion := s.instructionsAndBuild()
 	return map[string]any{
 		"protocolVersion": version,
-		"serverInfo": map[string]any{
-			"name":    s.info.Name,
-			"version": serverVersion,
-		},
-		"meristemBuild": buildBlock,
+		"serverInfo":      s.serverInfo(serverVersion),
+		"meristemBuild":   buildBlock,
 		"capabilities": map[string]any{
 			"tools": map[string]any{
 				"listChanged": false,
@@ -560,11 +641,8 @@ func (s *Server) handleServerDiscover() map[string]any {
 		"ttlMs":        0,
 		"cacheScope":   "private",
 		"_meta": map[string]any{
-			metaServerInfoKey: map[string]any{
-				"name":    s.info.Name,
-				"version": serverVersion,
-			},
-			metaBuildKey: buildBlock,
+			metaServerInfoKey: s.serverInfo(serverVersion),
+			metaBuildKey:      buildBlock,
 		},
 	}
 }
@@ -587,10 +665,7 @@ func (s *Server) modernizeResult(result any, cacheable bool) any {
 	if !ok {
 		meta = map[string]any{}
 	}
-	meta[metaServerInfoKey] = map[string]any{
-		"name":    s.info.Name,
-		"version": serverVersion,
-	}
+	meta[metaServerInfoKey] = s.serverInfo(serverVersion)
 	body["_meta"] = meta
 	return body
 }

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -42,6 +43,20 @@ func TestListenerActivationMCPParityIntegration(t *testing.T) {
 	principal, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
 		Name: "activation-mcp-principal", Source: domain.SourceAgent,
 		Scopes: []string{access.ScopeWorkItemsRead, access.ScopeWorkItemsWriteAll}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "activation-mcp-task", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeMCPListenerTaskProfileV1}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTask, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "activation-mcp-other-task", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeMCPListenerTaskProfileV1}, Actor: &root.Token,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -103,9 +118,14 @@ func TestListenerActivationMCPParityIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	binding, err := listeneractivation.TaskBindingGeneration("mcp-binding-v1", "meristem-git-v1", task.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	isError, text := callToolForTest(t, s, "listeners.ensure_activation", map[string]any{
 		"id": reg.ID.String(), "assignment_event_id": assignment.AssignmentEventID.String(),
-		"binding_generation": "mcp-binding-v1", "idempotency_key": uuid.NewString(),
+		"binding_generation": binding, "task_principal_token_id": task.Token.ID.String(),
+		"idempotency_key": uuid.NewString(),
 	})
 	if isError {
 		t.Fatalf("ensure: %s", text)
@@ -133,6 +153,74 @@ func TestListenerActivationMCPParityIntegration(t *testing.T) {
 		t.Fatalf("decode begin: %v (%s)", err, text)
 	}
 
+	activationID := uuid.MustParse(ensured.Activation.ID)
+	taskBinding := ListenerTaskBinding{
+		ActivationID: activationID, WorkItemID: item.ID,
+		AssignmentEventID: assignment.AssignmentEventID, ExpectedActorID: task.Token.ID,
+	}
+	taskServer := New(Deps{
+		Auth: authSvc, Access: access.NewService(pool), Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems: workSvc, Listeners: listenerSvc, ListenerActivations: activationSvc, Feed: feed.NewService(pool),
+	}, ServerInfo{Name: "meristem", Version: "test"}, nil)
+	if err := taskServer.AuthenticateListenerTask(ctx, task.Secret, taskBinding); err != nil {
+		t.Fatalf("authenticate bound task: %v", err)
+	}
+	listed, rerr := taskServer.gatedToolsList(taskServer.actorToken())
+	if rerr != nil {
+		t.Fatalf("task tools list: %+v", rerr)
+	}
+	tools := listed.(map[string]any)["tools"].([]httpToolDescriptor)
+	if len(tools) != 3 {
+		t.Fatalf("task tool count=%d tools=%+v", len(tools), tools)
+	}
+	wantTools := map[string]bool{"work_items.get": true, "work_items.get_assignment": true, "work_items.append_event": true}
+	for _, tool := range tools {
+		if !wantTools[tool.Name] {
+			t.Fatalf("unexpected listener task tool %q", tool.Name)
+		}
+		delete(wantTools, tool.Name)
+	}
+	if len(wantTools) != 0 {
+		t.Fatalf("missing listener task tools: %v", wantTools)
+	}
+	isError, text = callToolForTest(t, taskServer, "work_items.get_assignment", map[string]any{"id": item.ID.String()})
+	if isError || !strings.Contains(text, assignment.AssignmentEventID.String()) {
+		t.Fatalf("task get_assignment error=%v text=%s", isError, text)
+	}
+	isError, text = callToolForTest(t, taskServer, "work_items.append_event", map[string]any{
+		"id": item.ID.String(), "kind": "agent.listener_task_progress",
+		"payload": map[string]any{"status": "task-bound"}, "idempotency_key": uuid.NewString(),
+	})
+	if isError {
+		t.Fatalf("task append_event: %s", text)
+	}
+	var appendedActor uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT actor_token_id FROM events
+		WHERE subject_id=$1 AND kind=$2 AND payload->>'inner_kind'='agent.listener_task_progress'
+	`, item.ID, domain.EventWorkItemEventAppended).Scan(&appendedActor); err != nil {
+		t.Fatalf("read task-attributed event: %v", err)
+	}
+	if appendedActor != task.Token.ID {
+		t.Fatalf("task event actor=%s want=%s", appendedActor, task.Token.ID)
+	}
+	hidden := roundtrip(t, taskServer, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"work_items.transition","arguments":{"id":"`+item.ID.String()+`","to":"done","reason":"must stay hidden","idempotency_key":"`+uuid.NewString()+`"}}}`)
+	if hidden.Error == nil || !strings.Contains(hidden.Error.Message, "tool not enabled") {
+		t.Fatalf("hidden task transition response=%+v", hidden)
+	}
+	ordinary := New(Deps{Auth: authSvc}, ServerInfo{Name: "meristem", Version: "test"}, nil)
+	if err := ordinary.Authenticate(ctx, task.Secret); err == nil {
+		t.Fatal("marker-only listener task credential authenticated outside assignment-bound exchange")
+	}
+	wrongActor := taskBinding
+	wrongActor.ExpectedActorID = uuid.New()
+	if err := New(Deps{Auth: authSvc, ListenerActivations: activationSvc}, ServerInfo{}, nil).AuthenticateListenerTask(ctx, task.Secret, wrongActor); err == nil {
+		t.Fatal("wrong expected task actor unexpectedly authenticated")
+	}
+	if err := New(Deps{Auth: authSvc, ListenerActivations: activationSvc}, ServerInfo{}, nil).AuthenticateListenerTask(ctx, otherTask.Secret, taskBinding); err == nil {
+		t.Fatal("swapped valid marker-only task credential unexpectedly authenticated")
+	}
+
 	isError, text = callToolForTest(t, s, "listener_activations.record_receipt", map[string]any{
 		"id": ensured.Activation.ID, "observed_state_event_id": begun.Activation.StateEventID,
 		"consumer_generation": "mcp-consumer-v1", "outcome": "completed",
@@ -148,5 +236,8 @@ func TestListenerActivationMCPParityIntegration(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(text), &completed); err != nil || completed.Activation.State != "completed" {
 		t.Fatalf("decode receipt: %v (%s)", err, text)
+	}
+	if _, rerr := taskServer.gatedToolsList(taskServer.actorToken()); rerr == nil {
+		t.Fatal("completed activation retained listener task MCP authority")
 	}
 }

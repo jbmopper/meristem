@@ -45,6 +45,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Listener adapter regressions
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/codex_thread_nudge_test.py
+          bash scripts/codex_listener_mcp_command_test.sh
+
       - name: Unit test suite
         run: go test ./... -count=1
 

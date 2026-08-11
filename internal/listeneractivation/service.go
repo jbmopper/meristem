@@ -6,6 +6,7 @@ package listeneractivation
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
 )
@@ -28,12 +30,18 @@ const (
 	AcceptedLease        = 30 * time.Minute
 	RetryDelay           = 20 * time.Second
 	maxBindingGeneration = 200
+	taskBindingPrefix    = "listener-task-v1:"
 
 	// ReasonAdapterTargetBusy is expected backpressure from a bound app task
 	// that is still executing another turn. It remains retryable until the
 	// assignment lease/patience ends and does not consume the adapter-failure
 	// budget; no admission has been attempted at this point.
 	ReasonAdapterTargetBusy = "adapter_target_busy"
+
+	// ReasonAuthorityRequestDeclined is a terminal semantic failure: the
+	// unattended adapter correctly denied a permission/elicitation request, so
+	// the turn cannot be reinterpreted as useful completion on reconciliation.
+	ReasonAuthorityRequestDeclined = "authority_request_declined"
 )
 
 var (
@@ -115,6 +123,7 @@ type EnsureInput struct {
 	ListenerID        uuid.UUID
 	AssignmentEventID uuid.UUID
 	BindingGeneration string
+	TaskPrincipalID   uuid.UUID
 	Attempt           int
 	Actor             domain.Token
 }
@@ -132,6 +141,14 @@ func (s *Service) Ensure(ctx context.Context, in EnsureInput) (Activation, error
 	binding, err := normalizeBindingGeneration(in.BindingGeneration)
 	if err != nil {
 		return Activation{}, err
+	}
+	if strings.HasPrefix(binding, taskBindingPrefix) {
+		boundTask, parseErr := TaskPrincipalFromBinding(binding)
+		if parseErr != nil || in.TaskPrincipalID == uuid.Nil || boundTask != in.TaskPrincipalID || in.TaskPrincipalID == in.Actor.ID {
+			return Activation{}, fmt.Errorf("%w: task principal must be separately bound into binding_generation", ErrInvalidRequest)
+		}
+	} else if in.TaskPrincipalID != uuid.Nil {
+		return Activation{}, fmt.Errorf("%w: task principal requires a task-bound binding_generation", ErrInvalidRequest)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -174,6 +191,9 @@ func (s *Service) Ensure(ctx context.Context, in EnsureInput) (Activation, error
 		"adapter_kind":        adapterKind,
 		"binding_generation":  binding,
 		"assignee_token_id":   in.Actor.ID,
+	}
+	if in.TaskPrincipalID != uuid.Nil {
+		payload["task_principal_token_id"] = in.TaskPrincipalID
 	}
 	if _, _, err := s.writer.Append(ctx, tx, events.Spec{
 		SubjectKind: domain.SubjectListenerActivation, SubjectID: id,
@@ -241,6 +261,7 @@ func (s *Service) Begin(ctx context.Context, in BeginInput) (BeginResult, error)
 		return BeginResult{Activation: current, Action: ActionWait}, nil
 	}
 	if current.State == StateCompleted ||
+		(current.State == StateFailed && current.LastReason == ReasonAuthorityRequestDeclined) ||
 		(current.State == StateFailed && dispatchBudgetUsed(current) >= MaxDispatches) ||
 		(current.State == StateAmbiguous && current.ReconcileCount >= MaxReconciliations) {
 		if err := tx.Commit(ctx); err != nil {
@@ -303,18 +324,19 @@ type ReceiptInput struct {
 	Actor                domain.Token
 }
 
-var allowedReceiptReasons = map[string]bool{
-	"turn_admitted":               true,
-	"reconciled_in_progress_turn": true,
-	"reconciled_completed_turn":   true,
-	"reconciled_terminal_turn":    true,
-	"turn_completed":              true,
-	"turn_terminal_failure":       true,
-	"adapter_start_failed":        true,
-	"adapter_retryable_failure":   true,
-	"adapter_outcome_ambiguous":   true,
-	"adapter_protocol_invalid":    true,
-	ReasonAdapterTargetBusy:       true,
+var allowedReceiptReasons = map[string]State{
+	"turn_admitted":                StateAccepted,
+	"reconciled_in_progress_turn":  StateAccepted,
+	"reconciled_completed_turn":    StateCompleted,
+	"reconciled_terminal_turn":     StateFailed,
+	"turn_completed":               StateCompleted,
+	"turn_terminal_failure":        StateFailed,
+	"adapter_start_failed":         StateFailed,
+	"adapter_retryable_failure":    StateFailed,
+	"adapter_outcome_ambiguous":    StateAmbiguous,
+	"adapter_protocol_invalid":     StateAmbiguous,
+	ReasonAdapterTargetBusy:        StateFailed,
+	ReasonAuthorityRequestDeclined: StateFailed,
 }
 
 func (s *Service) RecordReceipt(ctx context.Context, in ReceiptInput) (Activation, error) {
@@ -331,8 +353,12 @@ func (s *Service) RecordReceipt(ctx context.Context, in ReceiptInput) (Activatio
 		return Activation{}, fmt.Errorf("%w: invalid receipt outcome %q", ErrInvalidRequest, in.Outcome)
 	}
 	in.Reason = strings.TrimSpace(in.Reason)
-	if !allowedReceiptReasons[in.Reason] {
+	expectedOutcome, reasonAllowed := allowedReceiptReasons[in.Reason]
+	if !reasonAllowed {
 		return Activation{}, fmt.Errorf("%w: receipt reason is not in the structural allowlist", ErrInvalidRequest)
+	}
+	if expectedOutcome != in.Outcome {
+		return Activation{}, fmt.Errorf("%w: receipt reason does not match outcome", ErrInvalidRequest)
 	}
 	listenerID, err := s.activationListenerID(ctx, in.ActivationID)
 	if err != nil {
@@ -364,7 +390,7 @@ func (s *Service) RecordReceipt(ctx context.Context, in ReceiptInput) (Activatio
 		return Activation{}, err
 	}
 	var next *time.Time
-	if in.Outcome == StateFailed && (dispatchBudgetUsed(current) < MaxDispatches || in.Reason == ReasonAdapterTargetBusy) {
+	if in.Outcome == StateFailed && in.Reason != ReasonAuthorityRequestDeclined && (dispatchBudgetUsed(current) < MaxDispatches || in.Reason == ReasonAdapterTargetBusy) {
 		v := now.Add(s.retryDelay)
 		next = &v
 	}
@@ -501,6 +527,110 @@ func requireCurrentAssignment(ctx context.Context, tx pgx.Tx, activation Activat
 	}
 	if uuid.UUID(holder.Bytes) != actor.ID || uuid.UUID(listener.Bytes) != activation.ListenerID || uuid.UUID(assignment.Bytes) != activation.AssignmentEventID || !expires.Time.After(now) {
 		return ErrNoActiveAssignment
+	}
+	return nil
+}
+
+// TaskBindingGeneration folds the separate task principal and reviewed
+// security profile into the activation identity without exposing the operator's
+// raw binding label. A credential/profile rotation therefore cannot reuse an
+// uncertain external client-message identity.
+func TaskBindingGeneration(base, securityProfile string, taskPrincipalID uuid.UUID) (string, error) {
+	base, err := normalizeBindingGeneration(base)
+	if err != nil {
+		return "", err
+	}
+	if taskPrincipalID == uuid.Nil || strings.TrimSpace(securityProfile) == "" || securityProfile != strings.TrimSpace(securityProfile) {
+		return "", fmt.Errorf("%w: task principal and exact security profile are required", ErrInvalidRequest)
+	}
+	sum := sha256.Sum256([]byte(base + "\x00" + securityProfile))
+	return fmt.Sprintf("%s%s:%x", taskBindingPrefix, taskPrincipalID, sum[:]), nil
+}
+
+// TaskPrincipalFromBinding recovers only the actor ID; the base generation is
+// intentionally one-way hashed because it is opaque adapter-local provenance.
+func TaskPrincipalFromBinding(binding string) (uuid.UUID, error) {
+	raw := binding
+	binding, err := normalizeBindingGeneration(binding)
+	if err != nil || raw != binding || !strings.HasPrefix(binding, taskBindingPrefix) {
+		return uuid.Nil, fmt.Errorf("%w: binding_generation is not task-bound", ErrInvalidRequest)
+	}
+	rest := strings.TrimPrefix(binding, taskBindingPrefix)
+	parts := strings.Split(rest, ":")
+	if len(parts) != 2 || len(parts[1]) != 64 {
+		return uuid.Nil, fmt.Errorf("%w: malformed task-bound generation", ErrInvalidRequest)
+	}
+	taskID, parseErr := uuid.Parse(parts[0])
+	if parseErr != nil || taskID == uuid.Nil || parts[0] != taskID.String() {
+		return uuid.Nil, fmt.Errorf("%w: malformed task principal", ErrInvalidRequest)
+	}
+	for _, ch := range parts[1] {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return uuid.Nil, fmt.Errorf("%w: malformed task binding digest", ErrInvalidRequest)
+		}
+	}
+	return taskID, nil
+}
+
+type TaskAuthorizationInput struct {
+	ActivationID      uuid.UUID
+	WorkItemID        uuid.UUID
+	AssignmentEventID uuid.UUID
+	TaskActorID       uuid.UUID
+}
+
+// AuthorizeTask proves that one separately authenticated task actor is bound
+// to the exact live activation/assignment generation. Callers must repeat this
+// before every MCP tool call; process-local success is never durable authority.
+func (s *Service) AuthorizeTask(ctx context.Context, in TaskAuthorizationInput) error {
+	if in.ActivationID == uuid.Nil || in.WorkItemID == uuid.Nil || in.AssignmentEventID == uuid.Nil || in.TaskActorID == uuid.Nil {
+		return fmt.Errorf("%w: complete task activation identity is required", ErrInvalidRequest)
+	}
+	var workItemID, assignmentEventID, listenerID, holderID, assignmentListenerID, currentAssignmentID, principalID uuid.UUID
+	var binding string
+	var state State
+	var activationLease, assignmentExpires, retiredAt pgtype.Timestamptz
+	var taskCredentialValid bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT la.work_item_id, la.assignment_event_id, la.listener_id,
+		       la.binding_generation, la.state, la.lease_expires_at,
+		       wa.holder_token_id, wa.listener_id, wa.assignment_event_id, wa.expires_at,
+		       lr.principal_token_id, lr.retired_at,
+		       (NOT task.is_root AND task.source='agent' AND task.revoked_at IS NULL
+		        AND task.scopes=jsonb_build_array($3::text)) AS task_credential_valid
+		FROM listener_activations la
+		JOIN work_item_assignment_state wa
+		  ON wa.work_item_id=la.work_item_id
+		JOIN listener_registrations lr ON lr.id=la.listener_id
+		JOIN tokens task ON task.id=$2
+		WHERE la.id=$1
+	`, in.ActivationID, in.TaskActorID, access.ScopeMCPListenerTaskProfileV1).Scan(
+		&workItemID, &assignmentEventID, &listenerID, &binding, &state, &activationLease,
+		&holderID, &assignmentListenerID, &currentAssignmentID, &assignmentExpires, &principalID,
+		&retiredAt, &taskCredentialValid,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	boundTask, err := TaskPrincipalFromBinding(binding)
+	if err != nil {
+		return ErrNotAuthorized
+	}
+	var now time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return err
+	}
+	if workItemID != in.WorkItemID || assignmentEventID != in.AssignmentEventID ||
+		boundTask != in.TaskActorID || in.TaskActorID == principalID ||
+		holderID != principalID || assignmentListenerID != listenerID || currentAssignmentID != assignmentEventID ||
+		retiredAt.Valid || !taskCredentialValid ||
+		!activationLease.Valid || !activationLease.Time.After(now) ||
+		!assignmentExpires.Valid || !assignmentExpires.Time.After(now) ||
+		(state != StateDispatching && state != StateAccepted) {
+		return ErrNotAuthorized
 	}
 	return nil
 }

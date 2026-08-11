@@ -23,6 +23,7 @@ func TestProviderSafeProfilesHaveRegisteredRenderers(t *testing.T) {
 	surfaces := map[string]map[string]bool{
 		"ProviderSafeReadHTTPProfile": ProviderSafeReadHTTPProfile().allowedTools,
 		"ProviderTrackerHTTPProfile":  ProviderTrackerHTTPProfile().allowedTools,
+		"ListenerTaskHTTPProfile":     ListenerTaskHTTPProfile().allowedTools,
 		"ReadOnlyHTTPTools":           ReadOnlyHTTPTools(),
 	}
 	for surface, allowlist := range surfaces {

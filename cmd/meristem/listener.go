@@ -58,6 +58,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jbmopper/meristem/internal/buildguard"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/listeneractivation"
 )
@@ -78,12 +79,16 @@ Flags:
   --interval    reconnect backoff for dropped streams (default 2s)
   --activation-adapter  absolute one-shot adapter executable (optional)
   --activation-arg      repeatable fixed adapter argument
+  --activation-checkout-root  reviewed Git checkout containing the adapter
+  --activation-bundle-path   repeatable repo-relative runtime dependency
+  --activation-task-principal-id  separate task credential UUID (no bearer crosses the adapter boundary)
+  --activation-security-profile  exact activation runtime security profile
   --activation-binding-generation  opaque local task-binding generation
   --activation-consumer-generation stable single-consumer generation
 `)
 }
 
-func runListener(ctx context.Context, logger *slog.Logger, args []string) error {
+func runListener(ctx context.Context, logger *slog.Logger, args []string, build buildguard.StatusProvider) error {
 	fs := flag.NewFlagSet("listener", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	api := fs.String("api", "http://127.0.0.1:8080", "meristem API base URL")
@@ -92,10 +97,15 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 	once := fs.Bool("once", false, "run one derivation pass and exit")
 	interval := fs.Duration("interval", 2*time.Second, "reconnect backoff for dropped streams")
 	activationAdapter := fs.String("activation-adapter", "", "absolute one-shot activation adapter executable")
+	activationCheckoutRoot := fs.String("activation-checkout-root", "", "reviewed Git checkout containing the activation runtime")
+	activationTaskPrincipalID := fs.String("activation-task-principal-id", "", "separate assignment-bound task credential UUID")
+	activationSecurityProfile := fs.String("activation-security-profile", "", "activation runtime security profile")
 	activationBinding := fs.String("activation-binding-generation", "", "opaque local adapter binding generation")
 	activationConsumer := fs.String("activation-consumer-generation", "", "stable activation consumer generation")
 	var activationArgs stringSliceFlag
+	var activationBundlePaths stringSliceFlag
 	fs.Var(&activationArgs, "activation-arg", "fixed activation adapter argument (repeatable)")
+	fs.Var(&activationBundlePaths, "activation-bundle-path", "repo-relative activation runtime dependency (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		listenerUsage(os.Stderr)
 		return err
@@ -105,17 +115,41 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 		return errors.New("listener: --name is required")
 	}
 	adapterPath := strings.TrimSpace(*activationAdapter)
+	checkoutRoot := strings.TrimSpace(*activationCheckoutRoot)
+	rawSecurityProfile := *activationSecurityProfile
+	securityProfile := strings.TrimSpace(rawSecurityProfile)
+	taskPrincipalRaw := *activationTaskPrincipalID
+	taskPrincipalText := strings.TrimSpace(taskPrincipalRaw)
+	var taskPrincipalID uuid.UUID
 	if adapterPath == "" {
-		if len(activationArgs) > 0 || strings.TrimSpace(*activationBinding) != "" || strings.TrimSpace(*activationConsumer) != "" {
+		if len(activationArgs) > 0 || len(activationBundlePaths) > 0 || checkoutRoot != "" || taskPrincipalRaw != "" || rawSecurityProfile != "" || strings.TrimSpace(*activationBinding) != "" || strings.TrimSpace(*activationConsumer) != "" {
 			return errors.New("listener: --activation-adapter is required when activation adapter options are set")
 		}
 	} else {
-		if !filepath.IsAbs(adapterPath) || strings.TrimSpace(*activationBinding) == "" || strings.TrimSpace(*activationConsumer) == "" {
-			return errors.New("listener: activation adapter must be absolute and both activation generations are required")
+		if rawSecurityProfile != securityProfile || securityProfile != activationSecurityProfileMeristemGitV1 {
+			return fmt.Errorf("listener: unsupported activation security profile %q", rawSecurityProfile)
+		}
+		parsedTaskPrincipal, parseErr := uuid.Parse(taskPrincipalText)
+		if parseErr != nil || parsedTaskPrincipal == uuid.Nil || taskPrincipalRaw != taskPrincipalText || taskPrincipalText != parsedTaskPrincipal.String() {
+			return errors.New("listener: --activation-task-principal-id must be one canonical non-nil uuid")
+		}
+		taskPrincipalID = parsedTaskPrincipal
+		if !filepath.IsAbs(adapterPath) || !filepath.IsAbs(checkoutRoot) || strings.TrimSpace(*activationBinding) == "" || strings.TrimSpace(*activationConsumer) == "" {
+			return errors.New("listener: activation adapter, checkout root, task principal, and both activation generations are required as bound values")
 		}
 		info, err := os.Stat(adapterPath)
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
 			return errors.New("listener: activation adapter must be an executable regular file")
+		}
+		if build == nil {
+			return errors.New("listener: activation security profile requires a managed build guard")
+		}
+		status := build.Status()
+		if !status.Current() {
+			return errors.New("listener: activation adapter requires a current managed build")
+		}
+		if err := verifyActivationBundle(checkoutRoot, adapterPath, activationBundlePaths, activationArgs, status.Version()); err != nil {
+			return err
 		}
 	}
 	token, source, err := resolveFeedToken()
@@ -132,10 +166,24 @@ func runListener(ctx context.Context, logger *slog.Logger, args []string) error 
 		backoff:                      *interval,
 		logger:                       logger,
 		http:                         &http.Client{Timeout: 30 * time.Second},
+		build:                        build,
 		activationAdapter:            adapterPath,
 		activationArgs:               append([]string(nil), activationArgs...),
-		activationBindingGeneration:  strings.TrimSpace(*activationBinding),
+		activationCheckoutRoot:       checkoutRoot,
+		activationBundlePaths:        append([]string(nil), activationBundlePaths...),
+		activationTaskPrincipalID:    taskPrincipalID,
+		activationSecurityProfile:    securityProfile,
 		activationConsumerGeneration: strings.TrimSpace(*activationConsumer),
+	}
+	if adapterPath != "" {
+		effectiveBinding, err := listeneractivation.TaskBindingGeneration(strings.TrimSpace(*activationBinding), securityProfile, taskPrincipalID)
+		if err != nil {
+			return fmt.Errorf("listener: derive activation binding: %w", err)
+		}
+		sup.activationBindingGeneration = effectiveBinding
+		if err := sup.requireTaskPrincipalSeparation(ctx); err != nil {
+			return err
+		}
 	}
 	// The default cursor directory is keyed by the VALIDATED registration
 	// UUID, never the raw name (LCP3-R1-B3): a name is an object address, not
@@ -174,6 +222,8 @@ func defaultListenerCursorDir(home string, listenerID uuid.UUID) string {
 
 const activationAdapterExitBusy = 78
 
+const activationSecurityProfileMeristemGitV1 = "meristem-git-v1"
+
 type listenerSupervisor struct {
 	api                          string
 	token                        string
@@ -182,8 +232,14 @@ type listenerSupervisor struct {
 	backoff                      time.Duration
 	logger                       *slog.Logger
 	http                         *http.Client
+	build                        buildguard.StatusProvider
 	activationAdapter            string
 	activationArgs               []string
+	activationCheckoutRoot       string
+	activationBundlePaths        []string
+	activationTaskPrincipalID    uuid.UUID
+	activationSecurityProfile    string
+	activationPreflight          func() error // tests may inject a non-production adapter boundary
 	activationBindingGeneration  string
 	activationConsumerGeneration string
 }
@@ -239,6 +295,9 @@ func (s *listenerSupervisor) runLoop(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
+		if err := s.requireRuntimeBuild(); err != nil {
+			return err
+		}
 		reg, err := s.getListener(ctx)
 		if err != nil {
 			return err
@@ -274,6 +333,9 @@ func (s *listenerSupervisor) runLoop(ctx context.Context) error {
 // reports the derived state. It never opens a stream; restart tests and
 // operators use it to observe derivation directly.
 func (s *listenerSupervisor) runOnce(ctx context.Context, out io.Writer) error {
+	if err := s.requireRuntimeBuild(); err != nil {
+		return err
+	}
 	reg, err := s.getListener(ctx)
 	if err != nil {
 		return err
@@ -408,6 +470,9 @@ func (s *listenerSupervisor) focused(ctx context.Context, reg listenerView, held
 			return nil
 		}
 		if s.activationAdapter != "" {
+			if err := s.requireActivationPreflight(ctx); err != nil {
+				return err
+			}
 			activation, action, activationErr := s.activationStep(ctx, reg, held)
 			if activationErr != nil {
 				// Terminal handback can commit after the projection check above
@@ -518,10 +583,14 @@ func (s *listenerSupervisor) focused(ctx context.Context, reg listenerView, held
 // and activation request. Begin records the finite external-contact lease and
 // tells the adapter whether it may dispatch or must only reconcile.
 func (s *listenerSupervisor) activationStep(ctx context.Context, reg listenerView, held heldAssignment) (activationView, string, error) {
+	if err := s.requireTaskPrincipalSeparationFromRegistration(reg); err != nil {
+		return activationView{}, "", err
+	}
 	ensureBody := map[string]any{
-		"assignment_event_id": held.AssignmentEventID,
-		"binding_generation":  s.activationBindingGeneration,
-		"attempt":             1,
+		"assignment_event_id":     held.AssignmentEventID,
+		"binding_generation":      s.activationBindingGeneration,
+		"task_principal_token_id": s.activationTaskPrincipalID,
+		"attempt":                 1,
 	}
 	var ensured struct {
 		Activation activationView `json:"activation"`
@@ -553,24 +622,30 @@ type activationAdapterReceipt struct {
 	Reason  string `json:"reason"`
 }
 
-var activationReceiptReasons = map[string]bool{
-	"turn_admitted":               true,
-	"reconciled_in_progress_turn": true,
-	"reconciled_completed_turn":   true,
-	"reconciled_terminal_turn":    true,
-	"turn_completed":              true,
-	"turn_terminal_failure":       true,
+var activationReceiptReasons = map[string]string{
+	"turn_admitted":                                   "accepted",
+	"reconciled_in_progress_turn":                     "accepted",
+	"reconciled_completed_turn":                       "completed",
+	"reconciled_terminal_turn":                        "failed",
+	"turn_completed":                                  "completed",
+	"turn_terminal_failure":                           "failed",
+	listeneractivation.ReasonAuthorityRequestDeclined: "failed",
 }
 
 // runActivationAdapter invokes one configured executable directly (never via
-// a shell), with IDs only. The process receives no Meristem bearer or database
-// URL. Its stdout is a tiny structural JSON-lines receipt protocol; arbitrary
-// text is neither logged nor persisted.
+// a shell), with IDs only. No bearer value, locator, or digest is placed in
+// argv or env. Its stdout is a tiny structural JSON-lines receipt protocol;
+// arbitrary text is neither logged nor persisted.
 func (s *listenerSupervisor) runActivationAdapter(ctx context.Context, activation activationView, action string) error {
+	if err := s.requireActivationPreflight(ctx); err != nil {
+		return err
+	}
 	args := append([]string(nil), s.activationArgs...)
 	args = append(args,
 		"--activation-id", activation.ID.String(),
+		"--work-item-id", activation.WorkItemID.String(),
 		"--assignment-event-id", activation.AssignmentEventID.String(),
+		"--task-principal-token-id", s.activationTaskPrincipalID.String(),
 		"--mode", action,
 	)
 	cmd := exec.CommandContext(ctx, s.activationAdapter, args...)
@@ -601,7 +676,13 @@ func (s *listenerSupervisor) runActivationAdapter(ctx context.Context, activatio
 	scanner.Buffer(make([]byte, 1024), 64*1024)
 	for scanner.Scan() {
 		var receipt activationAdapterReceipt
-		if err := json.Unmarshal(scanner.Bytes(), &receipt); err != nil || !activationReceiptReasons[receipt.Reason] {
+		if err := json.Unmarshal(scanner.Bytes(), &receipt); err != nil {
+			protocolInvalid = true
+			_ = cmd.Cancel()
+			break
+		}
+		expectedOutcome, reasonAllowed := activationReceiptReasons[receipt.Reason]
+		if !reasonAllowed || expectedOutcome != receipt.Outcome {
 			protocolInvalid = true
 			_ = cmd.Cancel()
 			break
@@ -614,8 +695,15 @@ func (s *listenerSupervisor) runActivationAdapter(ctx context.Context, activatio
 				break
 			}
 			accepted = true
-		case "completed", "failed":
+		case "completed":
 			if terminal || (action == "dispatch" && !accepted) {
+				protocolInvalid = true
+				_ = cmd.Cancel()
+				break
+			}
+			terminal = true
+		case "failed":
+			if terminal || (action == "dispatch" && !accepted && receipt.Reason != listeneractivation.ReasonAuthorityRequestDeclined) {
 				protocolInvalid = true
 				_ = cmd.Cancel()
 				break
@@ -739,11 +827,7 @@ func activationIdempotencyKey(parts ...string) string {
 func activationAdapterEnvironment() []string {
 	allowed := []string{
 		"HOME", "PATH", "TMPDIR", "SHELL", "USER", "LOGNAME", "LANG",
-		"LC_ALL", "LC_CTYPE", "TERM", "CODEX_HOME", "CODEX_CI",
-		"CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_SANDBOX",
-		"CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_SHELL",
-		"CODEX_THREAD_ID",
-		"CODEX_MERISTEM_TOKEN_FILE", "XDG_CONFIG_HOME", "SSL_CERT_FILE",
+		"LC_ALL", "LC_CTYPE", "TERM", "XDG_CONFIG_HOME", "SSL_CERT_FILE",
 		"SSL_CERT_DIR", "XPC_FLAGS", "XPC_SERVICE_NAME",
 		"__CFBundleIdentifier", "__CF_USER_TEXT_ENCODING",
 	}
@@ -757,6 +841,270 @@ func activationAdapterEnvironment() []string {
 		env = append(env, "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	}
 	return append(env, "RUST_LOG=error", "RUST_BACKTRACE=0", "NO_COLOR=1")
+}
+
+func (s *listenerSupervisor) requireTaskPrincipalSeparationFromRegistration(reg listenerView) error {
+	if s.activationAdapter == "" {
+		return nil
+	}
+	if s.activationTaskPrincipalID == uuid.Nil {
+		return errors.New("listener: activation task principal is not configured")
+	}
+	if reg.PrincipalTokenID == uuid.Nil {
+		return errors.New("listener: listener registration has no principal")
+	}
+	if reg.PrincipalTokenID == s.activationTaskPrincipalID {
+		return errors.New("listener: activation task principal must differ from the listener registration principal")
+	}
+	return nil
+}
+
+func (s *listenerSupervisor) requireTaskPrincipalSeparation(ctx context.Context) error {
+	if s.activationAdapter == "" {
+		return nil
+	}
+	reg, err := s.getListener(ctx)
+	if err != nil {
+		return fmt.Errorf("listener: verify activation task principal: %w", err)
+	}
+	return s.requireTaskPrincipalSeparationFromRegistration(reg)
+}
+
+func (s *listenerSupervisor) requireActivationPreflight(ctx context.Context) error {
+	if err := s.requireTaskPrincipalSeparation(ctx); err != nil {
+		return err
+	}
+	if s.activationPreflight != nil {
+		return s.activationPreflight()
+	}
+	if s.build == nil {
+		return errors.New("listener: activation build guard is not configured")
+	}
+	if s.activationSecurityProfile != activationSecurityProfileMeristemGitV1 {
+		return errors.New("listener: activation security profile changed or is unsupported")
+	}
+	status := s.build.Status()
+	if !status.Current() {
+		if err := buildguard.RequireNonBlocking(s.build); err != nil {
+			return fmt.Errorf("listener: activation build changed: %w", err)
+		}
+		return errors.New("listener: activation adapter requires a current managed build")
+	}
+	if err := verifyActivationBundle(s.activationCheckoutRoot, s.activationAdapter, s.activationBundlePaths, s.activationArgs, status.Version()); err != nil {
+		return err
+	}
+	finalStatus := s.build.Status()
+	if !finalStatus.Current() || finalStatus.Version() != status.Version() {
+		return errors.New("listener: activation build changed during preflight")
+	}
+	return nil
+}
+
+func (s *listenerSupervisor) requireRuntimeBuild() error {
+	if s.build == nil {
+		return nil
+	}
+	if err := buildguard.RequireNonBlocking(s.build); err != nil {
+		return fmt.Errorf("listener: build changed: %w", err)
+	}
+	return nil
+}
+
+const (
+	maxActivationRuntimeFiles     = 64
+	maxActivationRuntimeFileBytes = 256 << 20
+	maxActivationRuntimeTotal     = 512 << 20
+)
+
+// verifyActivationBundle authenticates the operator-reviewed runtime set before
+// any adapter process starts. The reviewed commit is supplied by the pinned Go
+// binary; Git replacement objects and ambient repository redirection variables
+// are explicitly disabled. This verifies the declared set, not every path the
+// reviewed program could choose to open.
+func verifyActivationBundle(checkoutRoot, adapterPath string, bundlePaths, activationArgs []string, reviewedCommit string) error {
+	if !isFullLowerCommit(reviewedCommit) {
+		return errors.New("listener: activation bundle has no reviewed commit")
+	}
+	root := checkoutRoot
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return errors.New("listener: activation checkout root must be absolute")
+	}
+	rootInfo, err := inspectExactActivationRuntimePath(root)
+	if err != nil || !rootInfo.IsDir() {
+		return errors.New("listener: activation checkout root must be an exact, symlink-free directory")
+	}
+	if filepath.Clean(adapterPath) != adapterPath {
+		return errors.New("listener: activation adapter path must already be clean")
+	}
+	adapterInfo, err := inspectExactActivationRuntimePath(adapterPath)
+	if err != nil || !adapterInfo.Mode().IsRegular() || adapterInfo.Mode()&0o111 == 0 {
+		return errors.New("listener: activation adapter must be an exact, symlink-free executable regular file")
+	}
+	adapterRelative, err := filepath.Rel(root, adapterPath)
+	if err != nil || !validActivationBundlePath(adapterRelative) {
+		return errors.New("listener: activation adapter must be inside the reviewed checkout")
+	}
+
+	paths := make([]string, 0, len(bundlePaths)+len(activationArgs)+1)
+	seen := make(map[string]bool, len(bundlePaths)+len(activationArgs)+1)
+	mustExecute := make(map[string]bool, len(bundlePaths)+len(activationArgs)+1)
+	addPath := func(candidate string, executable bool) error {
+		if filepath.Clean(candidate) != candidate || !validActivationBundlePath(candidate) {
+			return errors.New("activation bundle paths must be clean repository-relative paths")
+		}
+		candidate = filepath.ToSlash(candidate)
+		if !seen[candidate] {
+			if len(paths) >= maxActivationRuntimeFiles {
+				return errors.New("activation runtime declares too many files")
+			}
+			seen[candidate] = true
+			paths = append(paths, candidate)
+		}
+		mustExecute[candidate] = mustExecute[candidate] || executable
+		return nil
+	}
+	if err := addPath(adapterRelative, true); err != nil {
+		return fmt.Errorf("listener: %w", err)
+	}
+	for _, candidate := range bundlePaths {
+		if err := addPath(candidate, false); err != nil {
+			return fmt.Errorf("listener: %w", err)
+		}
+	}
+	for _, argument := range activationArgs {
+		candidate := argument
+		if strings.HasPrefix(candidate, "-") {
+			_, value, ok := strings.Cut(candidate, "=")
+			if ok {
+				candidate = value
+			}
+		}
+		if !filepath.IsAbs(candidate) {
+			continue
+		}
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return errors.New("listener: inspect absolute activation argument")
+		}
+		if filepath.Clean(candidate) != candidate || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("listener: absolute activation argument must be an exact, symlink-free path")
+		}
+		if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		if _, err := inspectExactActivationRuntimePath(candidate); err != nil {
+			return errors.New("listener: executable activation argument must be symlink-free")
+		}
+		relative, err := filepath.Rel(root, candidate)
+		if err != nil || !validActivationBundlePath(relative) {
+			return errors.New("listener: executable activation argument must be inside the reviewed checkout")
+		}
+		if err := addPath(relative, true); err != nil {
+			return fmt.Errorf("listener: %w", err)
+		}
+	}
+
+	head, err := activationGitOutput(root, "rev-parse", "--verify", "HEAD")
+	if err != nil || strings.TrimSpace(string(head)) != reviewedCommit {
+		return errors.New("listener: activation checkout HEAD does not match the reviewed build")
+	}
+	var totalBytes int64
+	for _, relative := range paths {
+		fullPath := filepath.Join(root, filepath.FromSlash(relative))
+		info, err := inspectExactActivationRuntimePath(fullPath)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || (mustExecute[relative] && info.Mode()&0o111 == 0) {
+			return errors.New("listener: activation runtime component must be a symlink-free, non-writable regular file with its reviewed execute mode")
+		}
+		if info.Size() < 1 || info.Size() > maxActivationRuntimeFileBytes {
+			return errors.New("listener: activation runtime component has an invalid size")
+		}
+		totalBytes += info.Size()
+		if totalBytes > maxActivationRuntimeTotal {
+			return errors.New("listener: activation runtime exceeds the aggregate size limit")
+		}
+		expected, err := activationGitOutput(root, "rev-parse", reviewedCommit+":"+relative)
+		if err != nil {
+			return errors.New("listener: activation runtime component is not tracked at the reviewed commit")
+		}
+		expectedOID := strings.TrimSpace(string(expected))
+		objectType, typeErr := activationGitOutput(root, "cat-file", "-t", expectedOID)
+		actual, actualErr := activationGitOutput(root, "hash-object", "--no-filters", fullPath)
+		if typeErr != nil || strings.TrimSpace(string(objectType)) != "blob" || actualErr != nil || strings.TrimSpace(string(actual)) != expectedOID {
+			return errors.New("listener: activation runtime component differs from the reviewed commit")
+		}
+	}
+	return nil
+}
+
+func inspectExactActivationRuntimePath(path string) (os.FileInfo, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.IndexFunc(path, func(r rune) bool { return r < 0x20 || r == 0x7f }) != -1 {
+		return nil, errors.New("runtime path is not exact")
+	}
+	current := path
+	var target os.FileInfo
+	for {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("runtime path contains a symlink")
+		}
+		if current == path {
+			target = info
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return target, nil
+}
+
+func validActivationBundlePath(path string) bool {
+	if path == "" || path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return strings.IndexFunc(path, func(r rune) bool { return r < 0x20 || r == 0x7f }) == -1
+}
+
+func isFullLowerCommit(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func activationGitOutput(checkoutRoot string, args ...string) ([]byte, error) {
+	gitPath := "/usr/bin/git"
+	if info, err := os.Stat(gitPath); err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		var lookErr error
+		gitPath, lookErr = exec.LookPath("git")
+		if lookErr != nil || !filepath.IsAbs(gitPath) {
+			return nil, errors.New("trusted git executable is unavailable")
+		}
+	}
+	commandArgs := append([]string{"-C", checkoutRoot}, args...)
+	cmd := exec.Command(gitPath, commandArgs...)
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"LC_ALL=C",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_OPTIONAL_LOCKS=0",
+	}
+	cmd.Stderr = io.Discard
+	return cmd.Output()
 }
 
 // assignmentReleased reads the durable projection: the generation is released
@@ -798,6 +1146,10 @@ func (s *listenerSupervisor) watchControlLane(ctx context.Context, observed list
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+		}
+		if err := s.requireRuntimeBuild(); err != nil {
+			interrupt()
+			return err
 		}
 		current, err := s.getListener(ctx)
 		if err != nil {
@@ -907,6 +1259,9 @@ const DemandStreamProjection = "dispatch"
 // key is preserved and another listener simply won — and any success is this
 // listener's one assignment (max_concurrent_assignments is 1 this release).
 func (s *listenerSupervisor) claimSweep(ctx context.Context, reg listenerView) (*heldAssignment, error) {
+	if err := s.requireRuntimeBuild(); err != nil {
+		return nil, err
+	}
 	var payload struct {
 		Candidates []demandCandidateView `json:"candidates"`
 	}

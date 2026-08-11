@@ -3,6 +3,7 @@ package listeneractivation
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,8 +25,11 @@ type fixture struct {
 	ctx        context.Context
 	pool       *pgxpool.Pool
 	writer     *events.Writer
+	authSvc    *auth.Service
+	root       auth.CreateTokenResult
 	principal  auth.CreateTokenResult
 	other      auth.CreateTokenResult
+	task       auth.CreateTokenResult
 	listener   listeners.Registration
 	assignment domain.WorkItemAssignment
 }
@@ -66,6 +70,13 @@ func newFixture(t *testing.T, name string) *fixture {
 		t.Fatal(err)
 	}
 	other, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: name + "-other", Source: domain.SourceAgent, Scopes: scopes, Actor: &root.Token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: name + "-task", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeMCPListenerTaskProfileV1}, Actor: &root.Token,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +127,7 @@ func newFixture(t *testing.T, name string) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{ctx: ctx, pool: pool, writer: writer, principal: principal, other: other, listener: reg, assignment: assignment}
+	return &fixture{ctx: ctx, pool: pool, writer: writer, authSvc: authSvc, root: root, principal: principal, other: other, task: task, listener: reg, assignment: assignment}
 }
 
 func TestListenerActivationMigrationDownUpRoundTrip(t *testing.T) {
@@ -211,6 +222,124 @@ func TestEnsureIsDeterministicAndPrincipalBound(t *testing.T) {
 	if !errors.Is(err, ErrNotAuthorized) {
 		t.Fatalf("other principal ensure err=%v, want not authorized", err)
 	}
+	samePrincipalBinding, err := TaskBindingGeneration("binding-v1", "meristem-git-v1", f.principal.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Ensure(f.ctx, EnsureInput{
+		ListenerID: f.listener.ID, AssignmentEventID: f.assignment.AssignmentEventID,
+		BindingGeneration: samePrincipalBinding, TaskPrincipalID: f.principal.Token.ID, Actor: f.principal.Token,
+	}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("same listener/task principal ensure err=%v, want invalid request", err)
+	}
+}
+
+func TestTaskBindingGenerationIsExactAndPrincipalRecoverable(t *testing.T) {
+	taskID := uuid.New()
+	binding, err := TaskBindingGeneration("operator-generation-v1", "meristem-git-v1", taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := TaskPrincipalFromBinding(binding); err != nil || got != taskID {
+		t.Fatalf("task binding principal=%s err=%v", got, err)
+	}
+	other, err := TaskBindingGeneration("operator-generation-v1", "meristem-git-v1", uuid.New())
+	if err != nil || other == binding {
+		t.Fatalf("task rotation did not change binding: other=%q err=%v", other, err)
+	}
+	profileChange, err := TaskBindingGeneration("operator-generation-v1", "manifest-v1", taskID)
+	if err != nil || profileChange == binding {
+		t.Fatalf("profile change did not change binding: other=%q err=%v", profileChange, err)
+	}
+	for _, malformed := range []string{"plain", binding + " ", strings.ToUpper(binding), "listener-task-v1:" + uuid.Nil.String() + ":" + strings.Repeat("0", 64)} {
+		if _, err := TaskPrincipalFromBinding(malformed); err == nil {
+			t.Fatalf("malformed binding %q unexpectedly accepted", malformed)
+		}
+	}
+}
+
+func TestAssignmentBoundTaskAuthorizationExpiresWithActivationAndAssignment(t *testing.T) {
+	f := newFixture(t, "activation_task_authorization")
+	svc := NewService(f.pool, f.writer)
+	binding, err := TaskBindingGeneration("binding-v1", "meristem-git-v1", f.task.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err := svc.Ensure(f.ctx, EnsureInput{
+		ListenerID: f.listener.ID, AssignmentEventID: f.assignment.AssignmentEventID,
+		BindingGeneration: binding, TaskPrincipalID: f.task.Token.ID, Actor: f.principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("ensure task-bound activation: %v", err)
+	}
+	begin, err := svc.Begin(f.ctx, BeginInput{ActivationID: activation.ID, ConsumerGeneration: "consumer-v1", Actor: f.principal.Token})
+	if err != nil || begin.Action != ActionDispatch {
+		t.Fatalf("begin=%+v err=%v", begin, err)
+	}
+	authorize := func(actorID uuid.UUID) error {
+		return svc.AuthorizeTask(f.ctx, TaskAuthorizationInput{
+			ActivationID: activation.ID, WorkItemID: f.assignment.WorkItemID,
+			AssignmentEventID: f.assignment.AssignmentEventID, TaskActorID: actorID,
+		})
+	}
+	if err := authorize(f.task.Token.ID); err != nil {
+		t.Fatalf("live task authorization rejected: %v", err)
+	}
+	if err := authorize(f.other.Token.ID); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("wrong task actor err=%v, want not authorized", err)
+	}
+	if err := svc.AuthorizeTask(f.ctx, TaskAuthorizationInput{
+		ActivationID: activation.ID, WorkItemID: uuid.New(),
+		AssignmentEventID: f.assignment.AssignmentEventID, TaskActorID: f.task.Token.ID,
+	}); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("wrong work item err=%v, want not authorized", err)
+	}
+	accepted, err := svc.RecordReceipt(f.ctx, ReceiptInput{
+		ActivationID: activation.ID, ObservedStateEventID: begin.Activation.StateEventID,
+		ConsumerGeneration: "consumer-v1", Outcome: StateAccepted, Reason: "turn_admitted", Actor: f.principal.Token,
+	})
+	if err != nil || accepted.State != StateAccepted {
+		t.Fatalf("accept=%+v err=%v", accepted, err)
+	}
+	if err := authorize(f.task.Token.ID); err != nil {
+		t.Fatalf("accepted task authorization rejected: %v", err)
+	}
+	if _, err := workitems.NewService(f.pool, f.writer).Yield(
+		f.ctx, f.assignment.WorkItemID, f.assignment.AssignmentEventID, f.principal.Token,
+	); err != nil {
+		t.Fatalf("yield assignment: %v", err)
+	}
+	if err := authorize(f.task.Token.ID); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("released assignment task authorization err=%v, want not authorized", err)
+	}
+}
+
+func TestAssignmentBoundTaskAuthorizationRejectsRevokedCredential(t *testing.T) {
+	f := newFixture(t, "activation_task_revoked")
+	svc := NewService(f.pool, f.writer)
+	binding, err := TaskBindingGeneration("binding-v1", "meristem-git-v1", f.task.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err := svc.Ensure(f.ctx, EnsureInput{
+		ListenerID: f.listener.ID, AssignmentEventID: f.assignment.AssignmentEventID,
+		BindingGeneration: binding, TaskPrincipalID: f.task.Token.ID, Actor: f.principal.Token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Begin(f.ctx, BeginInput{ActivationID: activation.ID, ConsumerGeneration: "consumer-v1", Actor: f.principal.Token}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.authSvc.Revoke(f.ctx, f.task.Token.ID, f.root.Token); err != nil {
+		t.Fatalf("revoke task token: %v", err)
+	}
+	if err := svc.AuthorizeTask(f.ctx, TaskAuthorizationInput{
+		ActivationID: activation.ID, WorkItemID: f.assignment.WorkItemID,
+		AssignmentEventID: f.assignment.AssignmentEventID, TaskActorID: f.task.Token.ID,
+	}); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("revoked task authorization err=%v, want not authorized", err)
+	}
 }
 
 func TestDispatchAcceptedCompletedLifecycle(t *testing.T) {
@@ -242,6 +371,40 @@ func TestDispatchAcceptedCompletedLifecycle(t *testing.T) {
 	terminal, err := svc.Begin(f.ctx, BeginInput{ActivationID: a.ID, ConsumerGeneration: "consumer-v2", Actor: f.principal.Token})
 	if err != nil || terminal.Action != ActionTerminal {
 		t.Fatalf("terminal begin=%+v err=%v", terminal, err)
+	}
+}
+
+func TestAuthorityDeclineIsTerminalAndNeverReconciledAsCompletion(t *testing.T) {
+	f := newFixture(t, "activation_authority_decline")
+	svc := NewService(f.pool, f.writer)
+	a := f.ensure(t, svc)
+	begin, err := svc.Begin(f.ctx, BeginInput{ActivationID: a.ID, ConsumerGeneration: "consumer-v1", Actor: f.principal.Token})
+	if err != nil || begin.Action != ActionDispatch {
+		t.Fatalf("begin=%+v err=%v", begin, err)
+	}
+	accepted, err := svc.RecordReceipt(f.ctx, ReceiptInput{
+		ActivationID: a.ID, ObservedStateEventID: begin.Activation.StateEventID,
+		ConsumerGeneration: "consumer-v1", Outcome: StateAccepted, Reason: "turn_admitted", Actor: f.principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("record accepted: %v", err)
+	}
+	if _, err := svc.RecordReceipt(f.ctx, ReceiptInput{
+		ActivationID: a.ID, ObservedStateEventID: accepted.StateEventID,
+		ConsumerGeneration: "consumer-v1", Outcome: StateCompleted, Reason: ReasonAuthorityRequestDeclined, Actor: f.principal.Token,
+	}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("completed authority-decline receipt error=%v, want invalid request", err)
+	}
+	failed, err := svc.RecordReceipt(f.ctx, ReceiptInput{
+		ActivationID: a.ID, ObservedStateEventID: accepted.StateEventID,
+		ConsumerGeneration: "consumer-v1", Outcome: StateFailed, Reason: ReasonAuthorityRequestDeclined, Actor: f.principal.Token,
+	})
+	if err != nil || failed.State != StateFailed || failed.LastReason != ReasonAuthorityRequestDeclined || failed.NextRetryAt != nil {
+		t.Fatalf("authority decline=%+v err=%v", failed, err)
+	}
+	terminal, err := svc.Begin(f.ctx, BeginInput{ActivationID: a.ID, ConsumerGeneration: "consumer-v2", Actor: f.principal.Token})
+	if err != nil || terminal.Action != ActionTerminal {
+		t.Fatalf("post-decline begin=%+v err=%v, want terminal", terminal, err)
 	}
 }
 

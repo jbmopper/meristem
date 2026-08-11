@@ -47,6 +47,22 @@ func LocalAgentHTTPProfile() *HTTPToolProfile {
 	return &HTTPToolProfile{name: "local-agent-v1"}
 }
 
+// ListenerTaskHTTPProfile is the exact assignment-bound task surface. The
+// actor's derived tree scopes still enforce object-level access; this profile
+// prevents latent tools from becoming reachable when the global catalog grows.
+func ListenerTaskHTTPProfile() *HTTPToolProfile {
+	return &HTTPToolProfile{
+		name:                  "listener-task-v1",
+		restrictTools:         true,
+		providerSafeResponses: true,
+		allowedTools: toolSet(
+			"work_items.get",
+			"work_items.get_assignment",
+			"work_items.append_event",
+		),
+	}
+}
+
 // mcpProfileForActor maps exact provider and local markers to their shared MCP
 // tool/data boundary. Doing this inside the dispatcher makes both marker kinds
 // transport-independent, so a marked credential cannot regain a different
@@ -57,6 +73,12 @@ func LocalAgentHTTPProfile() *HTTPToolProfile {
 // hand-expanded markers fail closed instead of falling back to ordinary token
 // scope filtering.
 func mcpProfileForActor(actor domain.Token) (*HTTPToolProfile, bool, error) {
+	if marked, _, err := access.ListenerTaskMCPProfileFromActor(actor); marked {
+		if err != nil {
+			return nil, true, err
+		}
+		return ListenerTaskHTTPProfile(), true, nil
+	}
 	if marked, err := access.LocalAgentMCPProfileFromActor(actor); marked {
 		if err != nil {
 			return nil, true, err

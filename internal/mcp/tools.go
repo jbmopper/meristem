@@ -1599,6 +1599,9 @@ func (s *Server) toolWorkItemsGetAssignment() Tool {
 			if err != nil {
 				return nil, assignmentToolErr(err, id)
 			}
+			if isProviderSafeContext(ctx) {
+				return providerSafeAssignmentResult{assignment: assignment}, nil
+			}
 			return map[string]any{"assignment": toAssignmentDTO(assignment)}, nil
 		},
 	}

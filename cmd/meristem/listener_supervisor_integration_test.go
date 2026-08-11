@@ -43,6 +43,7 @@ type supervisorFixture struct {
 	tree      domain.WorkItem
 	reg       listeners.Registration
 	principal auth.CreateTokenResult
+	task      auth.CreateTokenResult
 	admin     auth.CreateTokenResult
 	root      auth.CreateTokenResult
 	server    *httptest.Server
@@ -92,6 +93,13 @@ func newSupervisorFixture(t *testing.T, name string) *supervisorFixture {
 	if err != nil {
 		t.Fatalf("create principal: %v", err)
 	}
+	task, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: name + "-task", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeMCPListenerTaskProfileV1}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create task credential: %v", err)
+	}
 	listenerSvc := listeners.NewService(pool, writer)
 	reg, err := listenerSvc.Register(ctx, listeners.RegisterInput{
 		Name: name, PrincipalTokenID: principal.Token.ID,
@@ -110,7 +118,7 @@ func newSupervisorFixture(t *testing.T, name string) *supervisorFixture {
 	t.Cleanup(server.Close)
 	f := &supervisorFixture{
 		ctx: ctx, pool: pool, writer: writer, workSvc: workSvc, listeners: listenerSvc,
-		tree: tree, principal: principal, admin: admin, root: root, server: server,
+		tree: tree, principal: principal, task: task, admin: admin, root: root, server: server,
 	}
 	f.reg, err = listenerSvc.Get(ctx, reg.ID)
 	if err != nil {
@@ -126,6 +134,19 @@ func newSupervisorFixture(t *testing.T, name string) *supervisorFixture {
 		http:      f.server.Client(),
 	}
 	return f
+}
+
+func (f *supervisorFixture) configureActivation(t *testing.T, adapterPath, baseBinding, consumer string) {
+	t.Helper()
+	binding, err := listeneractivation.TaskBindingGeneration(baseBinding, activationSecurityProfileMeristemGitV1, f.task.Token.ID)
+	if err != nil {
+		t.Fatalf("derive activation binding: %v", err)
+	}
+	f.sup.activationAdapter = adapterPath
+	f.sup.activationPreflight = func() error { return nil }
+	f.sup.activationTaskPrincipalID = f.task.Token.ID
+	f.sup.activationBindingGeneration = binding
+	f.sup.activationConsumerGeneration = consumer
 }
 
 // spawnDemand creates a claimable item in the fixture tree and appends its
@@ -397,7 +418,7 @@ func TestSupervisorActivationCompositionIntegration(t *testing.T) {
 	adapter := `#!/bin/sh
 record_path="$2"
 shift 2
-if [ -n "$MERISTEM_TOKEN$MERISTEM_DATABASE_URL" ]; then
+if [ -n "$MERISTEM_TOKEN$MERISTEM_DATABASE_URL$MERISTEM_TOKEN_FILE$CODEX_MERISTEM_TOKEN_FILE$MERISTEM_MCP_EXPECT_ACTOR_ID$MERISTEM_MCP_LISTENER_ACTIVATION_ID" ]; then
   exit 12
 fi
 printf '%s\n' "$*" > "$record_path"
@@ -409,10 +430,8 @@ printf '%s\n' '{"outcome":"completed","reason":"turn_completed"}'
 	}
 	t.Setenv("MERISTEM_TOKEN", "must-not-reach-adapter")
 	t.Setenv("MERISTEM_DATABASE_URL", "must-not-reach-adapter")
-	f.sup.activationAdapter = adapterPath
+	f.configureActivation(t, adapterPath, "binding-v1", "consumer-v1")
 	f.sup.activationArgs = []string{"--record", recordPath}
-	f.sup.activationBindingGeneration = "binding-v1"
-	f.sup.activationConsumerGeneration = "consumer-v1"
 	reg, err := f.sup.getListener(f.ctx)
 	if err != nil {
 		t.Fatalf("read listener view: %v", err)
@@ -440,7 +459,9 @@ printf '%s\n' '{"outcome":"completed","reason":"turn_completed"}'
 		t.Fatalf("read adapter args: %v", err)
 	}
 	argText := string(args)
-	if !strings.Contains(argText, activation.ID.String()) || !strings.Contains(argText, assignment.AssignmentEventID.String()) || strings.Contains(argText, item.Title) {
+	if !strings.Contains(argText, activation.ID.String()) || !strings.Contains(argText, item.ID.String()) ||
+		!strings.Contains(argText, assignment.AssignmentEventID.String()) || !strings.Contains(argText, f.task.Token.ID.String()) ||
+		strings.Contains(argText, item.Title) {
 		t.Fatalf("adapter args crossed metadata boundary: %q", argText)
 	}
 
@@ -476,6 +497,52 @@ printf '%s\n' '{"outcome":"completed","reason":"turn_completed"}'
 	}
 }
 
+func TestSupervisorPreAdmissionAuthorityDeclineIsDurablyTerminalIntegration(t *testing.T) {
+	f := newSupervisorFixture(t, "sup-authority-decline")
+	item := f.spawnDemand(t, "activation-authority-decline-demand")
+	if out := runOnceOutput(t, f.sup); !strings.Contains(out, item.ID.String()) {
+		t.Fatalf("claim pass = %q, want focused on %s", out, item.ID)
+	}
+	assignment, err := f.workSvc.GetAssignment(f.ctx, item.ID)
+	if err != nil {
+		t.Fatalf("read assignment: %v", err)
+	}
+	held := heldAssignment{
+		WorkItemID: item.ID, AssignmentEventID: assignment.AssignmentEventID,
+		ExpiresAt: assignment.ExpiresAt, ListenerID: assignment.ListenerID,
+	}
+	adapterPath := filepath.Join(t.TempDir(), "authority-decline-adapter")
+	if err := os.WriteFile(adapterPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"outcome\":\"failed\",\"reason\":\"authority_request_declined\"}'\n"), 0o700); err != nil {
+		t.Fatalf("write authority-decline adapter: %v", err)
+	}
+	f.configureActivation(t, adapterPath, "binding-authority-decline-v1", "consumer-authority-decline-v1")
+	reg, err := f.sup.getListener(f.ctx)
+	if err != nil {
+		t.Fatalf("read listener view: %v", err)
+	}
+	activation, action, err := f.sup.activationStep(f.ctx, reg, held)
+	if err != nil || action != "dispatch" {
+		t.Fatalf("activation=%+v action=%q err=%v, want dispatch", activation, action, err)
+	}
+	if err := f.sup.runActivationAdapter(f.ctx, activation, action); err != nil {
+		t.Fatalf("run authority-decline adapter: %v", err)
+	}
+	svc := listeneractivation.NewService(f.pool, f.writer)
+	got, err := svc.Get(f.ctx, activation.ID)
+	if err != nil {
+		t.Fatalf("read activation: %v", err)
+	}
+	if got.State != listeneractivation.StateFailed || got.LastReason != listeneractivation.ReasonAuthorityRequestDeclined || got.NextRetryAt != nil {
+		t.Fatalf("authority-decline activation=%+v, want terminal failed", got)
+	}
+	terminal, err := svc.Begin(f.ctx, listeneractivation.BeginInput{
+		ActivationID: activation.ID, ConsumerGeneration: "consumer-after-restart-v1", Actor: f.principal.Token,
+	})
+	if err != nil || terminal.Action != listeneractivation.ActionTerminal {
+		t.Fatalf("post-restart begin=%+v err=%v, want terminal", terminal, err)
+	}
+}
+
 func TestSupervisorInvalidAdapterReceiptIsAmbiguousIntegration(t *testing.T) {
 	f := newSupervisorFixture(t, "sup-activation-invalid")
 	item := f.spawnDemand(t, "activation-invalid-demand")
@@ -494,9 +561,7 @@ func TestSupervisorInvalidAdapterReceiptIsAmbiguousIntegration(t *testing.T) {
 	if err := os.WriteFile(adapterPath, []byte("#!/bin/sh\nprintf '%s\\n' 'not-a-structural-receipt' '{\"outcome\":\"completed\",\"reason\":\"turn_completed\"}'\n"), 0o700); err != nil {
 		t.Fatalf("write invalid adapter: %v", err)
 	}
-	f.sup.activationAdapter = adapterPath
-	f.sup.activationBindingGeneration = "binding-invalid-v1"
-	f.sup.activationConsumerGeneration = "consumer-invalid-v1"
+	f.configureActivation(t, adapterPath, "binding-invalid-v1", "consumer-invalid-v1")
 	reg, err := f.sup.getListener(f.ctx)
 	if err != nil {
 		t.Fatalf("read listener view: %v", err)
@@ -545,9 +610,7 @@ func TestSupervisorBusyAdapterIsRetryableBackpressureIntegration(t *testing.T) {
 	if err := os.WriteFile(adapterPath, []byte("#!/bin/sh\nexit 78\n"), 0o700); err != nil {
 		t.Fatalf("write busy adapter: %v", err)
 	}
-	f.sup.activationAdapter = adapterPath
-	f.sup.activationBindingGeneration = "binding-busy-v1"
-	f.sup.activationConsumerGeneration = "consumer-busy-v1"
+	f.configureActivation(t, adapterPath, "binding-busy-v1", "consumer-busy-v1")
 	reg, err := f.sup.getListener(f.ctx)
 	if err != nil {
 		t.Fatalf("read listener view: %v", err)

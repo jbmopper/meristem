@@ -83,78 +83,184 @@ Optional services (each runs the same safety validation before opening the datab
 
 ### Codex listener service
 
-After the listener release commit is independently reviewed, merged to `v1`,
-and published through the shared-build guard, run the generic listener beside
-the API and worker. The listener bearer belongs in one absolute mode-0600 file.
-The supervisor and awakened task currently use the same listener-bound
-principal because held-assignment lookup is holder-specific; the environment
-variables remain explicit so a future token exchange can separate them.
+The commands in this section prepare the listener release; do not cut over the
+live consumer until the authority and restart gates below are cleared. After an
+independently reviewed commit is merged to `v1` and published through the
+shared-build guard, the generic listener will run beside the API and worker.
+Use two distinct credentials. The supervisor bearer remains the registration's
+bound principal. The awakened task bearer is a separate source=agent token whose
+stored scope set is exactly `mcp.profile:listener_task_v1`; that marker grants no
+ordinary REST or MCP business authority. Record its token UUID as
+`LISTENER_TASK_TOKEN_ID`, and install its secret only at the fixed adapter-local
+path `$MERISTEM_LISTENER_CODEX_HOME/meristem-task.token` with mode 0600. Never
+place the supervisor bearer there.
+
+Set `BIN=.meristem/generated/meristem-bin`, then mint the task credential with
+the root mint-only token and no other scope:
 
 ```bash
 BIN=.meristem/generated/meristem-bin
+MERISTEM_TOKEN="$(tr -d '\r\n' < .meristem/root.token)" "$BIN" tokens create \
+  --name codex-review-task \
+  --source agent \
+  --scopes mcp.profile:listener_task_v1
+```
+
+Capture the printed UUID and secret without placing either in shell history.
+The secret is printed only at creation; install it as shown below, then remove
+the temporary capture.
+
+```bash
 export MERISTEM_TOKEN_FILE=/absolute/path/to/listener-principal.token
-export CODEX_MERISTEM_TOKEN_FILE=/absolute/path/to/listener-principal.token
+export LISTENER_TASK_TOKEN_ID=<separate-listener-task-token-uuid>
 export CODEX_THREAD_ID=<dedicated-codex-task-uuid>
+export MERISTEM_LISTENER_CODEX_HOME=/absolute/private/path/to/listener-codex-home
+export MERISTEM_LISTENER_CODEX_SQLITE_HOME="$HOME/.codex"
+
+install -d -m 700 "$MERISTEM_LISTENER_CODEX_HOME"
+install -m 600 /secure/capture/of/listener-task-secret \
+  "$MERISTEM_LISTENER_CODEX_HOME/meristem-task.token"
+ln -s "$HOME/.codex/auth.json" "$MERISTEM_LISTENER_CODEX_HOME/auth.json"
+ln -s "$HOME/.codex/thread-writer-locks" \
+  "$MERISTEM_LISTENER_CODEX_HOME/thread-writer-locks"
 
 "$BIN" listener \
   --name codex-review \
   --api http://127.0.0.1:8080 \
   --activation-adapter "$PWD/scripts/codex-thread-nudge.py" \
+  --activation-security-profile=meristem-git-v1 \
+  --activation-checkout-root "$PWD" \
+  --activation-bundle-path=scripts/check-meristem-build-pin.sh \
+  --activation-bundle-path=scripts/codex-listener-app-server.sh \
+  --activation-bundle-path=scripts/codex-listener-mcp-command.sh \
+  --activation-task-principal-id "$LISTENER_TASK_TOKEN_ID" \
   --activation-arg=activate \
   --activation-arg=--codex-bin \
   --activation-arg="$PWD/scripts/codex-listener-app-server.sh" \
   --activation-arg=--thread-id \
-  --activation-arg=<dedicated-codex-task-uuid> \
+  --activation-arg="$CODEX_THREAD_ID" \
   --activation-arg=--repo-root \
   --activation-arg=/absolute/path/to/isolated/codex/worktree \
-  --activation-arg=--approved-mcp-server-name \
-  --activation-arg=meristem_listener \
-  --activation-arg=--approved-mcp-tool \
-  --activation-arg=work_items.held_assignments \
-  --activation-arg=--approved-mcp-tool \
-  --activation-arg=work_items.get \
-  --activation-arg=--approved-mcp-tool \
-  --activation-arg=work_items.get_assignment \
-  --activation-arg=--approved-mcp-tool \
-  --activation-arg=feed.read \
-  --activation-arg=--approved-mcp-tool \
-  --activation-arg=work_items.append_event \
+  --activation-arg=--listener-codex-home \
+  --activation-arg="$MERISTEM_LISTENER_CODEX_HOME" \
+  --activation-arg=--listener-codex-sqlite-home \
+  --activation-arg="$MERISTEM_LISTENER_CODEX_SQLITE_HOME" \
   --activation-binding-generation=<task-binding-generation> \
   --activation-consumer-generation=<service-generation>
 ```
 
-The binding generation changes when the local Codex-task binding changes. The
-consumer generation changes when the supervised listener instance is replaced.
-`CODEX_THREAD_ID` must name the same dedicated task passed to the adapter;
-Codex Desktop uses it to supply the app-server host-thread context required by
-`thread/resume`. Omitting it makes an otherwise idle Desktop task appear as a
-rejected resume and prevents activation.
-The adapter receives only activation and assignment IDs from Meristem, starts a
-turn only when the dedicated task is idle, declines unattended authority
-requests, and writes no local delivery journal. The listener wrapper leaves
-interactive Codex on HTTP but replaces that entry inside this network-disabled
-app-server process with the guarded local stdio command. Codex does not inherit
-arbitrary parent variables into stdio MCP subprocesses, so the wrapper places
-only the absolute token-file path (never the bearer) in that server's explicit
-environment map. Current Codex asks the
-app-server host to approve each MCP call as an empty form elicitation. The
-adapter accepts only an exact, operator-configured server/tool pair on the
-bound task; message or schema drift fails closed. Shell/file approvals, other
-servers, unlisted tools, non-empty forms, URL elicitations, and unknown requests
-remain denied. The scoped listener bearer remains the domain authority
-boundary. `work_items.transition` is intentionally absent from the unattended
-allowlist until the server enforces `human_review_status` at transition time;
-an awakened listener may append a result naming its exact assignment generation
-but may not terminalize the lifecycle unattended. Meristem owns the filter-bound
-feed cursors, assignment lease, activation lease, receipts, retry budget, and
-restart derivation.
+The command treats `--activation-binding-generation` as an operator generation,
+then deterministically folds the exact security profile and task-token UUID into
+the effective activation identity. Rotating either cannot reuse an uncertain
+external client-message identity. The consumer generation changes when the
+supervised listener instance is replaced. The configured task-token UUID must
+differ from the listener registration's principal UUID; startup, activation
+ensure, and every adapter spawn recheck that separation against current state.
+Create the mode-0700 dedicated Codex home once, while the listener is stopped.
+It must be a real directory different from `$HOME/.codex`, contain no
+`config.toml`, and use the two exact absolute symlinks above.
+`CODEX_SQLITE_HOME` remains the primary `$HOME/.codex` directory so app-server
+can resolve the existing desktop task. The wrapper validates this topology
+before starting Codex. Generic core does not know Codex environment names:
+launchd passes both paths as the exact fixed adapter arguments above, and the
+reviewed Codex adapter overwrites its child's task-id and home variables from
+those arguments. The exported `CODEX_THREAD_ID` is only a shell/probe input;
+generic core does not inherit it. Its value becomes the reviewed `--thread-id`
+argument, from which the adapter supplies the app-server host-thread context
+required by `thread/resume`. An empty argument fails validation before spawn.
+The supervisor appends only activation, work-item, assignment-event, and task-
+principal UUIDs to each invocation. No bearer value, bearer locator, digest, or
+database URL crosses the generic Go-to-adapter boundary. The fixed reviewed
+arguments carry the Codex task/home binding. The adapter starts a turn only when the
+dedicated task is idle, declines unattended authority requests, and writes no
+local delivery journal. Keep
+`codex-thread-nudge.py`, `codex-listener-app-server.sh`, and
+`codex-listener-mcp-command.sh` together under `scripts/` in the same clean,
+reviewed `v1` checkout whose `.meristem/generated/meristem-bin` is published.
+The wrapper resolves its guarded MCP command as a tracked sibling; do not copy
+either launcher into `.meristem/generated`, where that topology would resolve a
+different repository root. The pinned Go supervisor verifies its adapter plus
+every declared bundle path byte-for-byte against that exact Git commit before
+startup and again before each activation. This is an operator-reviewed declared
+set, not a mechanical proof of every file the program could open: add every
+future runtime helper to the repeated `--activation-bundle-path` arguments. The
+checkout, adapter, and absolute executable adapter arguments (including
+`--codex-bin`) must use exact, clean, symlink-free paths inside the reviewed
+checkout. `meristem-git-v1` is the only first-release activation security
+profile and requires this same-commit Git anchor. It deliberately carries no
+credential contract. The explicit profile is an extension point, not a claim
+that independently versioned adapters should use this packaging; those require
+a reviewed manifest profile later.
 
-Cut over one listener at a time: stop the legacy
+The listener wrapper leaves interactive Codex unchanged but runs this
+network-disabled app-server from the dedicated Codex home, so interactive MCP
+servers cannot enter its configuration. It defines one disabled inert
+`meristem` entry and one guarded `meristem_listener` stdio entry. Codex's
+`enabled_tools` filter is pinned to exactly `work_items.append_event`,
+`work_items.get`, and `work_items.get_assignment`; the wake carries the exact
+work-item UUID instead of using holder-only `work_items.held_assignments`. The
+adapter checks global and thread-scoped app-server status before `turn/start`
+and refuses any extra server, tool, or task-actor attestation. The
+wrapper accepts exactly `app-server --stdio`; every other Codex mode or argument
+vector exits before Codex is started, and no environment override may replace
+the tracked sibling MCP launcher. Codex does not inherit arbitrary parent variables into stdio MCP
+subprocesses, so the wrapper places only the fixed adapter-local task-token path
+and four non-secret binding UUIDs in that server's explicit environment map.
+The sibling MCP launcher requires exactly
+`$CODEX_HOME/meristem-task.token`, rechecks the real mode-0700 home, mode-0600
+bounded token file, and the
+shared-build pin before reading it, and requires its load-bearing tracked
+scripts to be clean at that same pinned commit. The launcher ignores interactive
+token fallbacks, sets the local Postgres URL internally, removes token paths,
+and passes the bearer value only to the reviewed `meristem mcp` child.
+
+That child authenticates the actual token row, requires its UUID to equal the
+wake's expected task UUID, requires its stored scopes to be the exact inert
+listener-task marker, and authorizes the exact live activation/work-item/
+assignment generation before serving JSON-RPC. It repeats the activation check
+before every `tools/list` and `tools/call`. Only then does it derive the exact
+tree-scoped read/write scopes in memory; attribution remains the separate task
+actor. Its initialize identity includes
+`meristem-actor-id-v1:<actual-task-uuid>`, which the adapter verifies globally
+and again for the resumed thread. A replaced, revoked, broad, wrong-principal,
+expired, yielded, or terminal task credential therefore fails closed in each
+new MCP process. Verify this boundary offline with:
+
+```bash
+bash scripts/codex_listener_mcp_command_test.sh
+```
+
+Current Codex may ask the app-server host to approve MCP calls. Per the
+listener control-plane contract, the adapter declines every unattended
+approval, elicitation, and permission request. Do not configure unattended
+`approve` mode as an operational workaround: enabling bounded MCP access is a
+separate authority-design decision that must first land in `docs/spec.md` and
+the live substrate. The dedicated launcher and token boundary remain in place
+so that decision cannot later fall back to an interactive principal. A turn
+that encounters any such declined request records a failed activation even if
+Codex subsequently labels the turn completed; transport completion is not a
+semantic smoke pass. On restart, a historical turn remains ambiguous because
+Codex history currently cannot prove that a prior adapter process observed no
+authority request; deterministic client-message identity alone is insufficient
+for a positive receipt. Meristem owns the filter-bound feed cursors, assignment
+lease, activation lease, receipts, retry budget, and restart derivation.
+
+Do **not** stop the legacy consumer yet. The metadata-only wake requires the
+three-tool MCP surface to resolve its assignment, while Codex 0.147 elicits for
+those calls and the canonical adapter declines every elicitation. A useful
+unattended activation and a positive ambiguous-admission restart smoke are
+therefore intentionally blocked pending an owner-authorized, exact-tool
+authority design or a deterministic non-eliciting result path. Once that gate
+lands, cut over one listener at a time: stop the legacy
 `meristem-codex-sse-bridge.sh` service, start exactly one generic listener
 consumer, then run the restart/ambiguous-admission smoke before deleting any
 legacy state files. Do not run old and new delivery consumers concurrently.
 For launchd, point the service at the same guarded `$BIN` used by API/MCP and
-keep the existing Postgres readiness wrapper.
+keep the existing Postgres readiness wrapper. The adapter's environment
+sanitizers do not forward `CODEX_BIN`; make the launchd `PATH` include Codex's
+installed directory (for the desktop bundle,
+`/Applications/ChatGPT.app/Contents/Resources`) so the tracked app-server
+wrapper can resolve `codex` with `command -v`.
 
 After a Codex or ChatGPT Desktop update and before the cutover smoke, run the
 adapter's read-only `probe` against the dedicated task and record the exact
@@ -163,6 +269,22 @@ the bounded printable `userAgent` returned by app-server `initialize`; that
 runtime identity plus the generated `ServerRequest` inventory in
 `codex-thread-nudge.py` makes the tested protocol attributable. A fixture-only
 test run does not replace this live updated-app probe.
+
+The direct probe uses the same isolated home but configures both MCP entries as
+inert `/usr/bin/false` transports. It validates app-server identity, isolated
+configuration, and read-only task resume without reading either Meristem bearer.
+Exact task-principal attestation and the three-tool inventory are checked by
+every real activation before `turn/start`:
+
+```bash
+"$PWD/scripts/codex-thread-nudge.py" probe \
+  --codex-bin "$PWD/scripts/codex-listener-app-server.sh" \
+  --thread-id "$CODEX_THREAD_ID" \
+  --listener-codex-home "$MERISTEM_LISTENER_CODEX_HOME" \
+  --listener-codex-sqlite-home "$MERISTEM_LISTENER_CODEX_SQLITE_HOME" \
+  --repo-root /absolute/path/to/isolated/codex/worktree \
+  --diagnostic
+```
 
 ## Rebuild the shared build artifact
 
