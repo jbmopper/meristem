@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import time
 import tempfile
@@ -16,6 +17,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("codex-thread-nudge.py")
+WRAPPER_PATH = Path(__file__).with_name("codex-listener-app-server.sh")
 SPEC = importlib.util.spec_from_file_location("codex_thread_nudge", MODULE_PATH)
 NUDGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(NUDGE)
@@ -100,7 +102,19 @@ for raw in sys.stdin:
             record()
         continue
     if method == "initialize":
-        send({"id": message["id"], "result": {"secret": "RAW-SECRET-SENTINEL"}})
+        user_agent = "Codex Desktop/0.147.0-alpha.6.5 (fixture)"
+        if scenario == "invalid_initialize_identity":
+            user_agent = "Codex Desktop/0.147.0-alpha.6.5\nraw"
+        send({
+            "id": message["id"],
+            "result": {
+                "codexHome": "/secret/codex-home",
+                "platformFamily": "unix",
+                "platformOs": "test",
+                "userAgent": user_agent,
+                "secret": "RAW-SECRET-SENTINEL",
+            },
+        })
     elif method == "initialized":
         continue
     elif method == "thread/resume":
@@ -373,6 +387,29 @@ class NudgeTests(unittest.TestCase):
             approved_mcp_tool=[],
         )
 
+    def listener_wrapper_fixture(self, token_mode=0o600):
+        token = self.root / "listener.token"
+        token.write_text("TOKEN-CONTENT-MUST-STAY-LOCAL\n", encoding="utf-8")
+        token.chmod(token_mode)
+        mcp_command = self.root / "meristem-listener-mcp"
+        mcp_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        mcp_command.chmod(0o700)
+        codex_bin = self.root / "codex-fixture"
+        codex_bin.write_text(
+            '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$CODEX_WRAPPER_RECORD"\n',
+            encoding="utf-8",
+        )
+        codex_bin.chmod(0o700)
+        wrapper_record = self.root / "wrapper-argv.txt"
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CODEX_BIN": str(codex_bin),
+            "MERISTEM_LISTENER_MCP_COMMAND": str(mcp_command),
+            "CODEX_MERISTEM_TOKEN_FILE": str(token),
+            "CODEX_WRAPPER_RECORD": str(wrapper_record),
+        }
+        return token, mcp_command, wrapper_record, environment
+
     def test_activation_dispatch_is_metadata_only_and_journal_free(self):
         args = self.activation_args()
         stdout = io.StringIO()
@@ -438,6 +475,109 @@ class NudgeTests(unittest.TestCase):
         self.assertNotIn("turn/start", record["methods"])
         self.assertFalse(self.marker.exists())
 
+    def test_probe_reports_validated_app_server_identity(self):
+        args = self.activation_args()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = NUDGE.probe(
+                args, self.command("idle"), environment=self.environment
+            )
+        self.assertEqual(result, NUDGE.EXIT_OK)
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "active_turn_count": 0,
+                "app_server_user_agent": "Codex Desktop/0.147.0-alpha.6.5 (fixture)",
+                "thread_status": "idle",
+                "waiting": False,
+            },
+        )
+
+    def test_probe_rejects_unprintable_app_server_identity(self):
+        args = self.activation_args()
+        with self.assertRaises(NUDGE.ProtocolError):
+            NUDGE.probe(
+                args,
+                self.command("invalid_initialize_identity"),
+                environment=self.environment,
+            )
+
+    def test_listener_wrapper_accepts_exact_mode_0600_token(self):
+        token, mcp_command, wrapper_record, environment = (
+            self.listener_wrapper_fixture()
+        )
+        completed = subprocess.run(
+            [str(WRAPPER_PATH), "app-server", "--stdio"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            wrapper_record.read_text(encoding="utf-8").splitlines(),
+            [
+                "--config",
+                "mcp_servers.meristem.enabled=false",
+                "--config",
+                (
+                    "mcp_servers.meristem_listener={"
+                    f'command="{mcp_command}",env={{'
+                    f'CODEX_MERISTEM_TOKEN_FILE="{token}"}}}}'
+                ),
+                "app-server",
+                "--stdio",
+            ],
+        )
+        self.assertNotIn("TOKEN-CONTENT-MUST-STAY-LOCAL", completed.stderr)
+
+    def test_listener_wrapper_rejects_group_readable_token(self):
+        token, _, wrapper_record, environment = self.listener_wrapper_fixture(0o640)
+        completed = subprocess.run(
+            [str(WRAPPER_PATH), "app-server", "--stdio"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, NUDGE.EXIT_CONFIG)
+        self.assertIn("must have mode 0600", completed.stderr)
+        self.assertNotIn("TOKEN-CONTENT-MUST-STAY-LOCAL", completed.stderr)
+        self.assertFalse(wrapper_record.exists())
+        self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o640)
+
+    def test_listener_wrapper_discards_failed_bsd_stat_probe_output(self):
+        _, _, wrapper_record, environment = self.listener_wrapper_fixture()
+        stat_fixture = self.root / "stat"
+        stat_fixture.write_text(
+            """#!/bin/sh
+if [ "$1" = "-f" ]; then
+  printf '%s\n' 'gnu-filesystem-output'
+  exit 1
+fi
+if [ "$1" = "-c" ]; then
+  printf '%s\n' '600'
+  exit 0
+fi
+exit 2
+""",
+            encoding="utf-8",
+        )
+        stat_fixture.chmod(0o700)
+        environment["PATH"] = str(self.root) + os.pathsep + environment["PATH"]
+        completed = subprocess.run(
+            [str(WRAPPER_PATH), "app-server", "--stdio"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(wrapper_record.exists())
+
     def test_activation_approves_one_exact_bound_mcp_tool(self):
         args = self.activation_args()
         args.approved_mcp_server_name = "meristem_listener"
@@ -480,6 +620,64 @@ class NudgeTests(unittest.TestCase):
             "id": 7,
             "result": {"action": "decline", "content": None},
         })
+
+    def test_mcp_approval_wrong_thread_still_declines(self):
+        client = NUDGE.AppServerClient.__new__(NUDGE.AppServerClient)
+        client.approved_mcp_server_name = "meristem_listener"
+        client.approved_mcp_tools = frozenset({"work_items.get"})
+        client.approved_thread_id = self.thread_id
+        client.last_server_request_method = None
+        client._send = mock.Mock()
+        client._respond_to_server_request({
+            "id": 8,
+            "method": "mcpServer/elicitation/request",
+            "params": {
+                "serverName": "meristem_listener",
+                "threadId": "019fc9ec-2d6b-7861-af0e-c1a8b540d5ff",
+                "turnId": "turn-1",
+                "mode": "form",
+                "message": "Allow the meristem_listener MCP server to run tool \"work_items.get\"?",
+                "requestedSchema": {"type": "object", "properties": {}},
+            },
+        })
+        client._send.assert_called_once_with({
+            "id": 8,
+            "result": {"action": "decline", "content": None},
+        })
+
+    def test_mcp_approval_structured_and_message_server_disagreement_declines(self):
+        for structured_name, message_name in (
+            ("meristem_listener", "other_server"),
+            ("other_server", "meristem_listener"),
+        ):
+            with self.subTest(
+                structured_name=structured_name, message_name=message_name
+            ):
+                client = NUDGE.AppServerClient.__new__(NUDGE.AppServerClient)
+                client.approved_mcp_server_name = "meristem_listener"
+                client.approved_mcp_tools = frozenset({"work_items.get"})
+                client.approved_thread_id = self.thread_id
+                client.last_server_request_method = None
+                client._send = mock.Mock()
+                client._respond_to_server_request({
+                    "id": 9,
+                    "method": "mcpServer/elicitation/request",
+                    "params": {
+                        "serverName": structured_name,
+                        "threadId": self.thread_id,
+                        "turnId": "turn-1",
+                        "mode": "form",
+                        "message": (
+                            f"Allow the {message_name} MCP server to run tool "
+                            '"work_items.get"?'
+                        ),
+                        "requestedSchema": {"type": "object", "properties": {}},
+                    },
+                })
+                client._send.assert_called_once_with({
+                    "id": 9,
+                    "result": {"action": "decline", "content": None},
+                })
 
     def test_mcp_approval_shape_drift_still_declines(self):
         client = NUDGE.AppServerClient.__new__(NUDGE.AppServerClient)

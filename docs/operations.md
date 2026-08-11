@@ -119,8 +119,6 @@ export CODEX_THREAD_ID=<dedicated-codex-task-uuid>
   --activation-arg=feed.read \
   --activation-arg=--approved-mcp-tool \
   --activation-arg=work_items.append_event \
-  --activation-arg=--approved-mcp-tool \
-  --activation-arg=work_items.transition \
   --activation-binding-generation=<task-binding-generation> \
   --activation-consumer-generation=<service-generation>
 ```
@@ -144,7 +142,10 @@ adapter accepts only an exact, operator-configured server/tool pair on the
 bound task; message or schema drift fails closed. Shell/file approvals, other
 servers, unlisted tools, non-empty forms, URL elicitations, and unknown requests
 remain denied. The scoped listener bearer remains the domain authority
-boundary. Meristem owns the filter-bound
+boundary. `work_items.transition` is intentionally absent from the unattended
+allowlist until the server enforces `human_review_status` at transition time;
+an awakened listener may append a result naming its exact assignment generation
+but may not terminalize the lifecycle unattended. Meristem owns the filter-bound
 feed cursors, assignment lease, activation lease, receipts, retry budget, and
 restart derivation.
 
@@ -154,6 +155,14 @@ consumer, then run the restart/ambiguous-admission smoke before deleting any
 legacy state files. Do not run old and new delivery consumers concurrently.
 For launchd, point the service at the same guarded `$BIN` used by API/MCP and
 keep the existing Postgres readiness wrapper.
+
+After a Codex or ChatGPT Desktop update and before the cutover smoke, run the
+adapter's read-only `probe` against the dedicated task and record the exact
+reviewed Meristem commit, `codex --version`, and probe JSON. The probe includes
+the bounded printable `userAgent` returned by app-server `initialize`; that
+runtime identity plus the generated `ServerRequest` inventory in
+`codex-thread-nudge.py` makes the tested protocol attributable. A fixture-only
+test run does not replace this live updated-app probe.
 
 ## Rebuild the shared build artifact
 

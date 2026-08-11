@@ -408,9 +408,22 @@ func (s *listenerSupervisor) focused(ctx context.Context, reg listenerView, held
 			return nil
 		}
 		if s.activationAdapter != "" {
-			activation, action, err := s.activationStep(ctx, reg, held)
-			if err != nil {
-				return err
+			activation, action, activationErr := s.activationStep(ctx, reg, held)
+			if activationErr != nil {
+				// Terminal handback can commit after the projection check above
+				// but before activation ensure/begin validates the generation. The
+				// exact assignment projection, not the activation error text, is
+				// authoritative about whether focus has already been released.
+				var releaseErr error
+				released, releaseErr = s.assignmentReleased(ctx, held)
+				if releaseErr != nil {
+					return errors.Join(activationErr,
+						fmt.Errorf("listener: verify assignment after activation failure: %w", releaseErr))
+				}
+				if released {
+					break
+				}
+				return activationErr
 			}
 			switch action {
 			case "dispatch", "reconcile":

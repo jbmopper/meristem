@@ -27,6 +27,13 @@ case "$MERISTEM_COMMAND:$TOKEN_FILE" in
     exit 64
     ;;
 esac
+if ! TOKEN_MODE="$(stat -f '%Lp' "$TOKEN_FILE" 2>/dev/null)"; then
+  TOKEN_MODE="$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || true)"
+fi
+[[ "$TOKEN_MODE" == "600" ]] || {
+  echo "Codex listener token file must have mode 0600 (got ${TOKEN_MODE:-unknown})" >&2
+  exit 64
+}
 
 exec "$CODEX_BIN" \
   --config 'mcp_servers.meristem.enabled=false' \
