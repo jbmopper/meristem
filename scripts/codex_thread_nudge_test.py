@@ -301,8 +301,8 @@ EXPECTED_SERVER_REQUEST_RESULTS = {
             "message": "server request unsupported by unattended client",
         }
     },
-    "applyPatchApproval": {"result": {"decision": "denied"}},
-    "execCommandApproval": {"result": {"decision": "denied"}},
+    "applyPatchApproval": {"result": {"decision": "abort"}},
+    "execCommandApproval": {"result": {"decision": "abort"}},
 }
 
 
@@ -872,7 +872,7 @@ exit 2
             )
         self.assertEqual(self.marker_value()["state"], "accepted")
 
-    def test_server_request_before_admission_is_denied_without_duplicate(self):
+    def test_server_request_before_admission_fails_closed_without_duplicate(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
         method = "item/permissions/requestApproval"
@@ -894,7 +894,7 @@ exit 2
         emitted = stdout.getvalue() + stderr.getvalue()
         self.assertNotIn("SECRET-SENTINEL", emitted)
 
-    def test_all_schema_server_requests_are_safely_denied_after_admission(self):
+    def test_all_schema_server_requests_fail_closed_after_admission(self):
         self.assertEqual(
             set(EXPECTED_SERVER_REQUEST_RESULTS), set(NUDGE.SERVER_REQUEST_METHODS)
         )

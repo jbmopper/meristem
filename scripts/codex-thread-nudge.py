@@ -57,8 +57,11 @@ SERVER_REQUEST_NEGATIVE_RESULTS = {
     "mcpServer/elicitation/request": {"action": "decline", "content": None},
     "item/permissions/requestApproval": {"permissions": {}, "scope": "turn"},
     "item/tool/call": {"contentItems": [], "success": False},
-    "applyPatchApproval": {"decision": "denied"},
-    "execCommandApproval": {"decision": "denied"},
+    # Codex 0.147's legacy response schema models a continuing denial as an
+    # object carrying a rejection string. ``abort`` is its schema-valid,
+    # fail-closed scalar response and stops the unattended turn immediately.
+    "applyPatchApproval": {"decision": "abort"},
+    "execCommandApproval": {"decision": "abort"},
 }
 SERVER_REQUEST_ERROR_METHODS = frozenset(
     {

@@ -9,12 +9,41 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+func TestActivationAdapterEnvironmentAllowsThreadContextAndDeniesSecrets(t *testing.T) {
+	t.Setenv("CODEX_THREAD_ID", "019f6309-db25-75c2-b87d-41d3050581db")
+	t.Setenv("CODEX_MERISTEM_TOKEN_FILE", "/tmp/listener.token")
+	t.Setenv("MERISTEM_TOKEN", "raw-bearer-must-not-pass")
+	t.Setenv("MERISTEM_DATABASE_URL", "postgres://must-not-pass")
+
+	got := make(map[string]string)
+	for _, entry := range activationAdapterEnvironment() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("malformed adapter environment entry %q", entry)
+		}
+		got[key] = value
+	}
+
+	if value := got["CODEX_THREAD_ID"]; value != "019f6309-db25-75c2-b87d-41d3050581db" {
+		t.Fatalf("CODEX_THREAD_ID = %q, want dedicated listener task id", value)
+	}
+	if value := got["CODEX_MERISTEM_TOKEN_FILE"]; value != "/tmp/listener.token" {
+		t.Fatalf("CODEX_MERISTEM_TOKEN_FILE = %q, want credential path", value)
+	}
+	for _, key := range []string{"MERISTEM_TOKEN", "MERISTEM_DATABASE_URL"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("sensitive %s unexpectedly passed to activation adapter", key)
+		}
+	}
+}
 
 func TestFocusedTreatsActivationConflictAfterHandbackAsRelease(t *testing.T) {
 	workItemID := uuid.New()
