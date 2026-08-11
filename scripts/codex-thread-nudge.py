@@ -734,34 +734,49 @@ class AppServerClient:
         params = {"detail": "toolsAndAuthOnly"}
         if thread_id is not None:
             params["threadId"] = thread_id
-        result = self.request("mcpServerStatus/list", params, timeout)
-        data = result.get("data") if isinstance(result, dict) else None
-        if (
-            not isinstance(data, list)
-            or len(data) != 1
-            or result.get("nextCursor") is not None
-        ):
-            raise ProtocolError()
-        server = data[0]
-        tools = server.get("tools") if isinstance(server, dict) else None
-        server_info = server.get("serverInfo") if isinstance(server, dict) else None
+        deadline = time.monotonic() + timeout
         expected_description = LISTENER_TASK_ATTESTATION_PREFIX + expected_actor_id
-        if (
-            not isinstance(server, dict)
-            or server.get("name") != LISTENER_MCP_SERVER
-            or server.get("authStatus") != "unsupported"
-            or server.get("resources") != []
-            or server.get("resourceTemplates") != []
-            or not isinstance(server_info, dict)
-            or server_info.get("name") != "meristem"
-            or server_info.get("description") != expected_description
-            or not isinstance(tools, dict)
-            or set(tools) != LISTENER_MCP_TOOLS
-        ):
-            raise ProtocolError()
-        for tool_name, tool in tools.items():
-            if not isinstance(tool, dict) or tool.get("name") != tool_name:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CompletionTimeout()
+            result = self.request("mcpServerStatus/list", params, remaining)
+            data = result.get("data") if isinstance(result, dict) else None
+            if (
+                not isinstance(data, list)
+                or len(data) != 1
+                or result.get("nextCursor") is not None
+            ):
                 raise ProtocolError()
+            server = data[0]
+            if (
+                not isinstance(server, dict)
+                or server.get("name") != LISTENER_MCP_SERVER
+                or server.get("authStatus") != "unsupported"
+                or server.get("resources") != []
+                or server.get("resourceTemplates") != []
+            ):
+                raise ProtocolError()
+            tools = server.get("tools")
+            server_info = server.get("serverInfo")
+            if server_info is None and tools == {}:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CompletionTimeout()
+                time.sleep(min(0.1, remaining))
+                continue
+            if (
+                not isinstance(server_info, dict)
+                or server_info.get("name") != "meristem"
+                or server_info.get("description") != expected_description
+                or not isinstance(tools, dict)
+                or set(tools) != LISTENER_MCP_TOOLS
+            ):
+                raise ProtocolError()
+            for tool_name, tool in tools.items():
+                if not isinstance(tool, dict) or tool.get("name") != tool_name:
+                    raise ProtocolError()
+            return
 
     def wait_for_completion(self, thread_id, turn_id, timeout):
         wanted = (thread_id, turn_id)

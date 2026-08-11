@@ -38,6 +38,7 @@ responses = []
 prompts = []
 turn_start_count = 0
 pending_admission = None
+mcp_status_calls = 0
 
 def send(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
@@ -193,6 +194,7 @@ for raw in sys.stdin:
             },
         })
     elif method == "mcpServerStatus/list":
+        mcp_status_calls += 1
         tool_names = [
             "work_items.append_event",
             "work_items.get",
@@ -212,6 +214,11 @@ for raw in sys.stdin:
             and message.get("params", {}).get("threadId") is not None
         ):
             server_info["description"] = "meristem-actor-id-v1:019fc9ec-2d6b-7861-af0e-c1a8b540d5ff"
+        if scenario == "mcp_status_stuck_starting" or (
+            scenario == "delayed_mcp_status" and mcp_status_calls <= 2
+        ):
+            server_info = None
+            tool_names = []
         data = [{
             "authStatus": "unsupported",
             "name": "meristem_listener",
@@ -664,6 +671,29 @@ class NudgeTests(unittest.TestCase):
                         environment=self.environment,
                     )
                 self.assertNotIn("thread/resume", self.record_value()["methods"])
+
+    def test_activation_waits_for_exact_listener_mcp_starting_shape(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = NUDGE.activate(
+                self.activation_args(),
+                self.command("delayed_mcp_status"),
+                environment=self.environment,
+            )
+        self.assertEqual(result, NUDGE.EXIT_OK)
+        self.assertIn("thread/resume", self.record_value()["methods"])
+        self.assertIn("turn/start", self.record_value()["methods"])
+
+    def test_activation_times_out_while_listener_mcp_stays_starting(self):
+        args = self.activation_args()
+        args.request_timeout = 0.2
+        with self.assertRaises(NUDGE.CompletionTimeout):
+            NUDGE.activate(
+                args,
+                self.command("mcp_status_stuck_starting"),
+                environment=self.environment,
+            )
+        self.assertNotIn("thread/resume", self.record_value()["methods"])
 
     def test_activation_rejects_thread_effective_mcp_drift_before_start(self):
         for scenario in (
