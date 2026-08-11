@@ -1,0 +1,5 @@
+-- 0041_repair_work_item_state_entries rollback.
+--
+-- No-op by design. The up migration repairs a projection from immutable event
+-- truth; the stale pre-repair timestamp is not authoritative data and must not
+-- be reconstructed by rollback.

@@ -10,6 +10,7 @@ package listeners_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,9 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/jobqueue"
 	"github.com/jbmopper/meristem/internal/listeners"
+	"github.com/jbmopper/meristem/internal/registry"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/testutil/pgtest"
 	"github.com/jbmopper/meristem/internal/workitems"
@@ -116,31 +119,436 @@ func (f *claimDemandFixture) demand(t *testing.T, parent uuid.UUID, title string
 	if err != nil {
 		t.Fatalf("spawn %s: %v", title, err)
 	}
+	return item, f.appendDemand(t, item, title, nil)
+}
+
+func (f *claimDemandFixture) appendDemand(t *testing.T, item domain.WorkItem, reason string, extra map[string]any) uuid.UUID {
+	t.Helper()
 	tx, err := f.pool.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(f.ctx) }()
+	payload := map[string]any{
+		"work_item_id":          item.ID,
+		"state":                 item.State,
+		"state_entered_at_unix": item.StateEnteredAt.Unix(),
+		"capability":            "review.complementary",
+		"cultivar":              "review.complementary",
+		"origin_token_id":       f.root.Token.ID,
+		"reason":                reason,
+	}
+	for key, value := range extra {
+		payload[key] = value
+	}
 	demandID, _, err := f.writer.Append(f.ctx, tx, events.Spec{
 		SubjectKind: domain.SubjectWorkItem,
 		SubjectID:   item.ID,
 		Kind:        domain.EventDispatchRequested,
 		Source:      domain.SourceSystem,
-		Payload: map[string]any{
-			"work_item_id":    item.ID,
-			"capability":      "review.complementary",
-			"cultivar":        "review.complementary",
-			"origin_token_id": f.root.Token.ID,
-			"reason":          title,
-		},
+		Payload:     payload,
 	})
 	if err != nil {
-		t.Fatalf("append demand for %s: %v", title, err)
+		t.Fatalf("append demand for %s: %v", reason, err)
 	}
 	if err := tx.Commit(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	return item, demandID
+	return demandID
+}
+
+func (f *claimDemandFixture) assignedEventCount(t *testing.T, workItemID uuid.UUID) int {
+	t.Helper()
+	var count int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM events
+		WHERE subject_kind=$1 AND subject_id=$2 AND kind=$3`,
+		domain.SubjectWorkItem, workItemID, domain.EventWorkItemAssigned,
+	).Scan(&count); err != nil {
+		t.Fatalf("count assignment events for %s: %v", workItemID, err)
+	}
+	return count
+}
+
+func (f *claimDemandFixture) seedReviewerCultivar(t *testing.T) {
+	t.Helper()
+	svc := registry.NewService(f.pool, f.writer)
+	if _, _, err := svc.DefineTropism(f.ctx, f.root.Token, registry.DefineTropismInput{
+		Name: "claim-review-checklist", Version: 1,
+		Reducer: registry.ReducerRef{Identity: "all_pass_checklist", Version: 1},
+		Params:  []byte(`{"budget":{"max_attempts":2,"escalation":"hand_to_human"}}`),
+	}); err != nil {
+		t.Fatalf("define reviewer tropism: %v", err)
+	}
+	if _, _, err := svc.DefineCultivar(f.ctx, f.root.Token, registry.DefineCultivarInput{
+		Name: "reviewer", Version: 1, Rootstock: true,
+		Tropism: registry.TropismRef{Name: "claim-review-checklist", Version: 1},
+		Profile: registry.Profile{
+			Briefing: "briefings/reviewer.md", DispatchCapability: "review.complementary",
+			ScopesTemplate: []string{"work_items.tree:{root}", "work_items.read", "work_items.write", "feed.read_assigned"},
+		},
+		Xylem:  registry.Xylem{MaxAttempts: 2, MaxWallSeconds: 3600, MaxDepth: 1},
+		Phloem: "projection:work-item-brief",
+	}); err != nil {
+		t.Fatalf("define reviewer cultivar: %v", err)
+	}
+}
+
+// A candidate snapshot is optimistic. If a rolling payload change appends a
+// newer immutable dispatch fact before claim, the older same-epoch generation
+// must refuse without an assignment event; the newest generation remains
+// claimable under the same listener policy.
+func TestClaimDemandRejectsSupersededGenerationAtClaimBoundary(t *testing.T) {
+	f := newClaimDemandFixture(t, "claim_superseded")
+	principal := f.principal(t, "superseded-principal", f.tree.ID)
+	reg := f.listener(t, "superseded-listener", principal.Token.ID)
+	item, older := f.demand(t, f.tree.ID, "superseded-demand")
+
+	candidates, err := f.svc.ListDemandCandidates(f.ctx, reg.ID, principal.Token)
+	if err != nil {
+		t.Fatalf("snapshot candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].DemandEventID != older {
+		t.Fatalf("initial candidates = %+v, want older demand %s", candidates, older)
+	}
+
+	// Same logical state epoch, newer payload generation. This models the
+	// candidate-to-claim race during a rolling routing-schema deployment.
+	newer := f.appendDemand(t, item, "superseded-demand", map[string]any{
+		"payload_version":        1,
+		"source_reconciler_pass": "dispatch",
+	})
+	if newer == older {
+		t.Fatal("new payload generation collapsed onto older demand id")
+	}
+	if _, err := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: older, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	}); !errors.Is(err, listeners.ErrDemandNotEligible) {
+		t.Fatalf("superseded claim: err = %v, want ErrDemandNotEligible", err)
+	}
+	if got := f.assignedEventCount(t, item.ID); got != 0 {
+		t.Fatalf("superseded refusal appended %d assignment events, want 0", got)
+	}
+
+	assignment, err := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: newer, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("claim latest generation: %v", err)
+	}
+	if assignment.DemandEventID == nil || *assignment.DemandEventID != newer {
+		t.Fatalf("assignment demand = %v, want latest %s", assignment.DemandEventID, newer)
+	}
+}
+
+func TestClaimDemandRejectsPriorStateEpochWithoutEvents(t *testing.T) {
+	f := newClaimDemandFixture(t, "claim_prior_epoch")
+	principal := f.principal(t, "prior-epoch-principal", f.tree.ID)
+	reg := f.listener(t, "prior-epoch-listener", principal.Token.ID)
+	item, priorEpoch := f.demand(t, f.tree.ID, "prior-epoch-demand")
+
+	if _, err := f.work.Transition(f.ctx, item.ID, domain.WorkItemPlanned, "enter a new claimable epoch", f.root.Token); err != nil {
+		t.Fatalf("transition to new epoch: %v", err)
+	}
+	if _, err := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: priorEpoch, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	}); !errors.Is(err, listeners.ErrDemandNotEligible) {
+		t.Fatalf("prior-epoch claim: err = %v, want ErrDemandNotEligible", err)
+	}
+	if got := f.assignedEventCount(t, item.ID); got != 0 {
+		t.Fatalf("prior-epoch refusal appended %d assignment events, want 0", got)
+	}
+}
+
+func TestClaimDemandRejectsMalformedCurrentMetadataWithoutEvents(t *testing.T) {
+	f := newClaimDemandFixture(t, "claim_malformed_epoch")
+	principal := f.principal(t, "malformed-principal", f.tree.ID)
+	reg := f.listener(t, "malformed-listener", principal.Token.ID)
+	item, _ := f.demand(t, f.tree.ID, "malformed-demand")
+	malformed := f.appendDemand(t, item, "malformed-demand", map[string]any{
+		"state": nil,
+	})
+
+	if _, err := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: malformed, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	}); !errors.Is(err, listeners.ErrInvalidRequest) {
+		t.Fatalf("malformed claim: err = %v, want ErrInvalidRequest", err)
+	}
+	if got := f.assignedEventCount(t, item.ID); got != 0 {
+		t.Fatalf("malformed refusal appended %d assignment events, want 0", got)
+	}
+}
+
+func TestMalformedNewestDemandShadowsOlderValidListenerCandidate(t *testing.T) {
+	f := newClaimDemandFixture(t, "claim_malformed_newest")
+	principal := f.principal(t, "malformed-newest-principal", f.tree.ID)
+	reg := f.listener(t, "malformed-newest-listener", principal.Token.ID)
+	item, older := f.demand(t, f.tree.ID, "malformed-newest-demand")
+	malformed := f.appendDemand(t, item, "malformed-newest-demand", map[string]any{
+		"state_entered_at_unix": strconv.FormatInt(item.StateEnteredAt.Unix(), 10),
+	})
+	if malformed == older {
+		t.Fatal("malformed newest demand collapsed onto older valid demand")
+	}
+	candidates, err := f.svc.ListDemandCandidates(f.ctx, reg.ID, principal.Token)
+	if err != nil {
+		t.Fatalf("list with malformed newest demand: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates with malformed newest demand = %+v, want none", candidates)
+	}
+	if _, err := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: older, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	}); !errors.Is(err, listeners.ErrDemandNotEligible) {
+		t.Fatalf("claim older behind malformed newest = %v, want ErrDemandNotEligible", err)
+	}
+	if got := f.assignedEventCount(t, item.ID); got != 0 {
+		t.Fatalf("malformed-newest refusal appended %d assignment events, want 0", got)
+	}
+}
+
+func TestLegacyMissingFromSameStateNoopHasOneDispatchStateEntry(t *testing.T) {
+	f := newClaimDemandFixture(t, "legacy_missing_from_noop")
+	principal := f.principal(t, "legacy-noop-principal", f.tree.ID)
+	reg := f.listener(t, "legacy-noop-listener", principal.Token.ID)
+	itemID := uuid.New()
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin legacy no-op fixture: %v", err)
+	}
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	createdID, _, err := f.writer.Append(f.ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: itemID,
+		Kind: domain.EventWorkItemCreated, Source: domain.SourceHuman, ActorTokenID: &f.root.Token.ID,
+		Payload: map[string]any{
+			"title": "legacy missing-from no-op", "state": domain.WorkItemTriaged,
+			"suggested_convergence_checks": []string{"event:legacy-noop"},
+			"human_review_status":          domain.HumanReviewWavedThrough,
+		},
+	})
+	if err != nil {
+		t.Fatalf("append created: %v", err)
+	}
+	if _, _, err := f.writer.Append(f.ctx, tx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: f.tree.ID,
+		Kind: domain.EventWorkItemRelationAdded, Source: domain.SourceHuman, ActorTokenID: &f.root.Token.ID,
+		Payload: map[string]any{"parent_id": f.tree.ID, "child_id": itemID},
+	}); err != nil {
+		t.Fatalf("append parent relation: %v", err)
+	}
+	var createdAt time.Time
+	if err := tx.QueryRow(f.ctx, `SELECT occurred_at FROM events WHERE id=$1`, createdID).Scan(&createdAt); err != nil {
+		t.Fatalf("read created timestamp: %v", err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit legacy created fixture: %v", err)
+	}
+
+	// Use a later transaction so this regression proves a missing-from
+	// same-result legacy transition cannot advance the projected state epoch.
+	// The old projector only appeared correct when both facts shared one
+	// transaction timestamp.
+	time.Sleep(2 * time.Millisecond)
+	noopTx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin legacy no-op transition: %v", err)
+	}
+	defer func() { _ = noopTx.Rollback(f.ctx) }()
+	noopID, _, err := f.writer.Append(f.ctx, noopTx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: itemID,
+		Kind: domain.EventWorkItemTransitioned, Source: domain.SourceHuman, ActorTokenID: &f.root.Token.ID,
+		Discriminator: "legacy-missing-from-noop",
+		Payload:       map[string]any{"to": domain.WorkItemTriaged, "reason": "legacy missing-from no-op"},
+	})
+	if err != nil {
+		t.Fatalf("append legacy no-op transition: %v", err)
+	}
+	var noopAt time.Time
+	if err := noopTx.QueryRow(f.ctx, `SELECT occurred_at FROM events WHERE id=$1`, noopID).Scan(&noopAt); err != nil {
+		t.Fatalf("read no-op timestamp: %v", err)
+	}
+	if err := noopTx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit legacy no-op transition: %v", err)
+	}
+	if !noopAt.After(createdAt) {
+		t.Fatalf("fixture no-op timestamp = %s, want after created %s", noopAt, createdAt)
+	}
+	var projectedEnteredAt time.Time
+	if err := f.pool.QueryRow(f.ctx, `SELECT state_entered_at FROM work_items WHERE id=$1`, itemID).Scan(&projectedEnteredAt); err != nil {
+		t.Fatalf("read projected state epoch: %v", err)
+	}
+	if !projectedEnteredAt.Equal(createdAt) {
+		t.Fatalf("missing-from same-state no-op advanced projection to %s, want %s", projectedEnteredAt, createdAt)
+	}
+
+	demandTx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin legacy demand: %v", err)
+	}
+	defer func() { _ = demandTx.Rollback(f.ctx) }()
+	demandID, _, err := f.writer.Append(f.ctx, demandTx, events.Spec{
+		SubjectKind: domain.SubjectWorkItem, SubjectID: itemID,
+		Kind: domain.EventDispatchRequested, Source: domain.SourceSystem,
+		Payload: map[string]any{
+			"work_item_id": itemID, "state": domain.WorkItemTriaged,
+			"state_entered_at_unix": createdAt.Unix(), "capability": "review.complementary",
+			"cultivar": "review.complementary", "origin_token_id": f.root.Token.ID,
+			"reason": "legacy missing-from no-op",
+		},
+	})
+	if err != nil {
+		t.Fatalf("append legacy demand: %v", err)
+	}
+	if err := demandTx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit legacy no-op fixture: %v", err)
+	}
+
+	identity, err := jobqueue.ResolveDispatchIdentity(f.ctx, f.pool, demandID)
+	if err != nil {
+		t.Fatalf("resolve legacy no-op demand: %v", err)
+	}
+	if identity.StateEntryID != createdID || identity.StateEntryID == noopID {
+		t.Fatalf("legacy identity state entry = %s, want created %s (not no-op %s)", identity.StateEntryID, createdID, noopID)
+	}
+	candidates, err := f.svc.ListDemandCandidates(f.ctx, reg.ID, principal.Token)
+	if err != nil || len(candidates) != 1 || candidates[0].DemandEventID != demandID {
+		t.Fatalf("legacy no-op candidates = %+v err %v, want %s", candidates, err, demandID)
+	}
+	queue := jobqueue.NewService(f.pool)
+	if canceled, err := queue.ReconcileDispatchJobs(f.ctx); err != nil || canceled != 0 {
+		t.Fatalf("legacy no-op reconcile canceled %d err %v, want 0", canceled, err)
+	}
+	job, found, err := queue.ClaimNext(f.ctx, time.Minute)
+	if err != nil || !found || job.ID != demandID {
+		t.Fatalf("legacy no-op queue claim = found %t id %s err %v, want %s", found, job.ID, err, demandID)
+	}
+	assignment, err := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: demandID, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("legacy no-op listener claim: %v", err)
+	}
+	if assignment.DemandEventID == nil || *assignment.DemandEventID != demandID {
+		t.Fatalf("legacy no-op assignment demand = %v, want %s", assignment.DemandEventID, demandID)
+	}
+}
+
+func TestReviewerAdmissionAndListenerClaimCommute(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		assignmentFirst bool
+	}{
+		{name: "assignment_before_admission", assignmentFirst: true},
+		{name: "admission_before_assignment", assignmentFirst: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newClaimDemandFixture(t, "review_commute_"+tc.name)
+			f.seedReviewerCultivar(t)
+			principal := f.principal(t, tc.name+"-principal", f.tree.ID)
+			reg := f.listener(t, tc.name+"-listener", principal.Token.ID)
+			system, err := f.auth.CreateToken(f.ctx, auth.CreateTokenInput{
+				Name: tc.name + "-system", Source: domain.SourceSystem, Actor: &f.root.Token,
+			})
+			if err != nil {
+				t.Fatalf("create system token: %v", err)
+			}
+			item, err := f.work.SpawnChild(f.ctx, f.tree.ID, workitems.CreateInput{
+				Title: tc.name, State: domain.WorkItemTriaged, Cultivar: "reviewer@1",
+				SuggestedConvergenceChecks: []string{workitems.ReviewVerdictCheck},
+				HumanReviewStatus:          domain.HumanReviewWavedThrough,
+				Actor:                      f.root.Token,
+			})
+			if err != nil {
+				t.Fatalf("spawn reviewer item: %v", err)
+			}
+			stateEntry, err := jobqueue.ResolveCurrentStateEntry(f.ctx, f.pool, item.ID)
+			if err != nil {
+				t.Fatalf("resolve reviewer state entry: %v", err)
+			}
+			demandID := f.appendDemand(t, item, tc.name, map[string]any{
+				"state_event_id": stateEntry.ID,
+				"cultivar":       "reviewer@1",
+			})
+			claim := func() domain.WorkItemAssignment {
+				t.Helper()
+				assignment, claimErr := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+					DemandEventID: demandID, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+				})
+				if claimErr != nil {
+					t.Fatalf("listener claim: %v", claimErr)
+				}
+				return assignment
+			}
+			admit := func() {
+				t.Helper()
+				job, found, claimErr := jobqueue.NewService(f.pool).ClaimNextReview(f.ctx, time.Minute)
+				if claimErr != nil || !found || job.ID != demandID {
+					t.Fatalf("review queue claim = found %t id %s err %v, want %s", found, job.ID, claimErr, demandID)
+				}
+				result, startErr := f.work.StartReviewDispatch(f.ctx, job.ID, job.Attempts, system.Token)
+				if startErr != nil || result.Outcome != workitems.ReviewDispatchStarted || !result.Transitioned {
+					t.Fatalf("review admission = %+v err %v, want started", result, startErr)
+				}
+			}
+
+			if tc.assignmentFirst {
+				first := claim()
+				admit()
+				retry := claim()
+				if retry.AssignmentEventID != first.AssignmentEventID || f.assignedEventCount(t, item.ID) != 1 {
+					t.Fatalf("same-bound retry after running = %+v, first %+v events %d", retry, first, f.assignedEventCount(t, item.ID))
+				}
+			} else {
+				admit()
+				candidates, listErr := f.svc.ListDemandCandidates(f.ctx, reg.ID, principal.Token)
+				if listErr != nil || len(candidates) != 1 || candidates[0].DemandEventID != demandID {
+					t.Fatalf("causal running candidates = %+v err %v, want %s", candidates, listErr, demandID)
+				}
+				claim()
+			}
+		})
+	}
+}
+
+func TestClaimDemandRejectsAfterLaterStateEntryBeyondReviewerAdmission(t *testing.T) {
+	f := newClaimDemandFixture(t, "review_causal_later_state")
+	f.seedReviewerCultivar(t)
+	principal := f.principal(t, "causal-later-principal", f.tree.ID)
+	reg := f.listener(t, "causal-later-listener", principal.Token.ID)
+	system, err := f.auth.CreateToken(f.ctx, auth.CreateTokenInput{Name: "causal-later-system", Source: domain.SourceSystem, Actor: &f.root.Token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := f.work.SpawnChild(f.ctx, f.tree.ID, workitems.CreateInput{
+		Title: "causal reviewer then later state", State: domain.WorkItemTriaged, Cultivar: "reviewer@1",
+		SuggestedConvergenceChecks: []string{workitems.ReviewVerdictCheck}, HumanReviewStatus: domain.HumanReviewWavedThrough, Actor: f.root.Token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := jobqueue.ResolveCurrentStateEntry(f.ctx, f.pool, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	demandID := f.appendDemand(t, item, "causal-later", map[string]any{"state_event_id": entry.ID, "cultivar": "reviewer@1"})
+	job, found, err := jobqueue.NewService(f.pool).ClaimNextReview(f.ctx, time.Minute)
+	if err != nil || !found {
+		t.Fatalf("claim review: found %t err %v", found, err)
+	}
+	if _, err := f.work.StartReviewDispatch(f.ctx, job.ID, job.Attempts, system.Token); err != nil {
+		t.Fatalf("start review: %v", err)
+	}
+	if _, err := f.work.Transition(f.ctx, item.ID, domain.WorkItemPlanned, "later state entry", f.root.Token); err != nil {
+		t.Fatalf("later transition: %v", err)
+	}
+	if _, err := f.svc.ClaimDemand(f.ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: demandID, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	}); !errors.Is(err, listeners.ErrDemandNotEligible) {
+		t.Fatalf("claim after later state = %v, want ErrDemandNotEligible", err)
+	}
+	if got := f.assignedEventCount(t, item.ID); got != 0 {
+		t.Fatalf("later-state refusal appended %d assignments, want 0", got)
+	}
 }
 
 func TestClaimDemandRevalidatesAtomically(t *testing.T) {

@@ -110,8 +110,10 @@ func newFixture(t *testing.T, name string) *fixture {
 		SubjectKind: domain.SubjectWorkItem, SubjectID: item.ID,
 		Kind: domain.EventDispatchRequested, Source: domain.SourceSystem,
 		Payload: map[string]any{
-			"work_item_id": item.ID, "capability": "review.complementary",
-			"cultivar": "review.complementary", "origin_token_id": root.Token.ID,
+			"work_item_id": item.ID, "state": item.State,
+			"state_entered_at_unix": item.StateEnteredAt.Unix(),
+			"capability":            "review.complementary",
+			"cultivar":              "review.complementary", "origin_token_id": root.Token.ID,
 		},
 	})
 	if err != nil {
@@ -135,6 +137,9 @@ func TestListenerActivationMigrationDownUpRoundTrip(t *testing.T) {
 	pool := pgtest.NewPool(t, "listener_activation_migration")
 	if err := storage.Migrate(ctx, pool, nil); err != nil {
 		t.Fatalf("migrate up: %v", err)
+	}
+	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate 0041 down: %v", err)
 	}
 	if err := storage.MigrateDown(ctx, pool, nil); err != nil {
 		t.Fatalf("migrate 0040 down: %v", err)
@@ -169,7 +174,7 @@ func TestListenerActivationMigrationDownUpRoundTrip(t *testing.T) {
 		t.Fatal("listener_activations still exists after migration 0039 down")
 	}
 	if err := storage.Migrate(ctx, pool, nil); err != nil {
-		t.Fatalf("migrate 0039 and 0040 back up: %v", err)
+		t.Fatalf("migrate 0039 through 0041 back up: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.listener_activations') IS NOT NULL`).Scan(&exists); err != nil {
 		t.Fatal(err)

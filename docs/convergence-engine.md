@@ -53,6 +53,18 @@ a running `work_item` with nonempty `suggested_convergence_checks` uses
 - `internal/worker` — default checklist convergence pass:
   - candidate = `state=running` and nonempty `suggested_convergence_checks`;
   - reducer = `AllPassChecklist`;
+  - `all_pass_checklist@1` is strict failure-wins over durable history. The
+    immutable `checklist-worker@1` contract therefore evaluates each runnable
+    check with at most three bounded local attempts and appends exactly one
+    final `checklist.item:<exact check>` reading. Intermediate failures are
+    summarized only in that final reading's bounded `raw` evidence;
+  - a check that cannot run appends one non-check
+    `checklist.blocked:<exact check>` event without `pass`. That event is
+    audit/progress evidence, not a reducer verdict or a lifecycle transition.
+    The executor may begin only after a reviewed, assignment-fenced start path
+    has admitted its exact assignment generation to `running`; running-state
+    wall-clock patience, not mere assignment expiry, then escalates an
+    unresolved item;
   - verdict persistence uses `convergence.AppendVerdict`;
   - unchanged rejected input digests do not consume another attempt;
   - generic budget is three fresh input digests, then `hand_to_human`
@@ -72,6 +84,14 @@ a running `work_item` with nonempty `suggested_convergence_checks` uses
 - No model calls. Producing signals is the probabilistic subsystem's job.
 - No multi-model, threshold, approval-backed, or custom pattern declaration
   surface. Those remain explicit follow-up work.
+- No durable retry after a final `pass=false` checklist signal. Under
+  `all_pass_checklist@1`, a later true reading cannot supersede the historical
+  false. Latest-reading or state-epoch semantics require a new reducer version
+  and an explicit owner-approved migration of the immutable rootstock
+  cultivar; they must not be introduced as a silent behavior change to v1.
+- `work_items.execute_checks` remains unavailable for unattended listener
+  activation until the exact-assignment start/disposal path above ships. The
+  corrected evidence grammar does not claim that lifecycle gap is closed.
 - Parameterized reducers (`Threshold`, `AllPassChecklist`) are **not** in
   `DefaultRegistry()`: their behavior depends on per-work_item configuration,
   so registering a zero-value instance would make replay silently use the

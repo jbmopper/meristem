@@ -92,8 +92,10 @@ func TestListenerActivationMCPParityIntegration(t *testing.T) {
 		SubjectKind: domain.SubjectWorkItem, SubjectID: item.ID,
 		Kind: domain.EventDispatchRequested, Source: domain.SourceSystem,
 		Payload: map[string]any{
-			"work_item_id": item.ID, "capability": "review.complementary",
-			"cultivar": "review.complementary", "origin_token_id": root.Token.ID,
+			"work_item_id": item.ID, "state": item.State,
+			"state_entered_at_unix": item.StateEnteredAt.Unix(),
+			"capability":            "review.complementary",
+			"cultivar":              "review.complementary", "origin_token_id": root.Token.ID,
 		},
 	})
 	if err != nil {

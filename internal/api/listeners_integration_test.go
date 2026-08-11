@@ -313,8 +313,14 @@ func TestListenerDemandResolutionIntegration(t *testing.T) {
 	// payload.
 	appendDemand := func(itemID uuid.UUID, capability string, origin uuid.UUID, extra map[string]any) uuid.UUID {
 		t.Helper()
+		item, err := workSvc.Get(f.ctx, itemID)
+		if err != nil {
+			t.Fatalf("read demand work item: %v", err)
+		}
 		payload := map[string]any{
 			"work_item_id":           itemID,
+			"state":                  item.State,
+			"state_entered_at_unix":  item.StateEnteredAt.Unix(),
 			"cultivar":               capability,
 			"capability":             capability,
 			"reason":                 "listener-demand-fixture",

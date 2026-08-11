@@ -118,9 +118,6 @@ func (s *Service) ClaimInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor 
 	if err != nil {
 		return domain.WorkItemAssignment{}, nil, err
 	}
-	if err := claimableWorkItem(item); err != nil {
-		return domain.WorkItemAssignment{}, nil, err
-	}
 	state, err := scanAssignmentStateForUpdate(ctx, tx, id)
 	if err != nil {
 		return domain.WorkItemAssignment{}, nil, err
@@ -135,11 +132,17 @@ func (s *Service) ClaimInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor 
 			sameClaimBinding(state.Assignment, binding) {
 			return *state.Assignment, nil, nil
 		}
+		if err := claimableWorkItem(item); err != nil {
+			return domain.WorkItemAssignment{}, nil, err
+		}
 		return domain.WorkItemAssignment{}, nil, &ClaimHeldError{
 			HolderTokenID:     state.Assignment.HolderTokenID,
 			AssignmentEventID: state.Assignment.AssignmentEventID,
 			ExpiresAt:         state.Assignment.ExpiresAt,
 		}
+	}
+	if err := claimableWorkItem(item); err != nil {
+		return domain.WorkItemAssignment{}, nil, err
 	}
 	if state.Assignment != nil {
 		if _, err := s.appendAssignmentReleaseInTx(ctx, tx, *state.Assignment, domain.AssignmentReleaseExpired, "", observedAt, actor); err != nil {
@@ -166,6 +169,31 @@ func (s *Service) ClaimInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor 
 	return s.appendClaimInTx(ctx, tx, item, actor, lease, leaseSource, claimedAt, state.StateEventID, binding)
 }
 
+// ExistingExactClaimInTx is the listener retry fence. It takes the ordinary
+// work-item -> assignment-state lock order and returns only an unexpired claim
+// whose holder and complete listener binding match. A later lifecycle state
+// must not turn an idempotent retry of already-created ownership into a stale
+// demand error; absence never creates ownership.
+func (s *Service) ExistingExactClaimInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, actor domain.Token, binding ClaimBinding) (domain.WorkItemAssignment, bool, error) {
+	if _, err := scanWorkItemForUpdate(ctx, tx, id); err != nil {
+		return domain.WorkItemAssignment{}, false, err
+	}
+	state, err := scanAssignmentStateForUpdate(ctx, tx, id)
+	if err != nil {
+		return domain.WorkItemAssignment{}, false, err
+	}
+	observedAt, err := readAssignmentClock(ctx, tx)
+	if err != nil {
+		return domain.WorkItemAssignment{}, false, err
+	}
+	if state.Assignment == nil || !state.Assignment.ExpiresAt.After(observedAt) ||
+		state.Assignment.HolderTokenID != actor.ID || state.Assignment.Mode != domain.WorkItemAssignmentClaim ||
+		!sameClaimBinding(state.Assignment, &binding) {
+		return domain.WorkItemAssignment{}, false, nil
+	}
+	return *state.Assignment, true, nil
+}
+
 // sameClaimBinding decides whether an existing unexpired same-holder claim is
 // THIS logical claim (idempotent success) or a different one (held conflict).
 // An unbound retry matches an unbound claim; a listener-bound retry matches
@@ -176,7 +204,9 @@ func sameClaimBinding(existing *domain.WorkItemAssignment, binding *ClaimBinding
 	if binding == nil {
 		return existing.ListenerID == nil
 	}
-	return existing.ListenerID != nil && *existing.ListenerID == binding.ListenerID
+	return existing.ListenerID != nil && *existing.ListenerID == binding.ListenerID &&
+		existing.DemandEventID != nil && *existing.DemandEventID == binding.DemandEventID &&
+		existing.PolicyEventID != nil && *existing.PolicyEventID == binding.PolicyEventID
 }
 
 // Yield releases the caller's active assignment. Yield is holder-only AND

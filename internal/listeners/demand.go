@@ -190,17 +190,116 @@ func (s *Service) ListDemandCandidates(ctx context.Context, listenerID uuid.UUID
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.id, d.seq FROM (
-			SELECT DISTINCT ON (e.subject_id) e.id, e.seq, e.subject_id
-			FROM events e
-			JOIN work_items wi ON wi.id = e.subject_id
+		WITH open_items AS MATERIALIZED (
+			SELECT wi.id, wi.state, wi.state_entered_at
+			FROM work_items wi
 			LEFT JOIN work_item_assignment_state a ON a.work_item_id = wi.id
-			WHERE e.kind = $1 AND e.subject_kind = $2
-			  AND wi.state <> ALL($3::text[])
+			WHERE wi.state <> ALL($3::text[])
 			  AND wi.human_review_status <> $4
 			  AND (a.holder_token_id IS NULL OR a.expires_at <= clock_timestamp())
-			ORDER BY e.subject_id, e.seq DESC
-		) d
+		),
+		lifecycle AS MATERIALIZED (
+			SELECT fact.*,
+			       lag(fact.state) OVER (PARTITION BY fact.subject_id ORDER BY fact.seq) AS prior_state
+			FROM (
+				SELECT e.id, e.seq, e.subject_id, e.kind, e.occurred_at, e.payload,
+				       CASE
+				         WHEN e.kind = 'work_item.created'
+				         THEN COALESCE(NULLIF(e.payload->>'state', ''), 'captured')
+				         ELSE NULLIF(e.payload->>'to', '')
+				       END AS state
+				FROM events e
+				JOIN open_items oi ON oi.id = e.subject_id
+				WHERE e.subject_kind = $2
+				  AND e.kind IN ('work_item.created', 'work_item.transitioned')
+				  AND jsonb_typeof(e.payload) = 'object'
+			) fact
+		),
+		state_entries AS MATERIALIZED (
+			SELECT *
+			FROM lifecycle
+			WHERE state IS NOT NULL
+			  AND (kind = 'work_item.created' OR state IS DISTINCT FROM prior_state)
+		),
+		current_entries AS (
+			SELECT DISTINCT ON (subject_id) *
+			FROM state_entries
+			ORDER BY subject_id, seq DESC
+		),
+		valid_demands AS (
+			SELECT demand.id, demand.seq, demand.subject_id, state_entry.id AS state_event_id
+			FROM events demand
+			JOIN open_items oi ON oi.id = demand.subject_id
+			JOIN current_entries current_entry ON current_entry.subject_id = demand.subject_id
+			JOIN LATERAL (
+				SELECT entry.*
+				FROM state_entries entry
+				WHERE entry.subject_id = demand.subject_id AND entry.seq < demand.seq
+				ORDER BY entry.seq DESC
+				LIMIT 1
+			) state_entry ON true
+			WHERE demand.kind = $1 AND demand.subject_kind = $2
+			  AND demand.id = (
+			    SELECT newest.id
+			    FROM events newest
+			    WHERE newest.kind = $1
+			      AND newest.subject_kind = $2
+			      AND newest.subject_id = demand.subject_id
+			    ORDER BY newest.seq DESC
+			    LIMIT 1
+			  )
+			  AND jsonb_typeof(demand.payload) = 'object'
+			  AND demand.payload->>'work_item_id' = demand.subject_id::text
+			  AND demand.payload->>'state' = state_entry.state
+			  AND jsonb_typeof(demand.payload->'state_entered_at_unix') = 'number'
+			  AND COALESCE(demand.payload->>'state_entered_at_unix', '') ~ '^-?[0-9]+$'
+			  AND CASE
+			        WHEN jsonb_typeof(demand.payload->'state_entered_at_unix') = 'number'
+			         AND COALESCE(demand.payload->>'state_entered_at_unix', '') ~ '^-?[0-9]+$'
+			        THEN (demand.payload->>'state_entered_at_unix')::numeric
+			        ELSE NULL
+			      END =
+			      floor(extract(epoch FROM state_entry.occurred_at))
+			  AND (
+			    (
+			      demand.payload ? 'state_event_id'
+			      AND demand.payload->>'state_event_id' = state_entry.id::text
+			    )
+			    OR (
+			      NOT (demand.payload ? 'state_event_id')
+			      AND 1 = (
+			        SELECT count(*)
+			        FROM state_entries matching
+			        WHERE matching.subject_id = demand.subject_id
+			          AND matching.seq < demand.seq
+			          AND matching.state = demand.payload->>'state'
+			          AND floor(extract(epoch FROM matching.occurred_at)) =
+			              CASE
+			                WHEN jsonb_typeof(demand.payload->'state_entered_at_unix') = 'number'
+			                 AND COALESCE(demand.payload->>'state_entered_at_unix', '') ~ '^-?[0-9]+$'
+			                THEN (demand.payload->>'state_entered_at_unix')::numeric
+			                ELSE NULL
+			              END
+			      )
+			    )
+			  )
+			  AND current_entry.state = oi.state
+			  AND current_entry.occurred_at = oi.state_entered_at
+			  AND (
+			    state_entry.id = current_entry.id
+			    OR (
+			      current_entry.kind = 'work_item.transitioned'
+			      AND current_entry.state = 'running'
+			      AND current_entry.payload->>'dispatch_event_id' = demand.id::text
+			    )
+			  )
+		),
+		d AS (
+			SELECT DISTINCT ON (subject_id) id, seq, subject_id
+			FROM valid_demands
+			ORDER BY subject_id, seq DESC
+		)
+		SELECT d.id, d.seq FROM d
 		ORDER BY d.seq, d.subject_id`,
 		domain.EventDispatchRequested, domain.SubjectWorkItem,
 		[]string{

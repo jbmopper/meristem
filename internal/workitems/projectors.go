@@ -132,12 +132,12 @@ func (transitionedProjector) Apply(ctx context.Context, tx pgx.Tx, event domain.
 		SET state = $2,
 		    state_reason = NULLIF($3, ''),
 		    state_entered_at = CASE
-		        WHEN NULLIF($5, '') IS NULL OR $5 <> $2 THEN $4
+		        WHEN $5 THEN $4
 		        ELSE state_entered_at
 		    END,
 		    updated_at = $4
 		WHERE id = $1
-	`, event.SubjectID, payload.To, payload.Reason, event.OccurredAt, payload.From)
+	`, event.SubjectID, payload.To, payload.Reason, event.OccurredAt, effectiveFrom != to)
 	if err != nil {
 		return err
 	}

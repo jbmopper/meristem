@@ -65,7 +65,6 @@ func TestDispatchCarriesDemandRoutingMetadata(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Minute))
 	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemTriaged: 24 * time.Hour,
 	}}, &systemTok.Token.ID, func() time.Time { return now })
