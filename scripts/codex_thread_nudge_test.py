@@ -812,6 +812,7 @@ class NudgeTests(unittest.TestCase):
                     f'command="{mcp_command}",enabled_tools=['
                     '"work_items.append_event","work_items.get",'
                     '"work_items.get_assignment"],env={'
+                    f'CODEX_HOME="{environment["MERISTEM_LISTENER_CODEX_HOME"]}",'
                     f'CODEX_MERISTEM_TOKEN_FILE="{token}",'
                     f'MERISTEM_MCP_EXPECT_ACTOR_ID="{environment["MERISTEM_MCP_EXPECT_ACTOR_ID"]}",'
                     f'MERISTEM_MCP_LISTENER_ACTIVATION_ID="{environment["MERISTEM_MCP_LISTENER_ACTIVATION_ID"]}",'

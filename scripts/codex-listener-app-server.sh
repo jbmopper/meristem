@@ -121,5 +121,5 @@ if [[ "$PROBE_MODE" == "1" ]]; then
 fi
 exec "$CODEX_BIN" \
   --config 'features.apps=false' \
-  --config "mcp_servers.meristem_listener={command=\"$MERISTEM_COMMAND\",enabled_tools=[\"work_items.append_event\",\"work_items.get\",\"work_items.get_assignment\"],env={CODEX_MERISTEM_TOKEN_FILE=\"$TOKEN_FILE\",MERISTEM_MCP_EXPECT_ACTOR_ID=\"$EXPECTED_ACTOR_ID\",MERISTEM_MCP_LISTENER_ACTIVATION_ID=\"$ACTIVATION_ID\",MERISTEM_MCP_LISTENER_WORK_ITEM_ID=\"$WORK_ITEM_ID\",MERISTEM_MCP_LISTENER_ASSIGNMENT_EVENT_ID=\"$ASSIGNMENT_EVENT_ID\"}}" \
+  --config "mcp_servers.meristem_listener={command=\"$MERISTEM_COMMAND\",enabled_tools=[\"work_items.append_event\",\"work_items.get\",\"work_items.get_assignment\"],env={CODEX_HOME=\"$LISTENER_CODEX_HOME\",CODEX_MERISTEM_TOKEN_FILE=\"$TOKEN_FILE\",MERISTEM_MCP_EXPECT_ACTOR_ID=\"$EXPECTED_ACTOR_ID\",MERISTEM_MCP_LISTENER_ACTIVATION_ID=\"$ACTIVATION_ID\",MERISTEM_MCP_LISTENER_WORK_ITEM_ID=\"$WORK_ITEM_ID\",MERISTEM_MCP_LISTENER_ASSIGNMENT_EVENT_ID=\"$ASSIGNMENT_EVENT_ID\"}}" \
   app-server --stdio
