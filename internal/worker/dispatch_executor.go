@@ -52,7 +52,7 @@ func (w *Worker) executeReviewDispatches(ctx context.Context) (dispatchExecution
 		}
 		result.ReviewDispatchJobsClaimed++
 
-		started, err := service.StartReviewDispatch(ctx, job.ID, actor)
+		started, err := service.StartReviewDispatch(ctx, job.ID, job.Attempts, actor)
 		if err != nil {
 			return result, fmt.Errorf("start review dispatch job %s: %w", job.ID, err)
 		}

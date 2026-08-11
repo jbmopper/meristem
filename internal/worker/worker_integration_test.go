@@ -623,8 +623,8 @@ func TestScanOnceUsesPolicyPatienceForPreClaimCultivarWait(t *testing.T) {
 		t.Fatalf("create item: %v", err)
 	}
 
-	now := time.Date(2026, 6, 7, 13, 15, 0, 0, time.UTC)
-	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Minute))
+	stateEnteredAt, _ := workItemTimestamps(t, ctx, pool, item.ID)
+	now := stateEnteredAt.Add(2 * time.Minute)
 	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemTriaged: 24 * time.Hour,
 	}}, &systemTok.Token.ID, func() time.Time { return now })
@@ -672,8 +672,8 @@ func TestScanOnceRoutesPreClaimCultivarPatienceBreachToDispatch(t *testing.T) {
 		t.Fatalf("create item: %v", err)
 	}
 
-	now := time.Date(2026, 6, 7, 13, 45, 0, 0, time.UTC)
-	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Hour))
+	stateEnteredAt, _ := workItemTimestamps(t, ctx, pool, item.ID)
+	now := stateEnteredAt.Add(2 * time.Hour)
 	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemPlanned: time.Hour,
 	}}, &systemTok.Token.ID, func() time.Time { return now })
@@ -1012,17 +1012,228 @@ func TestScanDispatchRequestsEligibleItems(t *testing.T) {
 		t.Fatalf("dispatch events = %d, want 2", got)
 	}
 	defaultPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleDefault.ID)
-	if defaultPayload.WorkItemID != eligibleDefault.ID || defaultPayload.Cultivar != "checklist-worker@1" || defaultPayload.Capability != "work_items.execute_checks" || defaultPayload.State != string(domain.WorkItemTriaged) {
+	defaultStateEventID, err := dispatchStateEntryID(ctx, pool, eligibleDefault.ID)
+	if err != nil {
+		t.Fatalf("resolve default state event: %v", err)
+	}
+	if defaultPayload.WorkItemID != eligibleDefault.ID || defaultPayload.StateEventID != defaultStateEventID || defaultPayload.Cultivar != "checklist-worker@1" || defaultPayload.Capability != "work_items.execute_checks" || defaultPayload.State != string(domain.WorkItemTriaged) {
 		t.Fatalf("default dispatch payload = %+v", defaultPayload)
 	}
 	explicitPayload := dispatchPayloadForSubject(t, ctx, pool, eligibleExplicit.ID)
-	if explicitPayload.WorkItemID != eligibleExplicit.ID || explicitPayload.Cultivar != "convergence-scribe@1" || explicitPayload.Capability != "convergence.propose_checks" || explicitPayload.State != string(domain.WorkItemPlanned) {
+	explicitStateEventID, err := dispatchStateEntryID(ctx, pool, eligibleExplicit.ID)
+	if err != nil {
+		t.Fatalf("resolve explicit state event: %v", err)
+	}
+	if explicitPayload.WorkItemID != eligibleExplicit.ID || explicitPayload.StateEventID != explicitStateEventID || explicitPayload.Cultivar != "convergence-scribe@1" || explicitPayload.Capability != "convergence.propose_checks" || explicitPayload.State != string(domain.WorkItemPlanned) {
 		t.Fatalf("explicit dispatch payload = %+v", explicitPayload)
 	}
 	for _, skipped := range []uuid.UUID{checkless.ID, blocked.ID, running.ID} {
 		if got := countEventsForSubject(t, ctx, pool, skipped, domain.EventDispatchRequested); got != 0 {
 			t.Fatalf("dispatch events for skipped %s = %d, want 0", skipped, got)
 		}
+	}
+}
+
+// Dispatch selection is optimistic, but append is not: a lifecycle transition
+// after the scan must prevent a demand for the obsolete state epoch. This
+// covers both a changed state and a same-state re-entry with a newer
+// state_entered_at epoch.
+func TestAppendDispatchSuppressesStaleScannedCandidate(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-dispatch-stale-candidate")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	service := workitems.NewService(pool, writer)
+	createCandidate := func(title string) domain.WorkItem {
+		t.Helper()
+		item, err := service.Create(ctx, workitems.CreateInput{
+			Title:                      title,
+			State:                      domain.WorkItemTriaged,
+			SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+			HumanReviewStatus:          domain.HumanReviewWavedThrough,
+			Actor:                      systemTok.Token,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		return item
+	}
+	stateChanged := createCandidate("dispatch candidate changes state")
+	epochChanged := createCandidate("dispatch candidate re-enters state")
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	candidates, err := w.dispatchCandidates(ctx)
+	if err != nil {
+		t.Fatalf("scan dispatch candidates: %v", err)
+	}
+	byID := make(map[uuid.UUID]dispatchCandidate, len(candidates))
+	for _, candidate := range candidates {
+		byID[candidate.ID] = candidate
+	}
+	if _, ok := byID[stateChanged.ID]; !ok {
+		t.Fatalf("state-change candidate %s absent from scan", stateChanged.ID)
+	}
+	if _, ok := byID[epochChanged.ID]; !ok {
+		t.Fatalf("epoch-change candidate %s absent from scan", epochChanged.ID)
+	}
+
+	if _, err := service.Transition(ctx, stateChanged.ID, domain.WorkItemPlanned, "transition won before dispatch append", systemTok.Token); err != nil {
+		t.Fatalf("transition state-change candidate: %v", err)
+	}
+	if _, err := service.Transition(ctx, epochChanged.ID, domain.WorkItemPlanned, "leave scanned epoch", systemTok.Token); err != nil {
+		t.Fatalf("leave scanned epoch: %v", err)
+	}
+	reentered, err := service.Transition(ctx, epochChanged.ID, domain.WorkItemTriaged, "re-enter state with new epoch", systemTok.Token)
+	if err != nil {
+		t.Fatalf("re-enter scanned state: %v", err)
+	}
+	if reentered.State != byID[epochChanged.ID].State || reentered.StateEnteredAt.Equal(byID[epochChanged.ID].StateEnteredAt) {
+		t.Fatalf("re-entry did not create the intended same-state/new-epoch fixture: current=%s/%s scanned=%s/%s",
+			reentered.State, reentered.StateEnteredAt, byID[epochChanged.ID].State, byID[epochChanged.ID].StateEnteredAt)
+	}
+
+	route := dispatchRoute{Cultivar: "checklist-worker@1", Capability: "work_items.execute_checks"}
+	for _, id := range []uuid.UUID{stateChanged.ID, epochChanged.ID} {
+		fresh, err := w.appendDispatch(ctx, byID[id], route, dispatchReasonAgentAttentionRequested)
+		if err != nil {
+			t.Fatalf("append stale dispatch for %s: %v", id, err)
+		}
+		if fresh {
+			t.Fatalf("stale dispatch for %s reported fresh", id)
+		}
+		if got := countEventsForSubject(t, ctx, pool, id, domain.EventDispatchRequested); got != 0 {
+			t.Fatalf("stale candidate %s appended %d dispatch events, want 0", id, got)
+		}
+	}
+}
+
+func TestAppendDispatchSuppressesNewGenerationWhileAssigned(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	root, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "assigned-dispatch-root", IsRoot: true, Source: domain.SourceHuman,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	system, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "assigned-dispatch-system", Source: domain.SourceSystem, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create system: %v", err)
+	}
+	admin, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "assigned-dispatch-admin", Source: domain.SourceHuman,
+		Scopes: []string{access.ScopeListenersAdmin}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create listener admin: %v", err)
+	}
+	principal, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{
+		Name: "assigned-dispatch-principal", Source: domain.SourceAgent,
+		Scopes: []string{access.ScopeWorkItemsReadAll, access.ScopeWorkItemsWriteAll}, Actor: &root.Token,
+	})
+	if err != nil {
+		t.Fatalf("create listener principal: %v", err)
+	}
+
+	seedChecklistWorkerCultivar(t, ctx, pool, writer, system.Token)
+	listenerSvc := listeners.NewService(pool, writer)
+	reg, err := listenerSvc.Register(ctx, listeners.RegisterInput{
+		Name: "assigned-dispatch-listener", PrincipalTokenID: principal.Token.ID,
+		Capabilities: []string{"work_items.execute_checks"}, Actor: admin.Token,
+	})
+	if err != nil {
+		t.Fatalf("register listener: %v", err)
+	}
+	reg, err = listenerSvc.SetPolicy(ctx, reg.ID, listeners.SetPolicyInput{
+		Policy: listeners.Policy{Capabilities: []string{"work_items.execute_checks"}, MaxConcurrentAssignments: 1},
+		Actor:  admin.Token,
+	})
+	if err != nil {
+		t.Fatalf("set listener policy: %v", err)
+	}
+
+	workSvc := workitems.NewService(pool, writer)
+	item, err := workSvc.Create(ctx, workitems.CreateInput{
+		Title:                      "assigned demand suppresses payload generation",
+		State:                      domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("create work item: %v", err)
+	}
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &system.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	result, err := w.scanDispatch(ctx)
+	if err != nil || result.DispatchesRequested != 1 {
+		t.Fatalf("initial dispatch = %+v (%v), want one fresh demand", result, err)
+	}
+	var demandID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM events
+		WHERE subject_kind=$1 AND subject_id=$2 AND kind=$3
+		ORDER BY seq DESC LIMIT 1`,
+		domain.SubjectWorkItem, item.ID, domain.EventDispatchRequested,
+	).Scan(&demandID); err != nil {
+		t.Fatalf("load initial demand: %v", err)
+	}
+	assignment, err := listenerSvc.ClaimDemand(ctx, reg.ID, listeners.ClaimDemandInput{
+		DemandEventID: demandID, ObservedPolicyEventID: reg.PolicyEventID, Actor: principal.Token,
+	})
+	if err != nil {
+		t.Fatalf("claim initial demand: %v", err)
+	}
+
+	stateEventID, err := dispatchStateEntryID(ctx, pool, item.ID)
+	if err != nil {
+		t.Fatalf("resolve dispatch state entry: %v", err)
+	}
+	candidate := dispatchCandidate{ID: item.ID, State: item.State, StateEnteredAt: item.StateEnteredAt, StateEventID: stateEventID}
+	route := dispatchRoute{Cultivar: "checklist-worker@1", Capability: "work_items.execute_checks"}
+	fresh, err := w.appendDispatch(ctx, candidate, route, "payload-contract-v2")
+	if err != nil {
+		t.Fatalf("append changed payload while assigned: %v", err)
+	}
+	if fresh {
+		t.Fatal("changed same-epoch payload appended while assignment holder was projected")
+	}
+	if got := countEventsForSubject(t, ctx, pool, item.ID, domain.EventDispatchRequested); got != 1 {
+		t.Fatalf("dispatch events while assigned = %d, want 1", got)
+	}
+
+	if _, err := workSvc.Yield(ctx, item.ID, assignment.AssignmentEventID, principal.Token); err != nil {
+		t.Fatalf("yield assignment: %v", err)
+	}
+	fresh, err = w.appendDispatch(ctx, candidate, route, "payload-contract-v2")
+	if err != nil {
+		t.Fatalf("append changed payload after release: %v", err)
+	}
+	if !fresh {
+		t.Fatal("changed same-epoch payload did not append after assignment release")
+	}
+	if got := countEventsForSubject(t, ctx, pool, item.ID, domain.EventDispatchRequested); got != 2 {
+		t.Fatalf("dispatch events after release = %d, want 2", got)
 	}
 }
 
@@ -2249,6 +2460,7 @@ func patiencePayloadForSubject(t *testing.T, ctx context.Context, pool *pgxpool.
 type dispatchPayload struct {
 	WorkItemID           uuid.UUID `json:"work_item_id"`
 	State                string    `json:"state"`
+	StateEventID         uuid.UUID `json:"state_event_id"`
 	StateEnteredAtUnix   int64     `json:"state_entered_at_unix"`
 	Cultivar             string    `json:"cultivar"`
 	Capability           string    `json:"capability"`

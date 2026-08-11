@@ -77,8 +77,9 @@ const (
 	// EventDispatchRequested records that the deterministic worker observed a
 	// work_item ready for agent attention and placed it on the dispatch feed.
 	// The subject is the target work_item; the payload names the handling
-	// cultivar and the state epoch so re-scans converge on one dispatch entry
-	// per item/state/cultivar combination.
+	// cultivar and exact state-entry event. Re-scans with unchanged routing
+	// collapse; routing changes append causally linked replacement generations,
+	// of which only the latest valid generation is eligible.
 	EventDispatchRequested = "dispatch.requested"
 
 	// EventPolicyProfileSwitched records an operator switching the active

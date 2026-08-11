@@ -9,13 +9,16 @@ package main
 // is observed.
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,11 +31,18 @@ import (
 	"github.com/jbmopper/meristem/internal/auth"
 	"github.com/jbmopper/meristem/internal/domain"
 	"github.com/jbmopper/meristem/internal/events"
+	"github.com/jbmopper/meristem/internal/jobqueue"
 	"github.com/jbmopper/meristem/internal/listeneractivation"
 	"github.com/jbmopper/meristem/internal/listeners"
 	"github.com/jbmopper/meristem/internal/storage"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
+
+type supervisorRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f supervisorRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 type supervisorFixture struct {
 	ctx       context.Context
@@ -45,6 +55,7 @@ type supervisorFixture struct {
 	principal auth.CreateTokenResult
 	admin     auth.CreateTokenResult
 	root      auth.CreateTokenResult
+	system    auth.CreateTokenResult
 	server    *httptest.Server
 	sup       *listenerSupervisor
 }
@@ -110,7 +121,7 @@ func newSupervisorFixture(t *testing.T, name string) *supervisorFixture {
 	t.Cleanup(server.Close)
 	f := &supervisorFixture{
 		ctx: ctx, pool: pool, writer: writer, workSvc: workSvc, listeners: listenerSvc,
-		tree: tree, principal: principal, admin: admin, root: root, server: server,
+		tree: tree, principal: principal, admin: admin, root: root, system: system, server: server,
 	}
 	f.reg, err = listenerSvc.Get(ctx, reg.ID)
 	if err != nil {
@@ -146,17 +157,29 @@ func (f *supervisorFixture) spawnDemand(t *testing.T, title string) domain.WorkI
 		t.Fatalf("begin demand tx: %v", err)
 	}
 	defer func() { _ = tx.Rollback(f.ctx) }()
+	stateEntry, err := jobqueue.ResolveCurrentStateEntry(f.ctx, tx, item.ID)
+	if err != nil {
+		t.Fatalf("resolve current state entry for %s: %v", title, err)
+	}
+	if stateEntry.State != item.State || !stateEntry.OccurredAt.Equal(item.StateEnteredAt) {
+		t.Fatalf("state entry for %s = %s/%s, want projection %s/%s", title,
+			stateEntry.State, stateEntry.OccurredAt, item.State, item.StateEnteredAt)
+	}
 	if _, _, err := f.writer.Append(f.ctx, tx, events.Spec{
-		SubjectKind: domain.SubjectWorkItem,
-		SubjectID:   item.ID,
-		Kind:        domain.EventDispatchRequested,
-		Source:      domain.SourceSystem,
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    item.ID,
+		Kind:         domain.EventDispatchRequested,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &f.system.Token.ID,
 		Payload: map[string]any{
-			"work_item_id":    item.ID,
-			"capability":      "review.complementary",
-			"cultivar":        "review.complementary",
-			"origin_token_id": f.root.Token.ID,
-			"reason":          "supervisor-fixture",
+			"work_item_id":          item.ID,
+			"state":                 item.State,
+			"state_event_id":        stateEntry.ID,
+			"state_entered_at_unix": stateEntry.OccurredAt.Unix(),
+			"capability":            "review.complementary",
+			"cultivar":              "review.complementary",
+			"origin_token_id":       f.root.Token.ID,
+			"reason":                "supervisor-fixture",
 		},
 	}); err != nil {
 		t.Fatalf("append demand for %s: %v", title, err)
@@ -165,6 +188,44 @@ func (f *supervisorFixture) spawnDemand(t *testing.T, title string) domain.WorkI
 		t.Fatalf("commit demand: %v", err)
 	}
 	return item
+}
+
+func (f *supervisorFixture) appendReplacementDemand(t *testing.T, item domain.WorkItem, previous uuid.UUID) uuid.UUID {
+	t.Helper()
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin replacement demand tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	stateEntry, err := jobqueue.ResolveCurrentStateEntry(f.ctx, tx, item.ID)
+	if err != nil {
+		t.Fatalf("resolve replacement state entry: %v", err)
+	}
+	id, _, err := f.writer.Append(f.ctx, tx, events.Spec{
+		SubjectKind:  domain.SubjectWorkItem,
+		SubjectID:    item.ID,
+		Kind:         domain.EventDispatchRequested,
+		Source:       domain.SourceSystem,
+		ActorTokenID: &f.system.Token.ID,
+		Payload: map[string]any{
+			"work_item_id":                 item.ID,
+			"state":                        item.State,
+			"state_event_id":               stateEntry.ID,
+			"state_entered_at_unix":        stateEntry.OccurredAt.Unix(),
+			"capability":                   "review.complementary",
+			"cultivar":                     "review.complementary",
+			"origin_token_id":              f.root.Token.ID,
+			"reason":                       "supervisor-race-replacement",
+			"supersedes_dispatch_event_id": previous,
+		},
+	})
+	if err != nil {
+		t.Fatalf("append replacement demand: %v", err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit replacement demand: %v", err)
+	}
+	return id
 }
 
 func (f *supervisorFixture) assignedEventCount(t *testing.T, itemID uuid.UUID) int {
@@ -221,6 +282,87 @@ func TestSupervisorRestartDerivationIntegration(t *testing.T) {
 	}
 	if got := f.assignedEventCount(t, second.ID); got != 0 {
 		t.Fatalf("focused restart claimed new demand: %d events on second", got)
+	}
+}
+
+// A demand snapshot is optimistic. If a replacement generation becomes
+// durable after the snapshot but before the POST claim, the old claim returns
+// a pure 409. The production idle loop must stay alive, observe the replacement
+// on its demand stream, re-snapshot, and claim only that newest generation.
+func TestSupervisorSkipsSupersededSnapshotAndClaimsReplacementIntegration(t *testing.T) {
+	f := newSupervisorFixture(t, "sup-superseded-snapshot")
+	item := f.spawnDemand(t, "superseded-snapshot-demand")
+
+	var oldDemandID uuid.UUID
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT id FROM events
+		WHERE subject_kind=$1 AND subject_id=$2 AND kind=$3
+		ORDER BY seq DESC LIMIT 1
+	`, domain.SubjectWorkItem, item.ID, domain.EventDispatchRequested).Scan(&oldDemandID); err != nil {
+		t.Fatalf("load original demand: %v", err)
+	}
+
+	base := f.server.Client().Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	var (
+		once          sync.Once
+		replacementID uuid.UUID
+	)
+	f.sup.http = &http.Client{Transport: supervisorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := base.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/demand/candidates") {
+			return resp, nil
+		}
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			_ = resp.Body.Close()
+			return nil, err
+		}
+		if err := resp.Body.Close(); err != nil {
+			return nil, err
+		}
+		once.Do(func() {
+			replacementID = f.appendReplacementDemand(t, item, oldDemandID)
+		})
+		resp.Body = io.NopCloser(bytes.NewReader(raw))
+		resp.ContentLength = int64(len(raw))
+		return resp, nil
+	})}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reg, err := f.sup.getListener(ctx)
+	if err != nil {
+		t.Fatalf("read listener before superseded snapshot: %v", err)
+	}
+	claimed, err := f.sup.idle(ctx, reg)
+	if err != nil {
+		t.Fatalf("idle across superseded snapshot: %v", err)
+	}
+	if claimed == nil || claimed.WorkItemID != item.ID {
+		t.Fatalf("claimed = %+v, want replacement assignment for %s", claimed, item.ID)
+	}
+	if replacementID == uuid.Nil || replacementID == oldDemandID {
+		t.Fatalf("replacement demand = %s, want nonzero id distinct from %s", replacementID, oldDemandID)
+	}
+	var assignedDemandID uuid.UUID
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT demand_event_id
+		FROM work_item_assignment_state
+		WHERE work_item_id=$1
+	`, item.ID).Scan(&assignedDemandID); err != nil {
+		t.Fatalf("load assigned demand generation: %v", err)
+	}
+	if assignedDemandID != replacementID {
+		t.Fatalf("assigned demand = %s, want newest replacement %s (old %s)", assignedDemandID, replacementID, oldDemandID)
+	}
+	if got := f.assignedEventCount(t, item.ID); got != 1 {
+		t.Fatalf("assigned events after stale-snapshot retry = %d, want 1", got)
 	}
 }
 

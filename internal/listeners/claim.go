@@ -16,12 +16,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/jbmopper/meristem/internal/access"
 	"github.com/jbmopper/meristem/internal/domain"
+	"github.com/jbmopper/meristem/internal/jobqueue"
 	"github.com/jbmopper/meristem/internal/workitems"
 )
 
@@ -84,6 +86,20 @@ func (s *Service) ClaimDemand(ctx context.Context, listenerID uuid.UUID, in Clai
 	if err != nil {
 		return domain.WorkItemAssignment{}, err
 	}
+	binding := workitems.ClaimBinding{
+		ListenerID:    listenerID,
+		DemandEventID: in.DemandEventID,
+		PolicyEventID: *reg.PolicyEventID,
+	}
+	_, exactRetry, err := s.workItems.ExistingExactClaimInTx(ctx, tx, env.WorkItemID, in.Actor, binding)
+	if err != nil {
+		return domain.WorkItemAssignment{}, err
+	}
+	if !exactRetry {
+		if err := validateCurrentDemand(ctx, tx, in.DemandEventID, env.WorkItemID); err != nil {
+			return domain.WorkItemAssignment{}, err
+		}
+	}
 	if !EligibleDemand(reg.Policy, env) {
 		return domain.WorkItemAssignment{}, fmt.Errorf("%w: demand %s", ErrDemandNotEligible, in.DemandEventID)
 	}
@@ -115,12 +131,28 @@ func (s *Service) ClaimDemand(ctx context.Context, listenerID uuid.UUID, in Clai
 	if active >= reg.Policy.MaxConcurrentAssignments {
 		return domain.WorkItemAssignment{}, fmt.Errorf("%w: %d active of %d", ErrListenerAtCapacity, active, reg.Policy.MaxConcurrentAssignments)
 	}
-
-	binding := workitems.ClaimBinding{
-		ListenerID:    listenerID,
-		DemandEventID: in.DemandEventID,
-		PolicyEventID: *reg.PolicyEventID,
+	if exactRetry {
+		// The first exact-binding check is intentionally before current-demand
+		// validation so a retry can return ownership after the assignee advances
+		// lifecycle state. Recheck its wall-clock lease immediately before the
+		// final reduction: if it expired while policy/authority/capacity were
+		// evaluated, it is no longer an idempotent return. Validate the demand
+		// before ClaimInTx is allowed to release and mint replacement ownership.
+		existing, stillExact, err := s.workItems.ExistingExactClaimInTx(ctx, tx, env.WorkItemID, in.Actor, binding)
+		if err != nil {
+			return domain.WorkItemAssignment{}, err
+		}
+		if stillExact {
+			if err := tx.Commit(ctx); err != nil {
+				return domain.WorkItemAssignment{}, err
+			}
+			return existing, nil
+		}
+		if err := validateCurrentDemand(ctx, tx, in.DemandEventID, env.WorkItemID); err != nil {
+			return domain.WorkItemAssignment{}, err
+		}
 	}
+
 	assignment, budgetErr, err := s.workItems.ClaimInTx(ctx, tx, env.WorkItemID, in.Actor, &binding)
 	if err != nil {
 		return domain.WorkItemAssignment{}, err
@@ -132,4 +164,67 @@ func (s *Service) ClaimDemand(ctx context.Context, listenerID uuid.UUID, in Clai
 		return domain.WorkItemAssignment{}, budgetErr
 	}
 	return assignment, nil
+}
+
+// validateCurrentDemand closes the optimistic-selection race at the claim
+// boundary. A supervisor may have selected a demand before a lifecycle
+// transition or before a newer dispatch payload generation was appended; it
+// must not turn that stale immutable fact into a fresh assignment.
+//
+// The work-item row is locked so lifecycle state and state_entered_at cannot
+// change between this reduction and ClaimInTx's assignment append. events.seq
+// is compared only within this node's event log: a work item's authoritative
+// events are appended by its home node, and seq is deliberately not a fleet-
+// global ordering primitive.
+func validateCurrentDemand(ctx context.Context, tx pgx.Tx, demandEventID, workItemID uuid.UUID) error {
+	var (
+		currentState     string
+		currentEnteredAt time.Time
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT state, state_entered_at
+		FROM work_items
+		WHERE id = $1
+		FOR UPDATE`, workItemID).Scan(&currentState, &currentEnteredAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: demand %s names missing work item %s", ErrDemandNotEligible, demandEventID, workItemID)
+	}
+	if err != nil {
+		return fmt.Errorf("listeners: lock demand work item: %w", err)
+	}
+
+	identity, err := jobqueue.ResolveDispatchIdentity(ctx, tx, demandEventID)
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, jobqueue.ErrInvalidDispatchDemand) {
+		return fmt.Errorf("%w: demand %s has invalid state-entry identity", ErrInvalidRequest, demandEventID)
+	}
+	if err != nil {
+		return fmt.Errorf("listeners: resolve demand identity: %w", err)
+	}
+	if identity.WorkItemID != workItemID {
+		return fmt.Errorf("%w: demand %s names a different work item", ErrInvalidRequest, demandEventID)
+	}
+	currentEntry, err := jobqueue.ResolveCurrentStateEntry(ctx, tx, workItemID)
+	if err != nil {
+		return fmt.Errorf("listeners: resolve current state entry: %w", err)
+	}
+	if string(currentEntry.State) != currentState || !currentEntry.OccurredAt.Equal(currentEnteredAt) {
+		return fmt.Errorf("%w: work item %s lifecycle projection disagrees with its event log", ErrDemandNotEligible, workItemID)
+	}
+	latest, err := jobqueue.LatestValidDispatch(ctx, tx, workItemID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: work item %s has no current dispatch demand", ErrDemandNotEligible, workItemID)
+	}
+	if errors.Is(err, jobqueue.ErrInvalidDispatchDemand) {
+		return fmt.Errorf("%w: work item %s has a malformed latest dispatch demand", ErrDemandNotEligible, workItemID)
+	}
+	if err != nil {
+		return fmt.Errorf("listeners: resolve latest demand: %w", err)
+	}
+	if latest.ID != demandEventID {
+		return fmt.Errorf("%w: demand %s was superseded by %s", ErrDemandNotEligible, demandEventID, latest.ID)
+	}
+	if identity.StateEntryID != currentEntry.ID && !jobqueue.CausallyAdmitsDemand(currentEntry, demandEventID) {
+		return fmt.Errorf("%w: demand %s belongs to state entry %s; current entry is %s", ErrDemandNotEligible, demandEventID, identity.StateEntryID, currentEntry.ID)
+	}
+	return nil
 }
