@@ -1034,6 +1034,45 @@ func TestScanDispatchRequestsEligibleItems(t *testing.T) {
 	}
 }
 
+func TestDispatchCandidateProjectionDriftFailsLoudly(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "worker-dispatch-projection-drift")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	item, err := workitems.NewService(pool, writer).Create(ctx, workitems.CreateInput{
+		Title:                      "dispatch projection drift",
+		State:                      domain.WorkItemTriaged,
+		SuggestedConvergenceChecks: []string{"cmd:go test ./..."},
+		HumanReviewStatus:          domain.HumanReviewWavedThrough,
+		Actor:                      systemTok.Token,
+	})
+	if err != nil {
+		t.Fatalf("create dispatchable item: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE work_items SET state_entered_at = state_entered_at + interval '1 second' WHERE id = $1`, item.ID); err != nil {
+		t.Fatalf("corrupt lifecycle projection: %v", err)
+	}
+
+	w, err := New(pool, writer, Budgets{ByState: map[domain.WorkItemState]time.Duration{}}, &systemTok.Token.ID, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = w.scanDispatch(ctx)
+	if err == nil || !strings.Contains(err.Error(), "lifecycle projection disagrees with event log") {
+		t.Fatalf("scanDispatch error = %v, want lifecycle projection disagreement", err)
+	}
+	if got := countEventsForSubject(t, ctx, pool, item.ID, domain.EventDispatchRequested); got != 0 {
+		t.Fatalf("dispatch events after projection drift = %d, want 0", got)
+	}
+}
+
 // Dispatch selection is optimistic, but append is not: a lifecycle transition
 // after the scan must prevent a demand for the obsolete state epoch. This
 // covers both a changed state and a same-state re-entry with a newer
@@ -1655,8 +1694,7 @@ func TestScanOnceEscalationAttentionChildrenDoNotBreed(t *testing.T) {
 		t.Fatalf("create item: %v", err)
 	}
 
-	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
-	setWorkItemTimestamps(t, ctx, pool, item.ID, now.Add(-2*time.Hour))
+	now := item.StateEnteredAt.Add(2 * time.Hour)
 	budgets := Budgets{ByState: map[domain.WorkItemState]time.Duration{
 		domain.WorkItemCaptured: time.Hour,
 		domain.WorkItemBlocked:  time.Hour,
@@ -1677,9 +1715,19 @@ func TestScanOnceEscalationAttentionChildrenDoNotBreed(t *testing.T) {
 	}
 	childID := singleChildForParent(t, ctx, pool, item.ID)
 
-	secondNow := now.Add(2 * time.Hour)
-	setWorkItemTimestamps(t, ctx, pool, item.ID, secondNow.Add(-2*time.Hour))
-	setWorkItemTimestamps(t, ctx, pool, childID, secondNow.Add(-2*time.Hour))
+	parentAfterFirst, err := service.Get(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("get parent after first scan: %v", err)
+	}
+	childAfterFirst, err := service.Get(ctx, childID)
+	if err != nil {
+		t.Fatalf("get attention child after first scan: %v", err)
+	}
+	secondBase := parentAfterFirst.StateEnteredAt
+	if childAfterFirst.StateEnteredAt.After(secondBase) {
+		secondBase = childAfterFirst.StateEnteredAt
+	}
+	secondNow := secondBase.Add(2 * time.Hour)
 	secondWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return secondNow })
 	if err != nil {
 		t.Fatalf("New second: %v", err)
@@ -1698,7 +1746,7 @@ func TestScanOnceEscalationAttentionChildrenDoNotBreed(t *testing.T) {
 		t.Fatalf("second patience escalations = %d, want 1 for the new blocked-state epoch", second.PatienceEscalationsRequested)
 	}
 
-	thirdNow := now.Add(4 * time.Hour)
+	thirdNow := secondNow.Add(2 * time.Hour)
 	thirdWorker, err := New(pool, writer, budgets, &systemTok.Token.ID, func() time.Time { return thirdNow })
 	if err != nil {
 		t.Fatalf("New third: %v", err)

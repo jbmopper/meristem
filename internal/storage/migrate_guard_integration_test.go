@@ -70,3 +70,40 @@ func TestMigrateWithCheckStopsBeforeNextMigration(t *testing.T) {
 		t.Fatalf("applied migrations = %v, want [1]", applied)
 	}
 }
+
+func TestRequireMigrationsCurrentChecksExactVersionAndName(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t, "migration_current_fence")
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := storage.RequireMigrationsCurrent(ctx, pool); err != nil {
+		t.Fatalf("current database rejected: %v", err)
+	}
+
+	var version int64
+	var name string
+	if err := pool.QueryRow(ctx, `
+		SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1
+	`).Scan(&version, &name); err != nil {
+		t.Fatalf("read migration head: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET name=name || '_collision' WHERE version=$1`, version); err != nil {
+		t.Fatalf("poison migration name: %v", err)
+	}
+	if err := storage.RequireMigrationsCurrent(ctx, pool); !errors.Is(err, storage.ErrMigrationsNotCurrent) {
+		t.Fatalf("wrong-name error=%v, want ErrMigrationsNotCurrent", err)
+	}
+	if err := storage.Migrate(ctx, pool, nil); !errors.Is(err, storage.ErrMigrationsNotCurrent) {
+		t.Fatalf("migrate collision error=%v, want ErrMigrationsNotCurrent", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET name=$2 WHERE version=$1`, version, name); err != nil {
+		t.Fatalf("restore migration name: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM schema_migrations WHERE version=$1`, version); err != nil {
+		t.Fatalf("remove migration head: %v", err)
+	}
+	if err := storage.RequireMigrationsCurrent(ctx, pool); !errors.Is(err, storage.ErrMigrationsNotCurrent) {
+		t.Fatalf("missing-head error=%v, want ErrMigrationsNotCurrent", err)
+	}
+}

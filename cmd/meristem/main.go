@@ -207,6 +207,10 @@ func openProfileAwarePool(ctx context.Context, logger *slog.Logger) (*pgxpool.Po
 	if err != nil {
 		return nil, policyprofile.Active{}, err
 	}
+	if err := storage.RequireMigrationsCurrent(ctx, bootstrapPool); err != nil {
+		bootstrapPool.Close()
+		return nil, policyprofile.Active{}, fmt.Errorf("database startup fence: %w; run `meristem migrate` with this build before starting authoritative runtimes", err)
+	}
 	active, err := policyprofile.NewService(bootstrapPool, nil).Active(ctx)
 	bootstrapPool.Close()
 	if err != nil {

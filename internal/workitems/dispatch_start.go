@@ -160,18 +160,30 @@ func (s *Service) StartReviewDispatch(ctx context.Context, jobID uuid.UUID, expe
 	// A malformed later immutable fact shadows older demand until the producer
 	// appends a newer causally-linked repair generation.
 	identity, err := jobqueue.ResolveDispatchIdentity(ctx, tx, jobID)
-	if err != nil || identity.WorkItemID != workItemID || identity.State != payload.State ||
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, jobqueue.ErrInvalidDispatchDemand) {
+			return finishReviewDispatch(ctx, tx, result, ReviewDispatchCanceled, "canceled")
+		}
+		return ReviewDispatchResult{}, fmt.Errorf("workitems: resolve review dispatch identity: %w", err)
+	}
+	if identity.WorkItemID != workItemID || identity.State != payload.State ||
 		identity.StateEnteredAt.Unix() != *payload.StateEnteredAtUnix ||
 		(identity.Explicit && (payload.StateEventID == nil || *payload.StateEventID != identity.StateEntryID)) ||
 		(!identity.Explicit && payload.StateEventID != nil) {
 		return finishReviewDispatch(ctx, tx, result, ReviewDispatchCanceled, "canceled")
 	}
 	currentEntry, err := jobqueue.ResolveCurrentStateEntry(ctx, tx, workItemID)
-	if err != nil || currentEntry.State != current.State || !currentEntry.OccurredAt.Equal(current.StateEnteredAt) {
-		return finishReviewDispatch(ctx, tx, result, ReviewDispatchCanceled, "canceled")
+	if err != nil {
+		return ReviewDispatchResult{}, fmt.Errorf("workitems: resolve current review state entry: %w", err)
+	}
+	if currentEntry.State != current.State || !currentEntry.OccurredAt.Equal(current.StateEnteredAt) {
+		return ReviewDispatchResult{}, fmt.Errorf("workitems: work item %s lifecycle projection disagrees with event log: projection=%s/%s event=%s/%s", workItemID, current.State, current.StateEnteredAt.UTC().Format(time.RFC3339Nano), currentEntry.State, currentEntry.OccurredAt.UTC().Format(time.RFC3339Nano))
 	}
 	latest, err := jobqueue.LatestValidDispatch(ctx, tx, workItemID)
-	if err != nil || latest.ID != jobID {
+	if err != nil {
+		return ReviewDispatchResult{}, fmt.Errorf("workitems: resolve latest review dispatch: %w", err)
+	}
+	if latest.ID != jobID {
 		return finishReviewDispatch(ctx, tx, result, ReviewDispatchCanceled, "canceled")
 	}
 	done, err := jobqueue.DispatchDemandDone(ctx, tx, identity)

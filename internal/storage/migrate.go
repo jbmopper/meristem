@@ -26,6 +26,8 @@ const (
 	DirectionDown
 )
 
+var ErrMigrationsNotCurrent = errors.New("storage: database migrations are not current")
+
 // migrationFilenamePattern matches "0001_name.up.sql" or "0001_name.down.sql".
 // Versions are 4-digit zero-padded so lexicographic and numeric order agree,
 // but we still parse to int for safety.
@@ -51,7 +53,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error
 // at every durable mutation boundary. A failed check prevents a new migration
 // transaction from starting or rolls back the transaction before commit.
 func MigrateWithCheck(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, check func() error) error {
-	return migrate(ctx, pool, logger, migrations.FS, DirectionUp, check)
+	if err := migrate(ctx, pool, logger, migrations.FS, DirectionUp, check); err != nil {
+		return err
+	}
+	return RequireMigrationsCurrent(ctx, pool)
 }
 
 // MigrateDown rolls back the most recently applied migration. Intended for
@@ -64,6 +69,58 @@ func MigrateDown(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) e
 // enforcing check at the same durable mutation boundaries as MigrateWithCheck.
 func MigrateDownWithCheck(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, check func() error) error {
 	return migrate(ctx, pool, logger, migrations.FS, DirectionDown, check)
+}
+
+// RequireMigrationsCurrent is the read-only startup fence for authoritative
+// runtimes. It compares both version and name so two branches that reuse a
+// migration number cannot make an old or incompatible schema look current.
+// The migrate command applies pending files before calling this fence; startup
+// paths call it read-only before opening an authoritative runtime.
+func RequireMigrationsCurrent(ctx context.Context, pool *pgxpool.Pool) error {
+	files, err := loadMigrationFiles(migrations.FS)
+	if err != nil {
+		return err
+	}
+	rows, err := pool.Query(ctx, `SELECT version, name FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("%w: read schema_migrations: %v", ErrMigrationsNotCurrent, err)
+	}
+	defer rows.Close()
+	applied := make(map[int64]string)
+	for rows.Next() {
+		var version int64
+		var name string
+		if err := rows.Scan(&version, &name); err != nil {
+			return fmt.Errorf("%w: scan schema_migrations: %v", ErrMigrationsNotCurrent, err)
+		}
+		applied[version] = name
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("%w: iterate schema_migrations: %v", ErrMigrationsNotCurrent, err)
+	}
+
+	expected := make(map[int64]string)
+	for _, file := range files {
+		if !file.Up {
+			continue
+		}
+		expected[file.Version] = file.Name
+		if got, ok := applied[file.Version]; !ok || got != file.Name {
+			return fmt.Errorf("%w: expected %04d_%s, found %q", ErrMigrationsNotCurrent, file.Version, file.Name, got)
+		}
+	}
+	versions := make([]int64, 0, len(applied))
+	for version := range applied {
+		versions = append(versions, version)
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	for _, version := range versions {
+		name := applied[version]
+		if got, ok := expected[version]; !ok || got != name {
+			return fmt.Errorf("%w: database has unknown %04d_%s", ErrMigrationsNotCurrent, version, name)
+		}
+	}
+	return nil
 }
 
 func migrate(

@@ -100,57 +100,19 @@ func (w *Worker) resolveDispatchRoute(ctx context.Context, ref string) (dispatch
 
 func (w *Worker) dispatchCandidates(ctx context.Context) ([]dispatchCandidate, error) {
 	rows, err := w.pool.Query(ctx, `
-		SELECT wi.id, wi.state, wi.state_entered_at, state_entry.id, created.payload
+		SELECT wi.id, wi.state, wi.state_entered_at, created.payload
 		FROM work_items wi
-		JOIN LATERAL (
-			SELECT lifecycle.id,
-			       lifecycle.occurred_at,
-			       CASE
-			         WHEN lifecycle.kind = $2
-			         THEN COALESCE(NULLIF(lifecycle.payload->>'state', ''), 'captured')
-			         ELSE NULLIF(lifecycle.payload->>'to', '')
-			       END AS state
-			FROM events lifecycle
-			WHERE lifecycle.subject_kind = $1
-			  AND lifecycle.subject_id = wi.id
-			  AND lifecycle.kind IN ($2, $5)
-			  AND (
-			    lifecycle.kind = $2
-			    OR (
-			      NULLIF(lifecycle.payload->>'to', '') IS NOT NULL
-			      AND NULLIF(lifecycle.payload->>'to', '') IS DISTINCT FROM (
-			        SELECT CASE
-			                 WHEN prior.kind = $2
-			                 THEN COALESCE(NULLIF(prior.payload->>'state', ''), 'captured')
-			                 ELSE NULLIF(prior.payload->>'to', '')
-			               END
-			        FROM events prior
-			        WHERE prior.subject_kind = lifecycle.subject_kind
-			          AND prior.subject_id = lifecycle.subject_id
-			          AND prior.kind IN ($2, $5)
-			          AND prior.seq < lifecycle.seq
-			          AND jsonb_typeof(prior.payload) = 'object'
-			        ORDER BY prior.seq DESC
-			        LIMIT 1
-			      )
-			    )
-			  )
-			ORDER BY lifecycle.seq DESC
-			LIMIT 1
-		) state_entry ON true
 		LEFT JOIN events created
 			ON created.subject_kind = $1
 			AND created.subject_id = wi.id
 			AND created.kind = $2
 		WHERE wi.state = ANY($3::text[])
-			AND state_entry.state = wi.state
-			AND state_entry.occurred_at = wi.state_entered_at
 			AND wi.human_review_status <> $4
 			AND jsonb_array_length(wi.suggested_convergence_checks) > 0
 		ORDER BY wi.updated_at ASC
 	`, domain.SubjectWorkItem, domain.EventWorkItemCreated,
 		[]string{string(domain.WorkItemCaptured), string(domain.WorkItemTriaged), string(domain.WorkItemPlanned)},
-		string(domain.HumanReviewBlocked), domain.EventWorkItemTransitioned)
+		string(domain.HumanReviewBlocked))
 	if err != nil {
 		return nil, fmt.Errorf("query dispatch candidates: %w", err)
 	}
@@ -161,7 +123,7 @@ func (w *Worker) dispatchCandidates(ctx context.Context) ([]dispatchCandidate, e
 		var c dispatchCandidate
 		var state string
 		var createdPayload []byte
-		if err := rows.Scan(&c.ID, &state, &c.StateEnteredAt, &c.StateEventID, &createdPayload); err != nil {
+		if err := rows.Scan(&c.ID, &state, &c.StateEnteredAt, &createdPayload); err != nil {
 			return nil, fmt.Errorf("scan dispatch candidate: %w", err)
 		}
 		c.State = domain.WorkItemState(state)
@@ -170,6 +132,21 @@ func (w *Worker) dispatchCandidates(ctx context.Context) ([]dispatchCandidate, e
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate dispatch candidates: %w", err)
+	}
+	rows.Close()
+
+	// Do not issue nested pool queries while rows owns a connection: the
+	// safety profile permits pool_max_conns=1. Resolve immutable log identity
+	// only after the candidate cursor has released its connection.
+	for i := range out {
+		entry, err := jobqueue.ResolveCurrentStateEntry(ctx, w.pool, out[i].ID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve dispatch candidate %s state entry: %w", out[i].ID, err)
+		}
+		if entry.State != out[i].State || !entry.OccurredAt.Equal(out[i].StateEnteredAt) {
+			return nil, fmt.Errorf("dispatch candidate %s lifecycle projection disagrees with event log: projection=%s/%s event=%s/%s", out[i].ID, out[i].State, out[i].StateEnteredAt.UTC().Format(time.RFC3339Nano), entry.State, entry.OccurredAt.UTC().Format(time.RFC3339Nano))
+		}
+		out[i].StateEventID = entry.ID
 	}
 	return out, nil
 }
@@ -200,64 +177,29 @@ func (w *Worker) appendDispatch(ctx context.Context, candidate dispatchCandidate
 	// recorded for the scanned epoch first or the transition wins and this
 	// stale candidate becomes an idempotent no-op. ClaimDemand uses the same
 	// lock before validating the demand and appending an assignment.
-	var (
-		currentState        string
-		currentEnteredAt    time.Time
-		currentStateEventID uuid.UUID
-	)
+	var currentState string
+	var currentEnteredAt time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT wi.state, wi.state_entered_at, state_entry.id
-		FROM work_items wi
-		JOIN LATERAL (
-			SELECT lifecycle.id,
-			       lifecycle.occurred_at,
-			       CASE
-			         WHEN lifecycle.kind = $3
-			         THEN COALESCE(NULLIF(lifecycle.payload->>'state', ''), 'captured')
-			         ELSE NULLIF(lifecycle.payload->>'to', '')
-			       END AS state
-			FROM events lifecycle
-			WHERE lifecycle.subject_kind = $2
-			  AND lifecycle.subject_id = wi.id
-			  AND lifecycle.kind IN ($3, $4)
-			  AND (
-			    lifecycle.kind = $3
-			    OR (
-			      NULLIF(lifecycle.payload->>'to', '') IS NOT NULL
-			      AND NULLIF(lifecycle.payload->>'to', '') IS DISTINCT FROM (
-			        SELECT CASE
-			                 WHEN prior.kind = $3
-			                 THEN COALESCE(NULLIF(prior.payload->>'state', ''), 'captured')
-			                 ELSE NULLIF(prior.payload->>'to', '')
-			               END
-			        FROM events prior
-			        WHERE prior.subject_kind = lifecycle.subject_kind
-			          AND prior.subject_id = lifecycle.subject_id
-			          AND prior.kind IN ($3, $4)
-			          AND prior.seq < lifecycle.seq
-			          AND jsonb_typeof(prior.payload) = 'object'
-			        ORDER BY prior.seq DESC
-			        LIMIT 1
-			      )
-			    )
-			  )
-			ORDER BY lifecycle.seq DESC
-			LIMIT 1
-		) state_entry ON true
-		WHERE wi.id = $1
-		  AND state_entry.state = wi.state
-		  AND state_entry.occurred_at = wi.state_entered_at
-		FOR UPDATE OF wi`, candidate.ID, domain.SubjectWorkItem, domain.EventWorkItemCreated, domain.EventWorkItemTransitioned).
-		Scan(&currentState, &currentEnteredAt, &currentStateEventID)
+		SELECT state, state_entered_at
+		FROM work_items
+		WHERE id = $1
+		FOR UPDATE`, candidate.ID).Scan(&currentState, &currentEnteredAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("lock dispatch candidate: %w", err)
 	}
+	currentEntry, err := jobqueue.ResolveCurrentStateEntry(ctx, tx, candidate.ID)
+	if err != nil {
+		return false, fmt.Errorf("resolve locked dispatch candidate %s state entry: %w", candidate.ID, err)
+	}
+	if currentEntry.State != domain.WorkItemState(currentState) || !currentEntry.OccurredAt.Equal(currentEnteredAt) {
+		return false, fmt.Errorf("dispatch candidate %s lifecycle projection disagrees with event log: projection=%s/%s event=%s/%s", candidate.ID, currentState, currentEnteredAt.UTC().Format(time.RFC3339Nano), currentEntry.State, currentEntry.OccurredAt.UTC().Format(time.RFC3339Nano))
+	}
 	if domain.WorkItemState(currentState) != candidate.State ||
 		!currentEnteredAt.Equal(candidate.StateEnteredAt) ||
-		currentStateEventID != candidate.StateEventID {
+		currentEntry.ID != candidate.StateEventID {
 		return false, nil
 	}
 

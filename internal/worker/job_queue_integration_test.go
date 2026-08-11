@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1433,6 +1434,44 @@ func TestReviewDispatchCrossChecksCreatedCultivarAndStateEntry(t *testing.T) {
 		t.Fatalf("review start = %+v, want started", result)
 	}
 	assertJobState(t, ctx, pool, dispatchID, jobqueue.JobDone, 1, false)
+}
+
+func TestReviewDispatchProjectionDriftDoesNotCancelClaim(t *testing.T) {
+	ctx := context.Background()
+	pool := newIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	systemTok, err := createSystemToken(t, ctx, pool, writer, "review-dispatch-projection-drift")
+	if err != nil {
+		t.Fatalf("create system token: %v", err)
+	}
+	seedReviewerCultivar(t, ctx, pool, writer, systemTok.Token)
+	item := createReviewerDispatchableItem(t, ctx, pool, writer, systemTok.Token, "review projection drift", domain.HumanReviewWavedThrough)
+	dispatchID := appendDispatchRequestedForEpoch(t, ctx, pool, writer, systemTok.Token, item.ID, item.State, item.StateEnteredAt.Unix(), "reviewer@1")
+
+	queue := jobqueue.NewService(pool)
+	job, found, err := queue.ClaimNextReview(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("claim review dispatch: %v", err)
+	}
+	if !found || job.ID != dispatchID {
+		t.Fatalf("review claim = found %t id %s, want %s", found, job.ID, dispatchID)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE work_items SET state_entered_at = state_entered_at + interval '1 second' WHERE id = $1`, item.ID); err != nil {
+		t.Fatalf("corrupt lifecycle projection: %v", err)
+	}
+
+	_, err = workitems.NewService(pool, writer).StartReviewDispatch(ctx, dispatchID, job.Attempts, systemTok.Token)
+	if err == nil || !strings.Contains(err.Error(), "lifecycle projection disagrees with event log") {
+		t.Fatalf("StartReviewDispatch error = %v, want lifecycle projection disagreement", err)
+	}
+	assertJobState(t, ctx, pool, dispatchID, jobqueue.JobLeased, 1, true)
+	if got := countEventsForSubject(t, ctx, pool, item.ID, domain.EventWorkItemTransitioned); got != 0 {
+		t.Fatalf("transition events after projection drift = %d, want 0", got)
+	}
 }
 
 func createDispatchableItem(t *testing.T, ctx context.Context, pool *pgxpool.Pool, writer *events.Writer, actor domain.Token, title string) domain.WorkItem {
