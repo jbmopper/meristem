@@ -44,7 +44,6 @@ MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 TERMINAL_TURN_STATES = {"completed", "failed", "interrupted"}
 WAITING_FLAGS = {"waitingOnApproval", "waitingOnUserInput"}
 LISTENER_MCP_SERVER = "meristem_listener"
-DISABLED_AMBIENT_MCP_SERVER = "meristem"
 LISTENER_MCP_TOOL_ORDER = (
     "work_items.append_event",
     "work_items.get",
@@ -687,12 +686,9 @@ class AppServerClient:
         config = result.get("config") if isinstance(result, dict) else None
         origins = result.get("origins") if isinstance(result, dict) else None
         servers = config.get("mcp_servers") if isinstance(config, dict) else None
-        if not isinstance(servers, dict) or set(servers) != {
-            DISABLED_AMBIENT_MCP_SERVER,
-            LISTENER_MCP_SERVER,
-        }:
+        features = config.get("features") if isinstance(config, dict) else None
+        if not isinstance(servers, dict) or set(servers) != {LISTENER_MCP_SERVER}:
             raise ProtocolError()
-        disabled = servers.get(DISABLED_AMBIENT_MCP_SERVER)
         listener = servers.get(LISTENER_MCP_SERVER)
         listener_valid = (
             isinstance(listener, dict)
@@ -713,27 +709,26 @@ class AppServerClient:
             )
         )
         if (
-            not isinstance(disabled, dict)
-            or disabled.get("enabled") is not False
-            or disabled.get("command") != "/usr/bin/false"
+            not isinstance(features, dict)
+            or features.get("apps") is not False
             or not listener_valid
         ):
             raise ProtocolError()
-        origin = (
-            origins.get("mcp_servers.meristem_listener.command")
-            if isinstance(origins, dict)
-            else None
-        )
-        name = origin.get("name") if isinstance(origin, dict) else None
-        version = origin.get("version") if isinstance(origin, dict) else None
-        if (
-            not isinstance(name, dict)
-            or name.get("type") != "sessionFlags"
-            or not isinstance(version, str)
-            or not version.startswith("sha256:")
-            or len(version) > 256
+        for origin_key in (
+            "features.apps",
+            "mcp_servers.meristem_listener.command",
         ):
-            raise ProtocolError()
+            origin = origins.get(origin_key) if isinstance(origins, dict) else None
+            name = origin.get("name") if isinstance(origin, dict) else None
+            version = origin.get("version") if isinstance(origin, dict) else None
+            if (
+                not isinstance(name, dict)
+                or name.get("type") != "sessionFlags"
+                or not isinstance(version, str)
+                or not version.startswith("sha256:")
+                or len(version) > 256
+            ):
+                raise ProtocolError()
 
     def verify_listener_mcp_status(self, expected_actor_id, timeout, thread_id=None):
         params = {"detail": "toolsAndAuthOnly"}

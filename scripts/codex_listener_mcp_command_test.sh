@@ -312,6 +312,8 @@ if wrapper_output="$(
   MERISTEM_LISTENER_MCP_COMMAND="$tmp/stale-command" \
     "$wrapper" app-server --stdio
 )" && grep -Fqx -- "$expected_command" <<< "$wrapper_output" &&
+  grep -Fqx -- 'features.apps=false' <<< "$wrapper_output" &&
+  ! grep -Fq -- 'mcp_servers.meristem=' <<< "$wrapper_output" &&
   [[ "$(cat "$codex_calls")" == "called" ]]; then
   pass "app-server uses the tracked sibling and ignores stale overrides"
 else
@@ -329,6 +331,8 @@ if probe_output="$(
   CODEX_CALLS_OUT="$codex_calls" CODEX_BIN="$fake_codex" MERISTEM_LISTENER_PROBE=1 \
     "$wrapper" app-server --stdio
 )" && grep -Fqx -- "$expected_probe_command" <<< "$probe_output" &&
+  grep -Fqx -- 'features.apps=false' <<< "$probe_output" &&
+  ! grep -Fq -- 'mcp_servers.meristem=' <<< "$probe_output" &&
   [[ "$(cat "$codex_calls")" == "called" ]]; then
   pass "read-only probe uses inert MCP configuration without a bearer"
 else

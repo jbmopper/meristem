@@ -147,11 +147,6 @@ for raw in sys.stdin:
         continue
     elif method == "config/read":
         servers = {
-            "meristem": {
-                "args": [],
-                "command": "/usr/bin/false",
-                "enabled": False,
-            },
             "meristem_listener": {
                 "args": [],
                 "command": expected_mcp_command,
@@ -179,8 +174,17 @@ for raw in sys.stdin:
         send({
             "id": message["id"],
             "result": {
-                "config": {"mcp_servers": servers},
+                "config": {
+                    "features": {
+                        "apps": scenario == "apps_enabled_config",
+                    },
+                    "mcp_servers": servers,
+                },
                 "origins": {
+                    "features.apps": {
+                        "name": {"type": "sessionFlags"},
+                        "version": "sha256:fixture",
+                    },
                     "mcp_servers.meristem_listener.command": {
                         "name": {"type": "sessionFlags"},
                         "version": "sha256:fixture",
@@ -633,13 +637,16 @@ class NudgeTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_activation_rejects_ambient_mcp_config_before_resume(self):
-        with self.assertRaises(NUDGE.ProtocolError):
-            NUDGE.activate(
-                self.activation_args(),
-                self.command("ambient_mcp_config"),
-                environment=self.environment,
-            )
-        self.assertNotIn("thread/resume", self.record_value()["methods"])
+        for scenario in ("ambient_mcp_config", "apps_enabled_config"):
+            with self.subTest(scenario=scenario):
+                self.record.unlink(missing_ok=True)
+                with self.assertRaises(NUDGE.ProtocolError):
+                    NUDGE.activate(
+                        self.activation_args(),
+                        self.command(scenario),
+                        environment=self.environment,
+                    )
+                self.assertNotIn("thread/resume", self.record_value()["methods"])
 
     def test_activation_rejects_extra_server_or_tool_before_resume(self):
         for scenario in (
@@ -766,7 +773,7 @@ class NudgeTests(unittest.TestCase):
             wrapper_record.read_text(encoding="utf-8").splitlines(),
             [
                 "--config",
-                'mcp_servers.meristem={command="/usr/bin/false",enabled=false}',
+                "features.apps=false",
                 "--config",
                 (
                     "mcp_servers.meristem_listener={"

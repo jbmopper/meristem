@@ -194,8 +194,9 @@ a reviewed manifest profile later.
 
 The listener wrapper leaves interactive Codex unchanged but runs this
 network-disabled app-server from the dedicated Codex home, so interactive MCP
-servers cannot enter its configuration. It defines one disabled inert
-`meristem` entry and one guarded `meristem_listener` stdio entry. Codex's
+servers cannot enter its configuration. It disables the app/connector runtime
+with the official `features.apps=false` session flag and defines exactly one
+guarded `meristem_listener` stdio entry. Codex's
 `enabled_tools` filter is pinned to exactly `work_items.append_event`,
 `work_items.get`, and `work_items.get_assignment`; the wake carries the exact
 work-item UUID instead of using holder-only `work_items.held_assignments`. The
