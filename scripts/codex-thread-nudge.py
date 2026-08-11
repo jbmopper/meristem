@@ -730,7 +730,9 @@ class AppServerClient:
             ):
                 raise ProtocolError()
 
-    def verify_listener_mcp_status(self, expected_actor_id, timeout, thread_id=None):
+    def verify_listener_mcp_status(
+        self, expected_actor_id, timeout, thread_id=None, allow_unstarted=False
+    ):
         params = {"detail": "toolsAndAuthOnly"}
         if thread_id is not None:
             params["threadId"] = thread_id
@@ -760,6 +762,8 @@ class AppServerClient:
             tools = server.get("tools")
             server_info = server.get("serverInfo")
             if server_info is None and tools == {}:
+                if allow_unstarted:
+                    return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise CompletionTimeout()
@@ -1011,7 +1015,9 @@ def activate(args, command=None, environment=None):
             args.repo_root, expected_mcp_command, args.request_timeout
         )
         client.verify_listener_mcp_status(
-            task_principal_token_id, args.request_timeout
+            task_principal_token_id,
+            args.request_timeout,
+            allow_unstarted=True,
         )
         stage = "resume"
         try:

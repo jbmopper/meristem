@@ -693,7 +693,9 @@ class NudgeTests(unittest.TestCase):
                 self.command("mcp_status_stuck_starting"),
                 environment=self.environment,
             )
-        self.assertNotIn("thread/resume", self.record_value()["methods"])
+        methods = self.record_value()["methods"]
+        self.assertIn("thread/resume", methods)
+        self.assertNotIn("turn/start", methods)
 
     def test_activation_rejects_thread_effective_mcp_drift_before_start(self):
         for scenario in (
