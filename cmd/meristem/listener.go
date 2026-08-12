@@ -509,6 +509,20 @@ func (s *listenerSupervisor) focused(ctx context.Context, reg listenerView, held
 			case "terminal":
 				// Delivery finished (or exhausted); the exact assignment remains
 				// focused until task completion, yield, or worker-owned expiry.
+				// A terminal work-item transition clears the assignment projection
+				// without appending work_item.assignment_released, so waiting on the
+				// focused feed here would strand the supervisor until restart. Poll
+				// the authoritative projection with bounded backoff once external
+				// delivery is terminal; ordinary handback remains event-driven.
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(s.backoff):
+				}
+				if released, err = s.assignmentReleased(ctx, held); err != nil {
+					return err
+				}
+				continue
 			default:
 				return fmt.Errorf("listener: unknown activation action %q", action)
 			}
