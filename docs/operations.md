@@ -173,7 +173,13 @@ principal UUIDs to each invocation. No bearer value, bearer locator, digest, or
 database URL crosses the generic Go-to-adapter boundary. The fixed reviewed
 arguments carry the Codex task/home binding. The adapter starts a turn only when the
 dedicated task is idle, declines unattended authority requests, and writes no
-local delivery journal. Keep
+local delivery journal. The isolated app-server sets
+`default_tools_approval_mode="approve"` only on `meristem_listener` while
+pinning `enabled_tools` to `work_items.get`, `work_items.get_assignment`, and
+`work_items.append_event`. Those tools are independently reduced by the
+assignment-bound task profile. This prevents each already-authorized MCP call
+from becoming an elicitation that the unattended adapter must decline; it does
+not approve shell, file, transition, connector, or arbitrary MCP authority. Keep
 `codex-thread-nudge.py`, `codex-listener-app-server.sh`, and
 `codex-listener-mcp-command.sh` together under `scripts/` in the same clean,
 reviewed `v1` checkout whose `.meristem/generated/meristem-bin` is published.

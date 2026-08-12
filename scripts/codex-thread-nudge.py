@@ -705,6 +705,7 @@ class AppServerClient:
                     and listener.get("args") == []
                     and listener.get("enabled_tools")
                     == list(LISTENER_MCP_TOOL_ORDER)
+                    and listener.get("default_tools_approval_mode") == "approve"
                 )
             )
         )

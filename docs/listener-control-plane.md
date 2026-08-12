@@ -61,7 +61,7 @@ Evidence was refreshed against repository state on 2026-08-07 MDT.
 | Durable listener registration and base policy | Shipped | Listener slice 2, migration 0037, and `internal/listeners` |
 | Stable listener addressing | Shipped | Producers address listener UUID/name; bearer rebinding does not change the address |
 | Claim-bound focus and automatic policy restoration | Shipped | `meristem listener` derives IDLE/FOCUSED from registration, assignment, and feed projections |
-| Codex task activation | Release candidate | `scripts/codex-thread-nudge.py activate` is metadata-only, journal-free, idle-only, and fail-closed on unattended requests |
+| Codex task activation | Release candidate | `scripts/codex-thread-nudge.py activate` is metadata-only, journal-free, idle-only, and fail-closed on unattended requests. The isolated app-server pre-approves only the three assignment-bound tools already filtered by the task profile; every approval, elicitation, permission, or other server request is still declined. |
 | Durable activation request/outcome | Release candidate | Migration 0039 plus `internal/listeneractivation`; REST, MCP, assigned-feed control, restart, and rebuild proofs are included |
 | Assignment-bound token exchange | Designed separately, not implemented | Required only when a claimed role needs narrower temporary authority than the listener's stable credential already has |
 

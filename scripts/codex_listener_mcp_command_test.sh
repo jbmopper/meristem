@@ -305,7 +305,7 @@ printf '%s\n' "$@"
 CODEX
 chmod 700 "$fake_codex"
 codex_calls="$tmp/codex-calls"
-expected_command="mcp_servers.meristem_listener={command=\"$launcher\",enabled_tools=[\"work_items.append_event\",\"work_items.get\",\"work_items.get_assignment\"],env={CODEX_HOME=\"$listener_codex_home\",CODEX_MERISTEM_TOKEN_FILE=\"$dedicated_file\",MERISTEM_MCP_EXPECT_ACTOR_ID=\"$MERISTEM_MCP_EXPECT_ACTOR_ID\",MERISTEM_MCP_LISTENER_ACTIVATION_ID=\"$MERISTEM_MCP_LISTENER_ACTIVATION_ID\",MERISTEM_MCP_LISTENER_WORK_ITEM_ID=\"$MERISTEM_MCP_LISTENER_WORK_ITEM_ID\",MERISTEM_MCP_LISTENER_ASSIGNMENT_EVENT_ID=\"$MERISTEM_MCP_LISTENER_ASSIGNMENT_EVENT_ID\"}}"
+expected_command="mcp_servers.meristem_listener={command=\"$launcher\",enabled_tools=[\"work_items.append_event\",\"work_items.get\",\"work_items.get_assignment\"],default_tools_approval_mode=\"approve\",env={CODEX_HOME=\"$listener_codex_home\",CODEX_MERISTEM_TOKEN_FILE=\"$dedicated_file\",MERISTEM_MCP_EXPECT_ACTOR_ID=\"$MERISTEM_MCP_EXPECT_ACTOR_ID\",MERISTEM_MCP_LISTENER_ACTIVATION_ID=\"$MERISTEM_MCP_LISTENER_ACTIVATION_ID\",MERISTEM_MCP_LISTENER_WORK_ITEM_ID=\"$MERISTEM_MCP_LISTENER_WORK_ITEM_ID\",MERISTEM_MCP_LISTENER_ASSIGNMENT_EVENT_ID=\"$MERISTEM_MCP_LISTENER_ASSIGNMENT_EVENT_ID\"}}"
 if wrapper_output="$(
   CODEX_CALLS_OUT="$codex_calls" \
   CODEX_BIN="$fake_codex" \

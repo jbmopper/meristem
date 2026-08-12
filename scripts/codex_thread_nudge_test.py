@@ -157,6 +157,7 @@ for raw in sys.stdin:
                     "work_items.get",
                     "work_items.get_assignment",
                 ],
+                "default_tools_approval_mode": "approve",
             },
         }
         if os.environ.get("MERISTEM_LISTENER_PROBE") == "1":
@@ -171,6 +172,8 @@ for raw in sys.stdin:
                 "command": "/unsafe/ambient",
                 "enabled": True,
             }
+        if scenario == "listener_tools_not_preapproved":
+            servers["meristem_listener"]["default_tools_approval_mode"] = "prompt"
         record()
         send({
             "id": message["id"],
@@ -187,6 +190,10 @@ for raw in sys.stdin:
                         "version": "sha256:fixture",
                     },
                     "mcp_servers.meristem_listener.command": {
+                        "name": {"type": "sessionFlags"},
+                        "version": "sha256:fixture",
+                    },
+                    "mcp_servers.meristem_listener.default_tools_approval_mode": {
                         "name": {"type": "sessionFlags"},
                         "version": "sha256:fixture",
                     }
@@ -644,7 +651,11 @@ class NudgeTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_activation_rejects_ambient_mcp_config_before_resume(self):
-        for scenario in ("ambient_mcp_config", "apps_enabled_config"):
+        for scenario in (
+            "ambient_mcp_config",
+            "apps_enabled_config",
+            "listener_tools_not_preapproved",
+        ):
             with self.subTest(scenario=scenario):
                 self.record.unlink(missing_ok=True)
                 with self.assertRaises(NUDGE.ProtocolError):
@@ -811,7 +822,8 @@ class NudgeTests(unittest.TestCase):
                     "mcp_servers.meristem_listener={"
                     f'command="{mcp_command}",enabled_tools=['
                     '"work_items.append_event","work_items.get",'
-                    '"work_items.get_assignment"],env={'
+                    '"work_items.get_assignment"],'
+                    'default_tools_approval_mode="approve",env={'
                     f'CODEX_HOME="{environment["MERISTEM_LISTENER_CODEX_HOME"]}",'
                     f'CODEX_MERISTEM_TOKEN_FILE="{token}",'
                     f'MERISTEM_MCP_EXPECT_ACTOR_ID="{environment["MERISTEM_MCP_EXPECT_ACTOR_ID"]}",'
