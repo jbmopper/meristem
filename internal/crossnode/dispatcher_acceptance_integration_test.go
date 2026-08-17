@@ -89,8 +89,13 @@ func TestDirectRouteTwoNodeAcceptance(t *testing.T) {
 	appendDirectRegistryNode(t, ctx, aPool, aRoot.Token, "node-b", bDirect.URL, []string{"hub"})
 	appendDirectRegistryNode(t, ctx, aPool, aRoot.Token, "hub", queueHost.URL, nil)
 
-	resolver := func(_ context.Context, nodeID string) (string, error) {
-		switch nodeID {
+	// Keyed on the terminating peer: node-b's own bearer for a direct attempt,
+	// the queue host's separate capability for a queue hop. The two are
+	// deliberately different values — a resolver that returned one credential
+	// for both would pass this test's assertions but prove nothing about
+	// per-peer custody.
+	resolver := func(_ context.Context, req crossnode.CredentialRequest) (string, error) {
+		switch req.TerminatingPeer {
 		case "node-b":
 			return bPeer.Secret, nil
 		case "hub":

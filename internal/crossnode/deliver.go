@@ -244,34 +244,50 @@ func post(ctx context.Context, client *http.Client, credentials BearerResolver, 
 	if c.NodeID == "" {
 		return 0, nil, fmt.Errorf("%w: route has no terminating node id", ErrMissingCredential)
 	}
-	bearer, err := credentials(ctx, c.NodeID)
+	// The endpoint is resolved before the credential so the request can name
+	// the operation the bearer is actually for. On a queue hop that is the
+	// enqueue call at the queue host, not the command it will later carry.
+	var endpoint string
+	var body []byte
+	var peerPath string
+	switch c.Kind {
+	case KindDirect:
+		peerPath = req.Path
+		endpoint = strings.TrimRight(c.URL, "/") + req.Path
+		body = normalizeBody(req.Body)
+	case KindQueue:
+		peerPath = CommandPath
+		endpoint = strings.TrimRight(c.URL, "/") + CommandPath
+		marshalled, marshalErr := json.Marshal(wireCommand{
+			CommandPath:       req.Path,
+			CommandBody:       normalizeBody(req.Body),
+			CausingWorkItemID: req.CausingWorkItemID,
+		})
+		if marshalErr != nil {
+			return 0, nil, fmt.Errorf("crossnode: marshal command: %w", marshalErr)
+		}
+		body = marshalled
+	case KindRelay:
+		return 0, nil, ErrUnsupportedRoute
+	default:
+		return 0, nil, fmt.Errorf("%w: unknown candidate kind %q", ErrUnsupportedRoute, c.Kind)
+	}
+
+	bearer, err := credentials(ctx, CredentialRequest{
+		TerminatingPeer:   c.NodeID,
+		UltimateTarget:    req.TargetNodeID,
+		OriginNodeID:      req.OriginNodeID,
+		Route:             c.Kind,
+		Purpose:           PurposeRemoteMutation,
+		Method:            http.MethodPost,
+		Path:              peerPath,
+		CausingWorkItemID: req.CausingWorkItemID,
+	})
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w for node %s: %v", ErrMissingCredential, c.NodeID, err)
 	}
 	if strings.TrimSpace(bearer) == "" {
 		return 0, nil, fmt.Errorf("%w for node %s", ErrMissingCredential, c.NodeID)
-	}
-
-	var endpoint string
-	var body []byte
-	switch c.Kind {
-	case KindDirect:
-		endpoint = strings.TrimRight(c.URL, "/") + req.Path
-		body = normalizeBody(req.Body)
-	case KindQueue:
-		endpoint = strings.TrimRight(c.URL, "/") + CommandPath
-		body, err = json.Marshal(wireCommand{
-			CommandPath:       req.Path,
-			CommandBody:       normalizeBody(req.Body),
-			CausingWorkItemID: req.CausingWorkItemID,
-		})
-		if err != nil {
-			return 0, nil, fmt.Errorf("crossnode: marshal command: %w", err)
-		}
-	case KindRelay:
-		return 0, nil, ErrUnsupportedRoute
-	default:
-		return 0, nil, fmt.Errorf("%w: unknown candidate kind %q", ErrUnsupportedRoute, c.Kind)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))

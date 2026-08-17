@@ -69,9 +69,28 @@ surface:
 - A response or queued acknowledgement is evidence of the home node's outcome;
   it is not a second authoritative projection of the object.
 
-Cross-node references use `<node_id>:<uuid>`. The canonical URI form for a work
-item is `mrs://<node_id>/work-items/<uuid>`. An unqualified UUID means local to
-the node interpreting it. Payloads that persist qualified references follow
+Cross-node references have one canonical spelling and one compact alias, and
+both normalize to the same `{node_id, object_kind, uuid}` tuple:
+
+- `mrs://<node_id>/work-items/<uuid>` is **canonical**. External and durable
+  surfaces emit this form and only this form.
+- `<node_id>:<uuid>` is the **compact alias**, for in-process and internal call
+  paths. It is accepted on input everywhere the canonical form is.
+- An unqualified `<uuid>` means local to the node interpreting it. A bare UUID
+  is never remote-discovered.
+
+Parsing is the normalization boundary: accept any of the three spellings, then
+carry the parsed tuple. Do not pass an unnormalized reference string deeper into
+routing. Everything off that list fails closed — unknown schemes, unknown object
+kinds, URL decorations (userinfo, port, query, fragment, percent-encoding, extra
+or trailing path segments), malformed node ids, and malformed UUIDs.
+
+Within the canonical form the UUID must additionally use the standard dashed
+lowercase spelling. The compact alias inherits `uuid.Parse`'s leniency for
+compatibility, but a canonical reference is meant to be one string per object so
+that a persisted reference compares equal as text, not only after parsing.
+
+Payloads that persist qualified references follow
 `docs/payload-versioning.md`.
 
 Remote-reference caching is deferred. Stage 1 resolves reachable remote

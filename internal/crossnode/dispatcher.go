@@ -2,6 +2,7 @@ package crossnode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jbmopper/meristem/internal/domain"
@@ -121,7 +123,95 @@ type ReadOutcome struct {
 	Attempts     []Attempt
 }
 
-// ReadWorkItem reads a remotely-homed work item named by `<node_id>:<uuid>`.
+// SourceRemoteHome is the discriminant on every remote read result. It is a
+// constant rather than a bool so the shape stays extensible without a future
+// value being mistaken for "local".
+const SourceRemoteHome = "remote_home"
+
+// RemoteReadEnvelope wraps a remote read so a caller cannot mistake it for a
+// local projection. Per docs/network-layer-spec.md §2 a remote response is
+// evidence of the home node's outcome at that moment, not a second
+// authoritative projection of the object.
+//
+// The discriminant travels in the body, not in an HTTP header, because the
+// header is lost the moment a result is serialized into an MCP tool response —
+// which is exactly where the mistake would be made and would be invisible.
+//
+// Three rules bind consumers of this type, and they are the point of it:
+// the wrapped item is never inserted into the local work_items projection;
+// it is never labelled local, cached, or replayed; and the envelope is never
+// unwrapped into the bare local response shape. Local bare-UUID reads keep
+// their existing shape untouched — only the qualified-ref path is wrapped, so
+// nothing that reads a local item changes.
+type RemoteReadEnvelope struct {
+	// Source is always SourceRemoteHome. Present so a deserialized envelope is
+	// self-describing even after it has left this process.
+	Source string `json:"source"`
+	// HomeNodeID is the node that authoritatively owns the object.
+	HomeNodeID string `json:"home_node_id"`
+	// CanonicalRef is the mrs:// form, which is the durable spelling. It is
+	// carried so the result remains re-resolvable without reconstructing a
+	// reference from parts.
+	CanonicalRef string `json:"canonical_ref"`
+	// StatusCode is the home's HTTP status. It is carried rather than dropped
+	// so a 404 or a refusal stays visibly a 404 or a refusal: without it, every
+	// response body flattens into the same apparent-success shape and a caller
+	// cannot tell the home's "no" from its "yes".
+	StatusCode int `json:"status_code"`
+	// ObservedAt is when the home's response was received. A remote read is
+	// evidence with a timestamp, not a fact without one.
+	ObservedAt time.Time `json:"observed_at"`
+	// Body is the home's response, verbatim and undigested. It is deliberately
+	// not decoded into a local work-item type: decoding here would invite
+	// exactly the confusion this envelope exists to prevent.
+	Body json.RawMessage `json:"body"`
+}
+
+// NewRemoteReadEnvelope builds an envelope for a completed remote read. It
+// fails closed rather than emitting a half-identified result, because the
+// envelope's whole job is to assert provenance and a half-backed assertion is
+// worse than an error — downstream code trusts the assertion, not the gaps.
+//
+// Every field is validated at construction, so a returned envelope is always
+// serializable. That matters more than it looks: this value's destination is an
+// MCP tool result, and a body that fails json.Marshal later would turn a
+// successful remote read into an opaque failure at the point of delivery,
+// after the network call has already happened.
+func NewRemoteReadEnvelope(homeNodeID string, id uuid.UUID, statusCode int, observedAt time.Time, body []byte) (RemoteReadEnvelope, error) {
+	ref, ok := domain.FormatCanonicalRef(homeNodeID, id)
+	if !ok {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: cannot format canonical ref for home %q", ErrInvalidQualifiedRef, homeNodeID)
+	}
+	if statusCode < 100 || statusCode > 599 {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: implausible home status %d", ErrInvalidQualifiedRef, statusCode)
+	}
+	if observedAt.IsZero() {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: observation time is zero", ErrInvalidQualifiedRef)
+	}
+	// json.Valid rather than len > 0: a non-JSON body is what makes the
+	// envelope unmarshalable downstream, and whitespace-only passes a length
+	// check while carrying no evidence at all.
+	if !json.Valid(body) {
+		return RemoteReadEnvelope{}, fmt.Errorf("%w: home body is not valid JSON", ErrInvalidQualifiedRef)
+	}
+	return RemoteReadEnvelope{
+		Source:       SourceRemoteHome,
+		HomeNodeID:   homeNodeID,
+		CanonicalRef: ref,
+		StatusCode:   statusCode,
+		ObservedAt:   observedAt.UTC(),
+		Body:         json.RawMessage(body),
+	}, nil
+}
+
+// ReadWorkItem reads a remotely-homed work item. The ref may be either
+// qualified spelling — the canonical `mrs://<node_id>/work-items/<uuid>` or the
+// compact `<node_id>:<uuid>` — since both normalize to the same home and id. A
+// bare UUID is local and is rejected here rather than guessed at: a caller that
+// reached this method with an unqualified ref has lost track of where the
+// object lives, and dispatching it to an arbitrary node would be worse than
+// failing.
+//
 // It loads one registry snapshot and considers only the home's direct route;
 // queue candidates are mutation-only and are never used to fabricate remote
 // read availability.
@@ -168,7 +258,21 @@ func (d *Dispatcher) readDirect(ctx context.Context, originNodeID, targetNodeID,
 	if d.credentials == nil {
 		return ReadOutcome{}, ErrMissingCredential
 	}
-	bearer, err := d.credentials(ctx, targetNodeID)
+	// A remote read only ever terminates at the home node — there is no queue
+	// hop on this path — so the terminating peer and the ultimate target are
+	// the same node here, and the resolver is told so explicitly rather than
+	// left to infer it.
+	endpoint := strings.TrimRight(candidate.URL, "/") + "/v1/work-items/" + workItemID
+	peerPath := "/v1/work-items/" + workItemID
+	bearer, err := d.credentials(ctx, CredentialRequest{
+		TerminatingPeer: targetNodeID,
+		UltimateTarget:  targetNodeID,
+		OriginNodeID:    originNodeID,
+		Route:           KindDirect,
+		Purpose:         PurposeRemoteRead,
+		Method:          http.MethodGet,
+		Path:            peerPath,
+	})
 	if err != nil || strings.TrimSpace(bearer) == "" {
 		return ReadOutcome{}, fmt.Errorf("%w for node %s", ErrMissingCredential, targetNodeID)
 	}
@@ -177,7 +281,6 @@ func (d *Dispatcher) readDirect(ctx context.Context, originNodeID, targetNodeID,
 	budget, cancelBudget := context.WithTimeout(ctx, policy.DirectPatience)
 	defer cancelBudget()
 	out := ReadOutcome{TargetNodeID: targetNodeID}
-	endpoint := strings.TrimRight(candidate.URL, "/") + "/v1/work-items/" + workItemID
 	for attemptNumber := 1; attemptNumber <= policy.DirectAttempts; attemptNumber++ {
 		attemptCtx, cancel := context.WithTimeout(budget, policy.AttemptTimeout)
 		req, reqErr := http.NewRequestWithContext(attemptCtx, http.MethodGet, endpoint, nil)

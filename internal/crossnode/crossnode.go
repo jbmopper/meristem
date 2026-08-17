@@ -117,11 +117,90 @@ type Command struct {
 	Body json.RawMessage
 }
 
-// BearerResolver returns the target-node credential for one HTTP attempt.
-// Tokens are node-local, so a direct attempt and a queue fallback can require
-// different bearers. Implementations must not log or persist the returned
-// value.
-type BearerResolver func(ctx context.Context, nodeID string) (string, error)
+// CredentialPurpose names what a bearer is being asked to authorize. It is
+// distinct from the route kind: a mutation can travel either directly or
+// through a queue host, and the same peer may mint different authority for
+// each.
+type CredentialPurpose string
+
+const (
+	// PurposeRemoteRead authorizes an authenticated read-through GET against
+	// the home node's REST surface.
+	PurposeRemoteRead CredentialPurpose = "remote_read"
+	// PurposeRemoteMutation authorizes a mutation POST, whether it terminates
+	// at the home node directly or at a queue host that will carry it.
+	PurposeRemoteMutation CredentialPurpose = "remote_mutation"
+)
+
+// CredentialRequest names the exact relation a bearer is being requested for.
+//
+// It is deliberately not just a node id. A resolver keyed only by the node it
+// is about to talk to cannot distinguish legitimate cases that require
+// different credentials: one queue host may accept commands bound for several
+// different ultimate targets, and may expose queue-drain, outcome-observation,
+// and direct-target operations under separately scoped authority. Given only
+// the terminating peer, such a resolver has to return either a bearer that
+// gets denied or one broad enough to cover every case — and the second failure
+// is the dangerous one, because it works.
+//
+// TerminatingPeer and UltimateTarget differ exactly when the route is a queue
+// hop. Keeping both is the point: the credential authorizes a relation between
+// this origin and that peer *for* that target, not a general capability at the
+// peer.
+type CredentialRequest struct {
+	// TerminatingPeer is the node the HTTP connection actually terminates at:
+	// the home node for a direct attempt, the queue host for a queue hop.
+	// This is the node whose credential is being asked for.
+	TerminatingPeer string
+	// UltimateTarget is the home node that owns the object being read or
+	// mutated. Equal to TerminatingPeer on a direct attempt.
+	UltimateTarget string
+	// OriginNodeID is the node making the request — the "from" side of the
+	// relation the credential authorizes.
+	OriginNodeID string
+	// Route is the delivery mechanism of this attempt (direct or queue).
+	Route CandidateKind
+	// Purpose is what the credential must authorize, independent of Route.
+	Purpose CredentialPurpose
+	// Method and Path are the operation and resource at the terminating peer,
+	// so a resolver can scope narrowly where a peer supports it. For a queue
+	// hop these describe the *enqueue* call being made to the queue host, not
+	// the command it will later carry.
+	Method string
+	Path   string
+	// CausingWorkItemID is the origin-homed work item whose policy owns this
+	// call, when there is one. Nil for calls with no owning item.
+	CausingWorkItemID *uuid.UUID
+	// AssignmentEventID is reserved for assignment-bound temporary authority
+	// (work item 37d442e8) and is nil in every current caller. It is declared
+	// now so that landing token exchange does not have to re-widen this struct
+	// and churn every call site again.
+	//
+	// It names the exact assignment *event* — a generation, not a stable
+	// work-item identity. Assignment authority is fenced per generation:
+	// re-assigning the same item mints new authority, and a credential scoped
+	// to an earlier generation must not survive that. Keying on the item id
+	// would silently outlive the fence.
+	//
+	// A resolver must not treat a nil value as permission to broaden — absent
+	// context means less authority, never more.
+	AssignmentEventID *uuid.UUID
+}
+
+// BearerResolver returns the credential for one HTTP attempt, given the full
+// relation it is for. Tokens are node-local, so a direct attempt and a queue
+// fallback can require different bearers even within a single dispatch.
+//
+// Implementations must not log or persist the returned value, and must source
+// it from supervisor-injected configuration or a sealed secret provider —
+// never from token projections or any other event-backed store. A raw bearer
+// must never reach a registry row, an event payload, a cursor, a queue
+// envelope, a log line, or a command argument.
+//
+// A resolver that cannot satisfy the exact relation requested must fail rather
+// than substitute a broader credential, and must fail closed for that peer
+// alone: one unresolvable peer is not grounds for blocking calls to others.
+type BearerResolver func(ctx context.Context, req CredentialRequest) (string, error)
 
 // Attempt records the outcome of one candidate Deliver tried, for tests and
 // observability. Err is set for a transport failure; StatusCode is set for an

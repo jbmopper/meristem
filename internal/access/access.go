@@ -54,10 +54,72 @@ const (
 	ScopeOAuthClientsBind   = "oauth_clients.bind"
 	ScopeOAuthClientsRevoke = "oauth_clients.revoke"
 
+	// Cross-node scopes gate acting on an object homed on another node. They
+	// are deliberately separate from every local work-item scope: the node's
+	// peer bearer is transport authority, not caller authority, so without an
+	// explicit scope here a narrowly-scoped local actor that learned a
+	// qualified reference would inherit the whole node's remote reach.
+	//
+	// Neither implies the other. Read authority never implies mutation
+	// authority, and mutation authority does not backfill read: an operator
+	// granting one should not silently acquire the other.
+	ScopeCrossNodeWorkItemsRead  = "crossnode.work_items.read"
+	ScopeCrossNodeWorkItemsWrite = "crossnode.work_items.write"
+
 	scopeWorkItemsTreePrefix = "work_items.tree:"
 )
 
 var ErrDenied = errors.New("access: denied")
+
+// RemoteReadAllowed and RemoteMutationAllowed are the two cross-node authority
+// reducers. They are kept separate, rather than one function with a mode flag,
+// so that assignment-bound delegated authority can later narrow either path
+// without changing the other's caller contract.
+//
+// Each decides only the scope half of the cross-node rule. The caller must
+// independently establish that the reference is anchored in an authoritative
+// local record it may already read, and the peer credential must independently
+// authorize the exact operation at the home. All three are required; none
+// substitutes for another.
+//
+// Both are strict on purpose. Neither the root credential nor the
+// legacy-unscoped compatibility path satisfies them, and no local work-item
+// scope implies them. Every other authority in this package answers a question
+// about objects this node owns and can therefore fall back on local
+// projections; these answer a question about another node's objects, where
+// there is nothing local to bound the blast radius. An operator granting
+// cross-node reach should have to say so, once, in the token.
+func RemoteReadAllowed(actor domain.Token) bool {
+	return crossNodeActorEligible(actor) && scopeSet(actor.Scopes)[ScopeCrossNodeWorkItemsRead]
+}
+
+// crossNodeActorEligible is the identity precondition both cross-node reducers
+// share. Holding the exact scope string is necessary but not sufficient: the
+// scope has to be attached to a credential that could legitimately carry it.
+//
+//   - A nil id is an unidentified actor. Cross-node authority is a relation
+//     between two named parties; there is no such relation for a caller this
+//     node cannot name.
+//   - Root mints and revokes tokens. It is not a work credential, and letting
+//     it carry cross-node reach — even when explicitly scoped — reinstates the
+//     "broad authority held implicitly" shape these scopes exist to remove.
+//   - A revoked token is not a credential at all. Scope checks that ignore
+//     revocation are how a withdrawn token keeps working.
+//
+// Source is deliberately NOT constrained. Agent and system actors are exactly
+// who performs cross-node execution; requiring a human source here would make
+// the scope unusable for its purpose.
+func crossNodeActorEligible(actor domain.Token) bool {
+	return actor.ID != uuid.Nil && !actor.IsRoot && actor.RevokedAt == nil
+}
+
+// RemoteMutationAllowed reports cross-node write authority. Passing it is
+// necessary and not sufficient: the actor must also pass the ordinary local
+// mutation reducer for the anchored operation, because a cross-node scope
+// widens where an action may land, never what the actor may do.
+func RemoteMutationAllowed(actor domain.Token) bool {
+	return crossNodeActorEligible(actor) && scopeSet(actor.Scopes)[ScopeCrossNodeWorkItemsWrite]
+}
 
 // CanBindOAuthClient and CanRevokeOAuthClient are intentionally strict: the
 // legacy unscoped-token compatibility path does not apply to provider client
