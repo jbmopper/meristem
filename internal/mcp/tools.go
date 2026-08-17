@@ -214,31 +214,12 @@ func (s *Server) toolBacklogReadiness() Tool {
 				Limit: 0,
 				AsOf:  time.Now().UTC(),
 			})
-			if isProviderSafeContext(ctx) {
-				summary = providerSafeReadinessSummary(summary)
-			}
+			// Provider-facing reduction happens centrally at the HTTP boundary
+			// (renderProviderSafe); the handler always returns the ordinary
+			// summary. See provider_render.go.
 			return summary, nil
 		},
 	}
-}
-
-// providerSafeReadinessSummary strips the free-form state reason from every
-// classified item. backlog.readiness emits backlog.Item rather than the
-// provider-safe work-item DTO, so the state_reason omission the other read
-// tools get from providerSafeWorkItemDTO must be applied here explicitly.
-func providerSafeReadinessSummary(summary backlog.Summary) backlog.Summary {
-	for _, group := range []*[]backlog.Item{
-		&summary.Groups.V1Substrate,
-		&summary.Groups.ReadyNext,
-		&summary.Groups.Blockers,
-		&summary.Groups.Running,
-		&summary.Groups.StaleNoise,
-	} {
-		for i := range *group {
-			(*group)[i].StateReason = nil
-		}
-	}
-	return summary
 }
 
 func (s *Server) toolProjectionsList() Tool {
@@ -596,12 +577,8 @@ func (s *Server) toolFeedRead() Tool {
 				if err != nil {
 					return nil, err
 				}
-				if isProviderSafeContext(ctx) {
-					return map[string]any{
-						"contract": feed.ProviderSafeContract,
-						"items":    feed.ProjectProviderSafeItems(items),
-					}, nil
-				}
+				// Provider-facing reduction to provider_safe_feed.v1 happens
+				// centrally at the HTTP boundary (renderProviderSafe).
 				return map[string]any{"items": items}, nil
 			}
 			var wait time.Duration
@@ -643,17 +620,14 @@ func (s *Server) toolFeedRead() Tool {
 			if err != nil {
 				return nil, err
 			}
-			responseItems := any(page.Items)
-			response := map[string]any{
-				"items":       responseItems,
+			// Provider-facing reduction to provider_safe_feed.v1 (including the
+			// contract tag) happens centrally at the HTTP boundary
+			// (renderProviderSafe); the watcher page keys are preserved there.
+			return map[string]any{
+				"items":       page.Items,
 				"next_cursor": page.NextCursor,
 				"has_more":    page.HasMore,
-			}
-			if isProviderSafeContext(ctx) {
-				response["contract"] = feed.ProviderSafeContract
-				response["items"] = feed.ProjectProviderSafeItems(page.Items)
-			}
-			return response, nil
+			}, nil
 		},
 	}
 }
@@ -759,17 +733,9 @@ func (s *Server) toolWorkItemsList() Tool {
 			if err != nil {
 				return nil, err
 			}
+			// Provider-facing reduction to provider_safe_work_items.v1 happens
+			// centrally at the HTTP boundary (renderProviderSafe).
 			out := make([]workItemDTO, 0, len(items))
-			if isProviderSafeContext(ctx) {
-				safe := make([]providerSafeWorkItemDTO, 0, len(items))
-				for _, item := range items {
-					safe = append(safe, toProviderSafeWorkItemDTO(item))
-				}
-				return map[string]any{
-					"contract": ProviderSafeWorkItemsContract,
-					"items":    safe,
-				}, nil
-			}
 			for _, item := range items {
 				out = append(out, toWorkItemDTO(item))
 			}
@@ -809,12 +775,8 @@ func (s *Server) toolWorkItemsGet() Tool {
 				}
 				return nil, err
 			}
-			if isProviderSafeContext(ctx) {
-				return map[string]any{
-					"contract":  ProviderSafeWorkItemsContract,
-					"work_item": toProviderSafeWorkItemDTO(item),
-				}, nil
-			}
+			// Provider-facing reduction to provider_safe_work_items.v1 happens
+			// centrally at the HTTP boundary (renderProviderSafe).
 			return map[string]any{"work_item": toWorkItemDTO(item)}, nil
 		},
 	}
@@ -1724,20 +1686,6 @@ func toWorkItemDTO(item domain.WorkItem) workItemDTO {
 		SuggestedConvergenceChecks: item.SuggestedConvergenceChecks,
 		HumanReviewStatus:          item.HumanReviewStatus,
 		CreatedBy:                  item.CreatedBy,
-		CreatedAt:                  item.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
-		StateEnteredAt:             item.StateEnteredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
-		UpdatedAt:                  item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
-	}
-}
-
-func toProviderSafeWorkItemDTO(item domain.WorkItem) providerSafeWorkItemDTO {
-	return providerSafeWorkItemDTO{
-		ID:                         item.ID,
-		Title:                      item.Title,
-		Body:                       item.Body,
-		State:                      item.State,
-		SuggestedConvergenceChecks: item.SuggestedConvergenceChecks,
-		HumanReviewStatus:          item.HumanReviewStatus,
 		CreatedAt:                  item.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		StateEnteredAt:             item.StateEnteredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 		UpdatedAt:                  item.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),

@@ -359,6 +359,10 @@ func (s *Server) handleCallTool(ctx context.Context, actor domain.Token, raw jso
 			// distinction is "the transport worked, the tool didn't".
 			return toolErrorResult(err.Error()), nil
 		}
+		result, err = renderProviderSafe(ctx, tool.Name, result)
+		if err != nil {
+			return toolErrorResult(err.Error()), nil
+		}
 		return toolSuccessResult(result), nil
 	}
 	result, err := s.handleIdempotentMutationTool(ctx, actor, tool, params.Arguments)
@@ -385,11 +389,21 @@ func (s *Server) handleIdempotentMutationTool(ctx context.Context, actor domain.
 			payload, err := tool.Handler(callCtx, actor, arguments)
 			status := http.StatusOK
 			var toolResult map[string]any
-			if err != nil {
+			switch {
+			case err != nil:
 				status = mutationToolErrorStatus(err)
 				toolResult = toolErrorResult(err.Error())
-			} else {
-				toolResult = toolSuccessResult(payload)
+			default:
+				// The same central provider-safe reduction as read tools,
+				// applied before the result is pinned under the caller's
+				// idempotency key so replays return the reduced shape too.
+				rendered, rerr := renderProviderSafe(callCtx, tool.Name, payload)
+				if rerr != nil {
+					status = mutationToolErrorStatus(rerr)
+					toolResult = toolErrorResult(rerr.Error())
+				} else {
+					toolResult = toolSuccessResult(rendered)
+				}
 			}
 			encoded, err := json.Marshal(toolResult)
 			if err != nil {

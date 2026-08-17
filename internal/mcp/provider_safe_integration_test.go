@@ -163,7 +163,10 @@ func TestProviderSafeHTTPContextAllVersusTreeAndNoEventPayloadLeakage(t *testing
 
 func providerHTTPToolText(t *testing.T, s *Server, actor domain.Token, name string, args map[string]any) string {
 	t.Helper()
-	return providerHTTPToolTextWithOptions(t, s, actor, name, args, HTTPOptions{AllowedTools: ReadOnlyHTTPTools()})
+	// Drive reads off the production read profile (ProviderSafeReadHTTPProfile)
+	// rather than the narrower ReadOnlyHTTPTools set, so this test exercises the
+	// exact four-tool surface the API wires for provider read grants.
+	return providerHTTPToolTextWithOptions(t, s, actor, name, args, HTTPOptions{Profile: ProviderSafeReadHTTPProfile()})
 }
 
 func providerHTTPToolTextWithOptions(t *testing.T, s *Server, actor domain.Token, name string, args map[string]any, opts HTTPOptions) string {

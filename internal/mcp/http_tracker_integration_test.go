@@ -118,6 +118,72 @@ func TestProviderTrackerHTTPMutationIdempotencyIntegration(t *testing.T) {
 	}
 }
 
+// TestProviderTrackerHTTPMutationResponsesAreProviderSafeIntegration proves the
+// central renderer reduces tracker mutation responses too: create and
+// transition echo a work_item DTO, so without the boundary renderer they would
+// return created_by (the provider actor) and state_reason (the caller's
+// transition reason) across the provider surface — the same fields the read
+// boundary omits.
+func TestProviderTrackerHTTPMutationResponsesAreProviderSafeIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newMCPIntegrationPool(t)
+	if err := storage.Migrate(ctx, pool, discardLogger()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	writer := app.NewEventWriter()
+	authSvc := auth.NewService(pool, writer)
+	rootResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "mutation-safe-root", IsRoot: true, Source: domain.SourceHuman})
+	if err != nil {
+		t.Fatalf("create root token: %v", err)
+	}
+	actorResult, err := authSvc.CreateToken(ctx, auth.CreateTokenInput{Name: "mutation-safe-agent", Source: domain.SourceAgent, Actor: &rootResult.Token})
+	if err != nil {
+		t.Fatalf("create agent token: %v", err)
+	}
+	actor := actorResult.Token
+	s := New(Deps{
+		Idempotency: idempotency.NewMiddleware(pool, writer),
+		WorkItems:   workitems.NewService(pool, writer),
+	}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	profile := ProviderTrackerHTTPProfile()
+
+	created := callHTTPTool(t, s, actor, profile, "work_items.create", map[string]any{
+		"title":                        "safe mutation item",
+		"body":                         "safe coordination only",
+		"human_review_status":          "blocked",
+		"suggested_convergence_checks": []string{"event:owner_tracker_reviewed"},
+		"idempotency_key":              "create-safe",
+	})
+	if created.IsError || created.TransportError != "" {
+		t.Fatalf("create failed: %+v", created)
+	}
+	if !strings.Contains(created.Text, "work_item_id") {
+		t.Fatalf("create response dropped work_item_id: %s", created.Text)
+	}
+	for _, leaked := range []string{"created_by", "state_reason"} {
+		if strings.Contains(created.Text, leaked) {
+			t.Fatalf("create response leaked %q: %s", leaked, created.Text)
+		}
+	}
+
+	id := createdWorkItemID(t, created.Text)
+	canceled := callHTTPTool(t, s, actor, profile, "work_items.transition", map[string]any{
+		"id":              id.String(),
+		"to":              string(domain.WorkItemCanceled),
+		"reason":          "PRIVATE-TRANSITION-REASON",
+		"idempotency_key": "cancel-safe",
+	})
+	if canceled.IsError || canceled.TransportError != "" {
+		t.Fatalf("transition failed: %+v", canceled)
+	}
+	for _, leaked := range []string{"PRIVATE-TRANSITION-REASON", "state_reason", "created_by"} {
+		if strings.Contains(canceled.Text, leaked) {
+			t.Fatalf("transition response leaked %q: %s", leaked, canceled.Text)
+		}
+	}
+}
+
 func TestProviderTrackerHTTPHiddenCallsHaveNoDurableEffectsIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := newMCPIntegrationPool(t)

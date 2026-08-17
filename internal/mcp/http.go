@@ -69,8 +69,12 @@ func (s *Server) HandleHTTPMessage(ctx context.Context, raw []byte, actor domain
 func (s *Server) HandleHTTPMessageWithOptions(ctx context.Context, raw []byte, actor domain.Token, opts HTTPOptions) HTTPResponse {
 	// The API's provider route always supplies a non-nil allowlist or an
 	// explicit profile. Treat either as both a tool filter and a response-data
-	// boundary so a future tool cannot accidentally return the ordinary raw
-	// event/work-item DTO through /mcp.
+	// boundary: the context marks every downstream call provider-safe, so
+	// renderProviderSafe rewrites the response through the tool's registered
+	// provider-safe renderer and checkHTTPToolAllowed refuses any allowlisted
+	// tool that lacks one. A future tool added to a provider profile therefore
+	// cannot return the ordinary raw event/work-item DTO through /mcp; it fails
+	// closed until a renderer is registered in provider_render.go.
 	if opts.AllowedTools != nil || opts.Profile != nil {
 		ctx = withProviderSafeContext(ctx)
 	}
@@ -166,7 +170,10 @@ func (s *Server) handleListToolsFiltered(actor domain.Token, opts HTTPOptions) (
 	filtered := make([]httpToolDescriptor, 0, len(descs))
 	for _, desc := range descs {
 		canonical := s.canonicalToolName(desc.Name)
-		if allowed[canonical] {
+		// A restricted (provider-facing) surface omits any allowlisted tool
+		// that has no registered provider-safe renderer, so tools/list never
+		// advertises a tool that tools/call would fail closed on.
+		if allowed[canonical] && hasProviderSafeRenderer(canonical) {
 			filtered = append(filtered, httpToolDescriptor{
 				toolDescriptor: desc,
 				Annotations:    httpAnnotationsForTool(s.toolsByName[canonical]),
@@ -190,6 +197,12 @@ func (s *Server) checkHTTPToolAllowed(raw json.RawMessage, opts HTTPOptions) *rp
 	canonical := s.canonicalToolName(params.Name)
 	if !allowed[canonical] {
 		return rpcErrorf(errCodeMethodNotFound, "tool not enabled on this HTTP MCP profile: "+params.Name)
+	}
+	// Fail closed on the response boundary: an allowlisted tool without a
+	// registered provider-safe renderer would serialize its ordinary operator
+	// DTO, so reject the call deterministically before any handler runs.
+	if !hasProviderSafeRenderer(canonical) {
+		return rpcErrorf(errCodeMethodNotFound, "tool has no registered provider-safe response renderer: "+params.Name)
 	}
 	if err := opts.Profile.validate(canonical, params.Arguments); err != nil {
 		return rpcErrorf(errCodeInvalidParams, err.Error())

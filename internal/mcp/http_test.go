@@ -362,6 +362,63 @@ func TestHandleHTTPMessageWithOptionsEmptyAllowlistAdvertisesNoTools(t *testing.
 	}
 }
 
+// TestProviderProfilesHaveRegisteredRenderers derives from the production
+// provider profiles and asserts every advertised tool has a registered
+// provider-safe renderer. This is the structural coverage that stops a future
+// tool from being added to a provider profile without a renderer, which the
+// boundary would otherwise fail closed on at call time.
+func TestProviderProfilesHaveRegisteredRenderers(t *testing.T) {
+	profiles := map[string]*HTTPToolProfile{
+		"provider-safe-read": ProviderSafeReadHTTPProfile(),
+		"provider-tracker":   ProviderTrackerHTTPProfile(),
+	}
+	for label, profile := range profiles {
+		for name := range profile.allowedTools {
+			if !hasProviderSafeRenderer(name) {
+				t.Errorf("%s advertises %q with no registered provider-safe renderer", label, name)
+			}
+		}
+	}
+}
+
+// TestProviderProfileFailsClosedOnUnregisteredRenderer adds a real tool with no
+// registered renderer to a provider-facing profile and proves the boundary
+// fails closed: tools/call returns a deterministic error before dispatch and
+// tools/list omits the tool, so its ordinary DTO can never be serialized.
+func TestProviderProfileFailsClosedOnUnregisteredRenderer(t *testing.T) {
+	s := New(Deps{}, ServerInfo{Name: "meristem-test", Version: "test"}, nil)
+	actor := domain.Token{ID: uuid.New(), Source: domain.SourceHuman}
+
+	const unregistered = "deterministic_errors.list"
+	if hasProviderSafeRenderer(unregistered) {
+		t.Fatalf("test precondition: %s must have no registered renderer", unregistered)
+	}
+	profile := &HTTPToolProfile{
+		name:         "unregistered-render-test",
+		allowedTools: toolSet(unregistered),
+	}
+
+	call := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"`+unregistered+`","arguments":{}}}`),
+		actor,
+		HTTPOptions{Profile: profile},
+	)
+	if !strings.Contains(string(call.Body), "no registered provider-safe response renderer") {
+		t.Fatalf("unregistered tool was not rejected before dispatch: %s", call.Body)
+	}
+
+	list := s.HandleHTTPMessageWithOptions(
+		context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":13,"method":"tools/list"}`),
+		actor,
+		HTTPOptions{Profile: profile},
+	)
+	if strings.Contains(string(list.Body), unregistered) {
+		t.Fatalf("unregistered tool was advertised by tools/list: %s", list.Body)
+	}
+}
+
 func TestAcceptsStreamableHTTPPostRequiresJSONAndSSE(t *testing.T) {
 	if !AcceptsStreamableHTTPPost("application/json, text/event-stream") {
 		t.Fatal("expected application/json + text/event-stream to be accepted")
