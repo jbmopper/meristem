@@ -72,14 +72,31 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 	var actorID uuid.UUID
 	var expires time.Time
 	var redeemed *time.Time
-	err = tx.QueryRow(ctx, `SELECT code_id,client_id,redirect_uri,code_challenge,code_challenge_method,scope,resource,actor_token_id,authority_profile,expires_at,redeemed_at FROM oauth_authorization_codes WHERE code_hash=$1 FOR UPDATE`, hash).Scan(&codeID, &clientID, &redirectURI, &challenge, &challengeMethod, &scope, &resource, &actorID, &authorityProfile, &expires, &redeemed)
+	var priorGrantID *uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT code_id,client_id,redirect_uri,code_challenge,code_challenge_method,scope,resource,actor_token_id,authority_profile,expires_at,redeemed_at,grant_id FROM oauth_authorization_codes WHERE code_hash=$1 FOR UPDATE`, hash).Scan(&codeID, &clientID, &redirectURI, &challenge, &challengeMethod, &scope, &resource, &actorID, &authorityProfile, &expires, &redeemed, &priorGrantID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TokenPair{}, fmt.Errorf("%w: unknown code", ErrInvalidGrant)
 	}
 	if err != nil {
 		return TokenPair{}, err
 	}
-	if redeemed != nil || !s.now().UTC().Before(expires) || in.ClientID != clientID || in.RedirectURI != redirectURI {
+	now := s.now().UTC()
+	if redeemed != nil {
+		// The code was already redeemed: this is a replay. RFC 6749 §4.1.2 says
+		// the server SHOULD revoke the tokens issued from the first redemption,
+		// since a second presentation means the code leaked. Revoke that grant,
+		// then return the identical ErrInvalidGrant every other rejection below
+		// returns so a replay is indistinguishable from an expired code or a
+		// binding mismatch — the revocation changes neither the error shape.
+		if err := s.revokeReplayedCodeGrant(ctx, tx, systemActor, priorGrantID, now); err != nil {
+			return TokenPair{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return TokenPair{}, err
+		}
+		return TokenPair{}, fmt.Errorf("%w: code expired, used, or binding mismatch", ErrInvalidGrant)
+	}
+	if !now.Before(expires) || in.ClientID != clientID || in.RedirectURI != redirectURI {
 		return TokenPair{}, fmt.Errorf("%w: code expired, used, or binding mismatch", ErrInvalidGrant)
 	}
 	if err := verifyStoredS256(in.CodeVerifier, challenge, challengeMethod); err != nil {
@@ -115,11 +132,12 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 	if err != nil {
 		return TokenPair{}, err
 	}
-	now := s.now().UTC()
 	accessExpires := now.Add(AccessTokenTTL)
 	refreshExpires := now.Add(RefreshTokenTTL)
 	grantID := uuid.New()
-	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationCode, SubjectID: CodeSubjectID(codeID), Kind: domain.EventOAuthAuthorizationCodeRedeemed, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: redeemedPayload{PayloadVersion: 1, CodeID: codeID, RedeemedAtUnix: now.Unix()}})
+	// The redeemed event carries the grant it mints so a later replay of this
+	// code can look up and revoke that grant (RFC 6749 §4.1.2).
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthAuthorizationCode, SubjectID: CodeSubjectID(codeID), Kind: domain.EventOAuthAuthorizationCodeRedeemed, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: redeemedPayload{PayloadVersion: 1, CodeID: codeID, RedeemedAtUnix: now.Unix(), GrantID: grantID}})
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -131,6 +149,31 @@ func (s *TokenService) ExchangeCode(ctx context.Context, in RedeemInput) (TokenP
 		return TokenPair{}, err
 	}
 	return TokenPair{AccessToken: access, RefreshToken: refresh, TokenType: "Bearer", ExpiresIn: int(accessExpires.Sub(now).Seconds()), Scope: scope}, nil
+}
+
+// revokeReplayedCodeGrant revokes the grant minted from the first redemption of
+// a now-replayed authorization code, mirroring the refresh-reuse revocation in
+// Refresh. It emits at most one oauth_grant.revoked per grant: an
+// already-revoked or missing grant is a no-op, so repeated replays never append
+// duplicate revocations. priorGrantID is NULL for codes redeemed before the
+// code→grant link existed, in which case there is nothing to revoke.
+func (s *TokenService) revokeReplayedCodeGrant(ctx context.Context, tx pgx.Tx, systemActor domain.Token, priorGrantID *uuid.UUID, now time.Time) error {
+	if priorGrantID == nil || *priorGrantID == uuid.Nil {
+		return nil
+	}
+	var revoked *time.Time
+	err := tx.QueryRow(ctx, `SELECT revoked_at FROM oauth_grants WHERE id=$1 FOR UPDATE`, *priorGrantID).Scan(&revoked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if revoked != nil {
+		return nil
+	}
+	_, _, err = s.writer.Append(ctx, tx, events.Spec{SubjectKind: domain.SubjectOAuthGrant, SubjectID: *priorGrantID, Kind: domain.EventOAuthGrantRevoked, Source: domain.SourceSystem, ActorTokenID: &systemActor.ID, Payload: map[string]any{"payload_version": 1, "grant_id": *priorGrantID, "revoked_at_unix": now.Unix(), "reason": "authorization_code_replay"}})
+	return err
 }
 
 func (s *TokenService) Refresh(ctx context.Context, secret, clientID string) (TokenPair, error) {

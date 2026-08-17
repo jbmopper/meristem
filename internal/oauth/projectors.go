@@ -505,12 +505,18 @@ func applyCodeRedeemedV1(ctx context.Context, tx pgx.Tx, event domain.Event) err
 		return fmt.Errorf("oauth_authorization_code.redeemed: code_id/redeemed_at_unix required and subject_id must match code_id")
 	}
 	redeemedAt := time.Unix(p.RedeemedAtUnix, 0).UTC()
-	// COALESCE keeps the first redemption's timestamp on replay.
+	// grantID is the grant minted from this redemption; NULL for codes redeemed
+	// before the link existed. COALESCE keeps the first redemption's timestamp
+	// and grant link on replay.
+	var grantID any
+	if p.GrantID != uuid.Nil {
+		grantID = p.GrantID
+	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE oauth_authorization_codes
-		SET redeemed_at = COALESCE(redeemed_at, $2), updated_at = $2
+		SET redeemed_at = COALESCE(redeemed_at, $2), grant_id = COALESCE(grant_id, $3), updated_at = $2
 		WHERE code_id = $1
-	`, p.CodeID, redeemedAt)
+	`, p.CodeID, redeemedAt, grantID)
 	return requireOneRow(domain.EventOAuthAuthorizationCodeRedeemed, "oauth_authorization_codes dependency", tag, err)
 }
 

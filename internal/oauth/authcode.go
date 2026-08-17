@@ -76,11 +76,14 @@ type issuedPayload struct {
 }
 
 // redeemedPayload is the structural payload of an
-// oauth_authorization_code.redeemed event.
+// oauth_authorization_code.redeemed event. GrantID records the grant minted
+// from this redemption so a later code replay can revoke that grant (RFC 6749
+// §4.1.2). It is omitted for codes redeemed before the link existed.
 type redeemedPayload struct {
-	PayloadVersion int    `json:"payload_version"`
-	CodeID         string `json:"code_id"`
-	RedeemedAtUnix int64  `json:"redeemed_at_unix"`
+	PayloadVersion int       `json:"payload_version"`
+	CodeID         string    `json:"code_id"`
+	RedeemedAtUnix int64     `json:"redeemed_at_unix"`
+	GrantID        uuid.UUID `json:"grant_id,omitempty"`
 }
 
 // ValidateCodeChallenge checks a PKCE code_challenge from an authorize request.
