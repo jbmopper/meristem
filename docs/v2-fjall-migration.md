@@ -229,11 +229,67 @@ lean on SQL for it:
   latency floor and idle query load disappear. Keep the bounded-wait cap
   and the "from now" head-bootstrap semantics as-is.
 
+## In-process reads and pushes
+
+The mpsc appender serializes *writes only* — seq allocation, dedupe
+check-then-write, fold atomicity. Reads and pushes have their own story:
+
+**Reads never queue behind the appender.** fjall handles are thread-safe
+and cheaply clonable; handlers read directly against memtable + SSTs while
+the appender commits. Two disciplines replace what Postgres did silently:
+
+- *Snapshot rule*: a single point-get reads live; any read touching two or
+  more keys that must agree (document + its index, feed page assembly, a
+  fold-at-read view like backlog readiness) takes a snapshot at the
+  current instant and reads through it (the `Readable` trait). Postgres
+  gave every SQL statement one MVCC snapshot; naive multi-gets can
+  interleave with an appender commit. Snapshots pin a sequence number and
+  are cheap, so the rule can be universal.
+- *Blocking rule*: fjall reads are synchronous and can touch disk; route
+  all storage access through `spawn_blocking` (or a dedicated read pool)
+  rather than tokio's async executor. Uniformity beats per-call-site
+  judgment; overhead is noise at our volumes.
+
+Read-your-writes holds across the API for free: the appender's oneshot
+reply arrives only after batch commit, so a 201 happens-before any
+subsequent read by the caller.
+
+**Pushes: channels are doorbells, the log is the data.** No events travel
+through channels; consumers own a cursor, a push only says "head moved."
+The appender publishes head-seq on a `tokio::sync::watch` after each
+commit. `watch` (not `broadcast`) is correct precisely because it
+coalesces to the latest value — consumers re-scan from their own cursor,
+so merged or missed wakeups are harmless, and the at-least-once +
+dedupe-by-event-id contract is untouched. Feed long-poll: scan after
+cursor; if empty, `select!` on `watch.changed()` vs deadline; re-scan on
+wake (subscribe before concluding emptiness — standard condition-variable
+discipline against lost wakeups). SSE: same loop, streaming; both v1 poll
+ticks (`pollTick`, `ssePollInterval`) die. The worker selects over the
+same head watch plus its own deadline timer (next patience budget or
+lease expiry), keeping a coarse periodic full `ScanOnce` as self-healing
+and `worker --once` as the unchanged verification path. MCP assistants
+still pull `feed.read` with a cursor — only the server side of that poll
+changes from ticking to waiting.
+
+**Group commit, per-request semantics.** Batching amortizes fsync, but
+replies are per-request and fold errors isolate per request: each append
+folds into its own sub-batch before merging into the shared journal
+write, so one bad projector rejects one request (v1's per-tx abort
+semantics), while an I/O failure at commit fails the whole group
+consistently — nothing durable, everyone errors.
+
 ## The process-topology fork (the real decision)
 
 fjall is embedded: one process owns the files (3.0 even enforces it with
 file locking). v1's topology is **three processes sharing Postgres** —
-`api`, `worker`, `mcp` (stdio). v2 must pick:
+`api`, `worker`, `mcp` (stdio). The merge is less dramatic than it
+sounds: all three are thin transports over one shared, transport-agnostic
+service layer (`internal/mcp/server.go` documents its deps as "the same
+services the HTTP transport calls into … one more translation layer,
+never an alternate execution path"). `api` is the HTTP driver, `worker`
+is a timer driver around `ScanOnce`, `mcp` is a stdio driver — three
+drivers, one core. In v2 they become three tokio tasks over the same
+Rust service layer; the factoring ports directly. v2 must pick:
 
 1. **One process** — api + worker + MCP-over-HTTP as tasks in one tokio
    runtime; the stdio MCP transport becomes a thin proxy speaking to the
